@@ -4987,3 +4987,127 @@ remains queued; Jobs1-5 accepted and cancelled sorter Job6 unchanged.
 
 NATIVE DELIVERY HANDOFF - 2026-11-01
 The reviewed eight-path cleanup commit and protected push are being finalized from native PowerShell after sandbox staging was denied. Existing cleanup and passing checks are retained; no cleanup or feature tests repeated. Actual commit SHA and fresh remote equality are reported in the terminal. Journal/Dropbox correction remains queued.
+
+
+CRYPTO NUMBER / OCTOBER FOLDER REPAIR - 2026-11-01 - PREPARED, NOT INSTALLED
+Cleanup accepted/delivered at02729017233b17c1cc384a3b51889584c454f22c per user
+native transcript/current equality; supersedes historical cleanup delivery/queue hold.
+Jobs1-5 accepted; sorter Job6 stays CANCELLED. Current baseline master0272901, index
+empty, authorized source/test/workbook targets initially clean. Unrelated dirty work
+preserved. AGENTS/custom instructions/cleanup implementation unchanged.
+
+One bounded scoped capture completed1.5060813sec: current workbook1569 stable rows,
+affected canonical JSON/SQL/allocation/acceptance records and only relevant October
+Dropbox crypto folder metadata/streamed content hashes. No broad archive recapture,
+Downloads/broker/API/import/resync or database/cache backup. Exact reservation and
+container-shape identity checks used captured source revisions; no broad recapture.
+Root corroborated by registry/saved links: configured Dropbox CRYPTO/2026/OCTOBER;
+no highest-number Documents/repo fallback. Current chronology/proposed disposition:
+BTCUSDT2026-10-18 09:21:51 C379->C379: create its correct original-owner folder.
+QUSDT2026-10-18 20:38:05 C379->C380: move owned content379->380.
+QUSDT2026-10-19 17:05:12 C380->C381: move owned content380->381.
+TREEUSDT2026-10-24 20:48:54 C382->C382: folder/link unchanged.
+WETUSDT2026-10-24 21:16:07 C383->C383: folder/link unchanged.
+DOODUSDT2026-10-27 17:22:33 C385->C384: move owned folder385->384.
+LUMIA C378/earlier/Forex/Test eligibility unchanged; the later Oct18 BTC row is Test
+and remains blank. Demo alone does not mean Test. All unaffected rows checked for
+number collisions from captured workbook, not current wrong labels/display order.
+
+User explicitly confirmed ETH cancelled and authorized retiring ONLY its conflicting
+C384 reservation with audit provenance. Preserve owner/order aliases, financial/Test
+fields and original values in retired_from; set allocation number/folder null and
+status retired_cancelled. Flag only its exact early-folder request as retired so
+refresh cannot recreate it. Unrelated BTW C386 reservation remains unchanged; no
+global counter reset/recycling. Original C381 is a duplicate Q2 marker-only scaffold;
+original C384 has only the cancelled ETH owner marker. Remove only these two verified
+generated scaffolds. Three folder renames use unique temporary siblings; all chart/
+note/nested/hidden-marker bytes preserved. Create correct BTC379 with existing owner.
+
+Canonical changes: stable Bybit execution-row aliases for workbook-authoritative
+allocation matching; optional bounded allocation lock; retired-request guards;
+explicit chronology maintenance planner; exact existing-cell/link package patch and
+audit. No automatic history renumber-on-refresh. Existing folder repair CLI extended
+with explicit digest-bound number-plan mode; accepted C377 default unchanged. Reuse
+actual journal OS gate functions by narrow AST extraction, without importing/starting
+service, then allocation lock; consistent journal->allocation order and bounded waits.
+Sparse before-images/ownership-checked rollback cover folders, three JSON stores,
+six exact SQL trade records and workbook; no financial/history/metrics changes.
+Plan has23 exact JSON field changes, six SQL records, three cell/link changes.
+Ordinary view-cache fingerprints include workbook/JSON source revisions; only this
+crypto-root path cache is invalidated. No whole-cache mutation/backup necessary.
+
+Original live workbook remains UNMODIFIED; captured bytes match original HEAD blob:
+70adbac46b4637de2e7e1ca58d5da455996e7b077a3ba60307c4e42feec874aa.
+Validated private candidate9e41caeaba8fc7559e1c830db45059ba69eb194cdbe1770607f47e096c4edd9f.
+Only A4/A7/A9 number values and existing links change. Existing hyperlink nodes
+replaced, shared relationships cloned, ZipInfo copied. Exact allowed-change audit
+preserves all other worksheet/package payloads, values/formulas/cached results,
+comments/validations/views/styles/dimensions/charts/names/Counter Trend/sheet order.
+No openpyxl save/rebuild/recalculation of real book.
+
+Verification: invocation1 exit1/2.9183588sec, two fixture-assumption
+failures (preserved_existing result key; self-closing formula-cache XML). Corrected
+fixtures/assertions without weakening checks. Invocation2 exit1/3.7529026sec:
+identity/chronology/refresh and existing-link/shared-rel/package nodes PASS; transaction
+node failed before mutation because registry's existing folder field was omitted
+from its allowed-field guard. Corrected only that guard, restricted to allocation
+registry filename. User authorized ONE extra invocation of only failed transaction
+node; invocation3 exit0/17.9677321sec, PASS/normal completed JUnit body.
+Demonstrated collision refusal before mutation, rollback after staged rename, rollback
+after SQL commit, exact record/content/workbook preservation, committed idempotence.
+Cumulative3 distinct nodes/3 invocations/6 executions; child time24.6389935sec.
+No unchanged passing-node rerun; no further tests authorized. Post-test change only
+narrows cache invalidation to this crypto root; syntax/static review recorded.
+
+PRODUCTION0/1; native install/readback/manual acceptance PENDING. No speculative
+apply, sandbox staging/helper/push or known-denied .git operation attempted. Actual
+journal gate is in read-only .git and Dropbox writes exceed this session's writable
+root. No policy/ACL/identity/credential/helper changes or workaround. One guarded
+native handoff verifies immutable plan/source pins, actual saved-user identity,
+base/origins/revisions, then unchanged protected verify BEFORE task commit (this is
+an authenticated NO-OP PUSH of EXISTING0272901, not read-only). It performs one exact
+install, records actual outcome in this summary before exact five-path/path-only
+commit, inspects commit and preserved unrelated staging, then protected push ONCE.
+Require completed output/fresh CURRENT local-remote equality at NEW task SHA; no
+source-only work called installed/delivered. Stop on any changed source/collision/
+failure/inconclusive timeout; durable claims prevent automatic replay. Native command
+entire ceiling300sec; production receives only remaining command time. Failed apply
+spends its attempt and requires a NEW explicit user message for any retry.
+
+Single original workbook backup reused from capture; sparse JSON/SQL undo, no full
+DB/cache/folder copy. Measured private retained material before this checkpoint
+5897380 bytes; native retained25MiB/combined peak50MiB guard before mutation.
+Exact plan/digest/pins/candidate/original/receipts in managed retained crypto-number-
+repair-20261101; pending native/manual acceptance recovery only. Release redundant
+capture/candidate/source baselines after verified installation/acceptance; retain
+concise result and only unresolved recovery. Own fixture/helper/bytecode housekeeping
+exit0/1.9917717sec: removed82 files/37 empty dirs/1608013 bytes.
+Conservative helper retains73 protected synthetic fixture entries/6397 file bytes;
+exact paths/reasons/release conditions private. No old cleanup repeated.
+
+Budget at checkpoint: accounted active1754.322sec including60sec initial-read
+allowance; cap2400; remaining supports native handoff<=300. Verification900,
+discovery120, ordinary300; capture1/1<=180; production0/1<=300; test node120/invocation
+180. Extra test invocation only as explicitly authorized. Restarts/broker operations/
+installs/builds/MQL/MT5/schedules/subagents0. Carry all counters through continuations.
+Plan digest3a27fed113281a07399764a0a9bef485a939a2713b1d9ed1cca06f72105da404.
+Intended task paths ONLY: tools/master_journal_workbook.py;
+tools/repair_bybit_trade_chart_folder.py; tests/test_bybit_trade_chart_folder_repair.py;
+journal/Trading Journal.xlsx (exact validated candidate); this summary. Binary was
+clean initially; native staging checks exact candidate bytes, refuses any manual delta.
+Private native_handoff.py is the ONE complete current-task handoff, not the old
+cleanup handoff; stops/prints stdout/stderr/real child exits. Actual commit/SHA/push
+receipt follows native execution; none yet. Return completed native output before
+claiming installation/delivery. User acceptance afterward: existing journal numbers
+and matching folder links; no new trade or broker resync. Jobs1-5/Counter Trend/
+commissions preserved, cancelled sorter not restored.
+
+
+CRYPTO NUMBER REPAIR - NATIVE INSTALL COMPLETED / DELIVERY PENDING
+Native worker completed normally: {"elapsed": 11.040290100034326, "folders_created": 1, "folders_moved": 3, "noop": false, "ok": true, "phase": "committed", "scaffolds_removed": 2, "sql_records": 6, "workbook_cells": 3}
+Installed candidate SHA256 9e41caeaba8fc7559e1c830db45059ba69eb194cdbe1770607f47e096c4edd9f; actual ledger: private transaction receipt.
+BTC C379; first QUSDT C380; second QUSDT C381; TREE C382; WET C383; DOOD C384.
+Only cancelled ETH number reservation retired; unrelated BTW C386 preserved.
+Protected verify issued a no-op push of existing 02729017233b17c1cc384a3b51889584c454f22c before this task commit.
+Manual journal/folder-link acceptance pending user review; no new trade/resync required.
+Actual scoped commit/protected-push SHA/current equality reported in native terminal/private receipt.

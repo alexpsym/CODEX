@@ -5212,11 +5212,18 @@ def _trade_allocation_state_path() -> Path:
 
 
 @contextmanager
-def _trade_allocation_lock():
+def _trade_allocation_lock(*, timeout_seconds: float | None = None):
     """One repository-wide lock for early, workbook and repair allocation."""
     path = _trade_allocation_state_path().with_suffix(".lock")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _TRADE_ALLOCATION_THREAD_LOCK, path.open("a+b") as handle:
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    acquired = _TRADE_ALLOCATION_THREAD_LOCK.acquire(
+        timeout=max(0.0, timeout_seconds) if timeout_seconds is not None else -1
+    )
+    if not acquired:
+        raise TimeoutError("Trade allocation thread lock is busy")
+    try:
+      with path.open("a+b") as handle:
         if handle.seek(0, os.SEEK_END) == 0:
             handle.write(b"0")
             handle.flush()
@@ -5228,10 +5235,22 @@ def _trade_allocation_lock():
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                     break
                 except OSError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("Trade allocation OS lock is busy")
                     time.sleep(0.05)
         else:
             import fcntl
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            if deadline is None:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            else:
+                while True:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Trade allocation OS lock is busy")
+                        time.sleep(0.05)
         try:
             yield
         finally:
@@ -5240,6 +5259,8 @@ def _trade_allocation_lock():
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        _TRADE_ALLOCATION_THREAD_LOCK.release()
 
 
 def _load_trade_allocations() -> Dict[str, Any]:
@@ -5293,11 +5314,21 @@ def _trade_folder_identity(row: Mapping[str, Any]) -> Tuple[Tuple[str, ...], set
     """Only exact broker references, scoped to account and market, establish ownership."""
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
     broker = str(row.get("broker") or row.get("source") or "").strip().lower()
+    stable_id = str(row.get("id") or "")
+    # Workbook-authoritative rows retain their execution ID after source parsing
+    # metadata is discarded. Repair bindings live in the existing allocation record.
+    workbook_bybit = broker == "master_journal" and re.fullmatch(
+        r"bybit:(?:demo|live):trade:[A-Z0-9]+:[0-9a-f]+", stable_id
+    )
+    if workbook_bybit:
+        broker = "bybit"
     category = str(row.get("category") or ("forex" if broker == "oanda" else "linear")).lower()
     scope = _trade_folder_scope((broker, str(row.get("account") or ""),
              str(row.get("account_id") or refs.get("account_id") or ""), category,
              str(row.get("instrument") or row.get("symbol") or "").upper()))
     identities: set[str] = set()
+    if workbook_bybit:
+        identities.add("row:" + stable_id)
     for kind, names in (("order", ("order_id", "orderId", "orderID", "opening_order_id")),
                         ("link", ("order_link_id", "orderLinkId", "parentOrderLinkId")),
                         ("trade", ("trade_id", "tradeId", "tradeID"))):
@@ -5317,6 +5348,8 @@ def early_trade_folder_rows(contexts: Sequence[Mapping[str, Any]]) -> List[Dict[
     for context in contexts:
         request = context.get("early_trade_folder_request")
         if not isinstance(request, dict) or not request.get("order_id"):
+            continue
+        if request.get("retired_number_reservation"):
             continue
         row = dict(request)
         overlay = context.get("classification_overrides") or {}
@@ -5476,6 +5509,11 @@ def _assign_trade_numbers_locked(
             continue
         if matches:
             key, record = matches[0]
+            if record.get("status") == "retired_cancelled":
+                # Explicit, audited retirement must not rematerialize scaffolding
+                # from a stale acceptance context or allocate this order again.
+                skipped_root.append(row_id or key)
+                continue
             if existing and not set(_trade_number_aliases(existing)).intersection(_trade_number_aliases(record["trade_number"])):
                 skipped_root.append(row_id or key)
                 continue
@@ -21995,3 +22033,173 @@ def _group_counter_trend_in_memory(ws):
             for cell in row:
                 if cell.data_type=='f':cell.value=_counter_formula(cell.value,mapping,local=sheet is ws)
     for name in ws.parent.defined_names.values():name.attr_text=_counter_formula(name.attr_text,mapping)
+
+
+def plan_crypto_number_correction(rows, boundary_id, *, anchors, allocations):
+    """Explicit maintenance only: stable IDs/entry chronology, never a refresh hook.
+
+    Preserve Test eligibility and unrelated reservations. Conflicting reserved
+    numbers are returned as blockers, never silently recycled or shifted.
+    """
+    by_id = {}
+    for row in rows:
+        rid = str(row.get('id') or '')
+        if not rid or rid in by_id:
+            raise ValueError('Missing or duplicate stable execution identity')
+        by_id[rid] = row
+    if boundary_id not in by_id:
+        raise ValueError('LUMIA boundary identity is missing')
+    boundary = by_id[boundary_id]
+    if str(boundary.get('symbol')) != 'LUMIAUSDT' or boundary.get('trade_number') != 'C378':
+        raise ValueError('LUMIA boundary differs from accepted C378')
+    start = _as_datetime(boundary.get('open_time'))
+    if start is None:
+        raise ValueError('Missing boundary entry time')
+    eligible = []
+    for row in rows:
+        opened = _as_datetime(row.get('open_time'))
+        if (opened and opened > start and _trade_prefix_for_row(row) == 'C'
+                and str(row.get('row_type') or 'trade') == 'trade'
+                and not _is_test_trade_value(row.get('is_test_trade', row.get('test')))):
+            eligible.append((opened, str(row['id']), row))
+    eligible.sort(key=lambda value: (value[0], value[1]))
+    if len({entry[0] for entry in eligible}) != len(eligible):
+        raise ValueError('Entry chronology has a tie; native execution ordering required')
+    edits = [dict(id=rid, symbol=row['symbol'], account=row.get('account'),
+                  open_time=str(row['open_time']), old_number=row.get('trade_number'),
+                  new_number='C'+str(379+i))
+             for i, (_, rid, row) in enumerate(eligible)]
+    mapped = {e['id']:e for e in edits}
+    if not anchors or any(rid not in mapped or mapped[rid]['new_number'] != number for rid,number in anchors.items()):
+        raise ValueError('Execution chronology does not satisfy explicit BTC/Q/DOOD anchors')
+    affected = set(mapped)
+    unaffected = {str(row.get('trade_number')) for row in rows if row['id'] not in affected and row.get('trade_number')}
+    collisions = []
+    for edit in edits:
+        if edit['new_number'] in unaffected:
+            collisions.append(dict(number=edit['new_number'], reason='unaffected workbook execution'))
+        for key,record in allocations.items():
+            if record['trade_number'] != edit['new_number']:
+                continue
+            aliases = set(record.get('identities', []))
+            owned = record.get('row_id') in affected or any('row:'+rid in aliases for rid in affected)
+            if not owned:
+                # The maintenance caller must prove registry bindings separately;
+                # a matching old label is never ownership evidence.
+                collisions.append(dict(number=edit['new_number'], allocation=key,
+                                       owner=record.get('owner'), scope=record.get('scope'),
+                                       reason='unbound allocation reservation'))
+    return dict(edits=edits, conflicts=collisions, boundary_id=boundary_id)
+
+
+def patch_existing_trade_numbers_and_links(source, candidate, updates):
+    """Patch existing Trade Number cells/links only; preserve other package bytes.
+
+    This explicit maintenance primitive is separate from missing-number allocation.
+    Each update requires old_number/old_link/new_number/new_link and stable id_cell/id.
+    The existing hyperlink node is replaced in place; shared relationships are cloned.
+    """
+    from io import BytesIO
+    original = Path(source).read_bytes()
+    ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    rn = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    with zipfile.ZipFile(BytesIO(original)) as zin:
+        sheet = _worksheet_ooxml_part_name(zin, 'Trade Log')
+        relpart = _worksheet_relationship_part_name(sheet)
+        payload = zin.read(sheet).decode('utf-8')
+        relpayload = zin.read(relpart).decode('utf-8')
+        tree = ET.fromstring(payload); reltree = ET.fromstring(relpayload)
+        shared = []
+        if 'xl/sharedStrings.xml' in zin.namelist():
+            shared = [''.join(t.text or '' for t in si.iter(ns+'t')) for si in ET.fromstring(zin.read('xl/sharedStrings.xml'))]
+        def value(cell):
+            if cell.get('t') == 'inlineStr': return ''.join(t.text or '' for t in cell.iter(ns+'t'))
+            v = cell.find(ns+'v'); text = v.text if v is not None else ''
+            return shared[int(text)] if cell.get('t') == 's' else text
+        cells = {c.get('r'):c for c in tree.iter(ns+'c')}
+        links = list(tree.iter(ns+'hyperlink'))
+        rels = {r.get('Id'):r for r in reltree}
+        ids = set(rels)
+        for coord, edit in updates.items():
+            cell = cells.get(coord)
+            if cell is None or value(cell) != str(edit['old_number']):
+                raise ValueError('Trade Number changed: '+coord)
+            if value(cells[edit['id_cell']]) != edit['id']:
+                raise ValueError('Stable row identity changed: '+coord)
+            selected = [h for h in links if h.get('ref') == coord]
+            if len(selected) != 1 or selected[0].get('location'):
+                raise ValueError('Expected one existing external hyperlink: '+coord)
+            rid = selected[0].get(rn+'id'); relationship = rels[rid]
+            if relationship.get('Target') != edit['old_link'] or relationship.get('TargetMode') != 'External':
+                raise ValueError('Existing hyperlink changed: '+coord)
+            cell_pattern = re.compile(r'<c\b(?P<attrs>[^>]*\br="'+re.escape(coord)+r'"[^>]*)>(?P<body>.*?)</c>',re.S)
+            match = cell_pattern.search(payload)
+            if match is None: raise ValueError('Unsupported cell serialization')
+            attrs = re.sub(r'\s+t="[^"]*"', '', match['attrs'])
+            replacement = '<c'+attrs+' t="inlineStr"><is><t>'+_xml_escape(edit['new_number'])+'</t></is></c>'
+            payload = payload[:match.start()]+replacement+payload[match.end():]
+            uses = sum(h.get(rn+'id') == rid for h in links)
+            new_target = _xml_escape(edit['new_link'], {'"':'&quot;'})
+            if uses > 1:
+                n=1
+                while 'rId'+str(n) in ids: n+=1
+                new_id='rId'+str(n);ids.add(new_id)
+                fragment='<Relationship Id="'+new_id+'" Type="'+relationship.get('Type')+'" Target="'+new_target+'" TargetMode="External"/>'
+                relpayload=relpayload.replace('</Relationships>',fragment+'</Relationships>',1)
+                pattern=re.compile(r'<hyperlink\b[^>]*\bref="'+re.escape(coord)+r'"[^>]*/>')
+                found=pattern.search(payload)
+                if found is None:raise ValueError('Unsupported hyperlink serialization')
+                changed=re.sub(r'(?:r:id|[A-Za-z_][\w.-]*:id)="'+re.escape(rid)+'"','r:id="'+new_id+'"',found[0])
+                payload=payload[:found.start()]+changed+payload[found.end():]
+            else:
+                pattern=re.compile(r'<Relationship\b(?=[^>]*\bId="'+re.escape(rid)+r'")[^>]*/>')
+                found=pattern.search(relpayload)
+                if found is None:raise ValueError('Unsupported relationship serialization')
+                changed=re.sub(r'Target="[^"]*"','Target="'+new_target+'"',found[0])
+                relpayload=relpayload[:found.start()]+changed+relpayload[found.end():]
+        with zipfile.ZipFile(candidate,'x') as zout:
+            zout.comment=zin.comment
+            for info in zin.infolist():
+                data=payload.encode() if info.filename==sheet else relpayload.encode() if info.filename==relpart else zin.read(info.filename)
+                zout.writestr(copy(info),data)
+    audit_existing_trade_number_package(original,Path(candidate).read_bytes(),updates)
+    return dict(worksheet=sheet,relationships=relpart,changed_cells=sorted(updates),sha256=hashlib.sha256(Path(candidate).read_bytes()).hexdigest())
+
+
+def audit_existing_trade_number_package(original, candidate, updates):
+    """Compare all ZIP payloads; normalize only the precise declared cell/link edits."""
+    from io import BytesIO
+    ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    rn='{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    with zipfile.ZipFile(BytesIO(original)) as before,zipfile.ZipFile(BytesIO(candidate)) as after:
+        assert before.namelist()==after.namelist() and before.comment==after.comment
+        part=_worksheet_ooxml_part_name(before,'Trade Log');rp=_worksheet_relationship_part_name(part)
+        for name in before.namelist():
+            if name not in (part,rp):assert before.read(name)==after.read(name),name
+        old=ET.fromstring(before.read(part));new=ET.fromstring(after.read(part))
+        oldcells={x.get('r'):x for x in old.iter(ns+'c')};newcells={x.get('r'):x for x in new.iter(ns+'c')}
+        oldlinks=list(old.iter(ns+'hyperlink'));newlinks=list(new.iter(ns+'hyperlink'))
+        a=ET.fromstring(before.read(rp));b=ET.fromstring(after.read(rp));oldrels={x.get('Id'):x for x in a};newrels={x.get('Id'):x for x in b}
+        allowed_added=set()
+        for coord,e in updates.items():
+            oc,nc=oldcells[coord],newcells[coord]
+            assert {k:v for k,v in oc.attrib.items() if k!='t'}=={k:v for k,v in nc.attrib.items() if k!='t'}
+            assert nc.get('t')=='inlineStr' and ''.join(t.text or '' for t in nc.iter(ns+'t'))==e['new_number']
+            assert len(list(nc))==1 and nc[0].tag==ns+'is'
+            assert len(oc.findall(ns+'f'))==0,'Trade Number is a formula'
+            nc.clear();nc.attrib.update(oc.attrib)
+            for child in oc:nc.append(deepcopy(child))
+            oh=[x for x in oldlinks if x.get('ref')==coord];nh=[x for x in newlinks if x.get('ref')==coord]
+            assert len(oh)==len(nh)==1
+            oldid=oh[0].get(rn+'id');newid=nh[0].get(rn+'id')
+            assert newrels[newid].get('Target')==e['new_link']
+            if newid!=oldid:
+                assert newid not in oldrels;allowed_added.add(newid)
+            else:
+                assert {k:v for k,v in oldrels[oldid].attrib.items() if k!='Target'}=={k:v for k,v in newrels[newid].attrib.items() if k!='Target'}
+                newrels[newid].set('Target',oldrels[oldid].get('Target'))
+            nh[0].set(rn+'id',oldid)
+        assert ET.tostring(old)==ET.tostring(new),'undeclared worksheet change'
+        assert set(newrels)-set(oldrels)==allowed_added
+        for rid in oldrels:assert ET.tostring(oldrels[rid])==ET.tostring(newrels[rid]),'unrelated/shared relationship changed'
+    return True

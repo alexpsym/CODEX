@@ -569,6 +569,263 @@ def repair(
         release()
 
 
+
+@__import__('contextlib').contextmanager
+def _number_repair_gate(workbook: Path, *, lock_path: Path | None = None):
+    """Reuse the actual journal OS gate without importing/starting the service."""
+    import ast, time
+    source = (_REPO_ROOT/'render/master_service.py').read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    names={'_journal_transaction_lock_path','_try_acquire_journal_os_lock','_release_journal_os_lock'}
+    body=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in names]
+    if len(body)!=3: raise RepairRefused('Canonical journal gate definitions changed')
+    namespace=dict(Path=Path,os=os,errno=errno)
+    exec(compile(ast.Module(body=body,type_ignores=[]),str(_REPO_ROOT/'render/master_service.py'),'exec'),namespace)
+    if lock_path is not None: namespace['_journal_transaction_lock_path']=lambda path:lock_path
+    deadline=time.monotonic()+5;handle=None
+    while handle is None:
+        handle=namespace['_try_acquire_journal_os_lock'](workbook)
+        if handle is None:
+            if time.monotonic()>=deadline:raise RepairRefused('Journal writer gate is busy')
+            time.sleep(.05)
+    try:yield
+    finally:namespace['_release_journal_os_lock'](handle)
+
+
+def _number_inventory(folder: Path):
+    """Bounded non-reparse content manifest; streamed hashes, no folder copies."""
+    import stat,time
+    started=time.monotonic();result=[];stack=[folder]
+    for parent in [folder,*folder.parents]:
+        if parent.lstat().st_file_attributes & 1024:raise RepairRefused('Reparse ancestry')
+    while stack:
+        parent=stack.pop()
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if time.monotonic()-started>60 or len(result)>=10000:raise RepairRefused('Folder inventory bound exceeded')
+                path=Path(entry.path);st=path.lstat()
+                if st.st_file_attributes & 1024:raise RepairRefused('Reparse chart content')
+                if stat.S_ISDIR(st.st_mode):typ='directory';digest=None;stack.append(path)
+                elif stat.S_ISREG(st.st_mode):typ='file';digest=_sha256(path)
+                else:raise RepairRefused('Unsupported chart content')
+                result.append(dict(relative=path.relative_to(folder).as_posix(),type=typ,size=st.st_size if typ=='file' else 0,sha256=digest))
+    return sorted(result,key=lambda entry:entry['relative'])
+
+
+def _number_atomic_json(path: Path, value):
+    temporary=path.with_name('.'+path.name+'.number-repair-'+uuid.uuid4().hex+'.tmp')
+    owned=False
+    try:
+        with temporary.open('x',encoding='utf-8') as handle:
+            owned=True
+            json.dump(value,handle,ensure_ascii=False,indent=2);handle.flush();os.fsync(handle.fileno())
+        os.replace(temporary,path)
+    finally:
+        if owned and temporary.exists():temporary.unlink()
+
+
+def _number_pointer(document,pointer):
+    target=document
+    for key in pointer[:-1]:
+        if isinstance(key,dict):
+            matches=[item for item in target if isinstance(item,dict) and all(item.get(k)==v for k,v in key.items())]
+            if len(matches)!=1:raise RepairRefused('Sparse record selector is not unique')
+            target=matches[0]
+        else:target=target[key]
+    return target,pointer[-1]
+
+
+def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
+    """One explicit, hash-bound transaction; sparse field undo and folder renames.
+
+    All broker/financial/Test fields are excluded from this maintenance operation.
+    The caller supplies the exact captured plan; no symbol/number discovery runs.
+    """
+    from contextlib import ExitStack
+    import sqlite3,time
+    from tools import master_journal_workbook as m
+    started=time.monotonic()
+    if not __debug__:raise RepairRefused('Preservation verification requires normal Python assertions')
+    if plan.get('conflicts'):raise RepairRefused('Unresolved allocation/folder conflicts')
+    workbook=Path(plan['workbook_path']);candidate=Path(plan['candidate_path']);recovery=Path(plan['recovery_root'])
+    root=Path(plan['chart_root']);month=root/'2026'/'OCTOBER'
+    for target in [workbook,candidate,Path(plan['sqlite_path']),*[Path(store['path']) for store in plan['json_stores']]]:
+        for ancestor in [target,*target.parents]:
+            if ancestor.exists() and ancestor.lstat().st_file_attributes & 1024:raise RepairRefused('Reparse storage path')
+    for parent in [month,*month.parents]:
+        if parent.lstat().st_file_attributes & 1024:raise RepairRefused('Reparse root')
+    folder_ops=plan['folder_moves'];scaffolds=plan.get('obsolete_scaffolds',[]);creates=plan.get('folder_creates',[])
+    for path in [Path(e[k]) for e in folder_ops for k in ('source','destination')]+[Path(e['path']) for e in scaffolds+creates]:
+        if path.parent!=month or path.name.startswith('.'):raise RepairRefused('Folder plan escapes exact October scope')
+    allowed={'trade_number','trade_folder','folder','identities','status','retired_from','retired_reason','retired_number_reservation'}
+    for store in plan['json_stores']:
+        for change in store['changes']:
+            if change['pointer'][-1] not in allowed:raise RepairRefused('Non-number JSON field in plan')
+    for record in plan['sql_records']:
+        if set(record['fields'])-{'trade_number','trade_folder'}:raise RepairRefused('Non-number SQL field in plan')
+    ledger_path=recovery/'transaction.json';claim=recovery/'apply.claim'
+    if ledger_path.exists():
+        saved=json.loads(ledger_path.read_text())
+        if saved.get('phase')=='committed':
+            if _sha256(workbook)!=plan['candidate_sha256']:raise RepairRefused('Committed workbook changed; not an idempotent replay')
+            for move in folder_ops:
+                if _number_inventory(Path(move['destination']))!=move['inventory']:raise RepairRefused('Committed folder changed')
+            for store in plan['json_stores']:
+                document=json.loads(Path(store['path']).read_text(encoding='utf-8'))
+                for change in store['changes']:
+                    target,key=_number_pointer(document,change['pointer'])
+                    if target.get(key)!=change['after']:raise RepairRefused('Committed store changed')
+            return dict(ok=True,noop=True,phase='committed')
+        raise RepairRefused('An earlier/incomplete attempt exists; new authorization required')
+    for ancestor in [recovery,*recovery.parents]:
+        if ancestor.exists() and ancestor.lstat().st_file_attributes & 1024:raise RepairRefused('Reparse recovery path')
+    recovery.mkdir(parents=True,exist_ok=True)
+    if claim.exists():raise RepairRefused('Apply attempt already claimed; no retry')
+    moved=[];created=[];removed=[];stores_written=[];installed=False;sql_committed=False;con=None
+    ledger=dict(phase='preflight',steps=[],plan_sha256=plan_digest(plan))
+    def event(kind,**fields):
+        ledger['steps'].append(dict(kind=kind,**fields));_number_atomic_json(ledger_path,ledger)
+        if failpoint is not None:failpoint(kind)
+        if time.monotonic()-started>280:raise TimeoutError('Number repair transaction deadline')
+    with ExitStack() as resources:
+        resources.enter_context(gate() if gate is not None else _number_repair_gate(workbook))
+        resources.enter_context(m._trade_allocation_lock(timeout_seconds=5))
+        _assert_workbook_available(workbook)
+        if _sha256(workbook)!=plan['workbook_sha256'] or _sha256(candidate)!=plan['candidate_sha256']:raise RepairRefused('Workbook/candidate revision changed')
+        m.audit_existing_trade_number_package(workbook.read_bytes(),candidate.read_bytes(),plan['package_updates'])
+        documents=[]
+        for store in plan['json_stores']:
+            path=Path(store['path'])
+            if _sha256(path)!=store['sha256']:raise RepairRefused('Canonical JSON revision changed: '+str(path))
+            document=json.loads(path.read_text(encoding='utf-8'))
+            for change in store['changes']:
+                target,key=_number_pointer(document,change['pointer'])
+                if (key in target)!=change['before_exists'] or target.get(key)!=change['before']:raise RepairRefused('JSON before-image changed')
+                target[key]=change['after']
+            documents.append((store,document))
+        sources={str(Path(e['source'])) for e in folder_ops}
+        disposable={str(Path(e['path'])) for e in scaffolds}
+        for move in folder_ops:
+            if _number_inventory(Path(move['source']))!=move['inventory']:raise RepairRefused('Chart contents changed')
+            destination=Path(move['destination'])
+            if destination.exists() and str(destination) not in sources|disposable:raise RepairRefused('Unrelated destination collision')
+        for scaffold in scaffolds:
+            if _number_inventory(Path(scaffold['path']))!=scaffold['inventory']:raise RepairRefused('Obsolete scaffold changed')
+            if [e['relative'] for e in scaffold['inventory']]!=['.ltt-trade-owner.json']:raise RepairRefused('Scaffold contains user content')
+        for item in creates:
+            if Path(item['path']).exists() and str(Path(item['path'])) not in sources|disposable:raise RepairRefused('Create destination is occupied')
+        con=sqlite3.connect(plan['sqlite_path'],timeout=5)
+        resources.callback(con.close)
+        con.execute('BEGIN IMMEDIATE')
+        resources.callback(con.rollback)
+        for record in plan['sql_records']:
+            old=con.execute('SELECT payload_json,imported_at FROM journal_trades WHERE id=?',(record['id'],)).fetchone()
+            if old!=(record['before'],record['imported_at']):raise RepairRefused('SQL before-image changed')
+        recovery_bytes=workbook.stat().st_size+len(json.dumps(plan).encode())
+        peak=recovery_bytes+candidate.stat().st_size+max([len(json.dumps(document).encode()) for _,document in documents]+[0])
+        if recovery_bytes>25*1024**2 or peak>50*1024**2:raise RepairRefused('Recovery/candidate ceiling exceeded')
+        with claim.open('x') as handle:handle.write(plan_digest(plan));handle.flush();os.fsync(handle.fileno())
+        # One original workbook, no SQL or whole-cache backup. Field undo stays sparse.
+        backup=Path(plan.get('original_backup_path') or recovery/'original.xlsx')
+        if backup.exists():
+            if _sha256(backup)!=plan['workbook_sha256']:raise RepairRefused('Original recovery conflict')
+        else:
+            with backup.open('xb') as handle:handle.write(workbook.read_bytes())
+        ledger.update(phase='applying',recovery_bytes=recovery_bytes,peak_bytes=peak,json_undo=plan['json_stores'],sql_undo=plan['sql_records'])
+        _number_atomic_json(ledger_path,ledger)
+        try:
+            for item in scaffolds:
+                path=Path(item['path']);marker=path/'.ltt-trade-owner.json';raw=marker.read_bytes()
+                if hashlib.sha256(raw).hexdigest()!=item['inventory'][0]['sha256']:raise RepairRefused('Scaffold marker changed')
+                removed.append((path,raw));marker.unlink();path.rmdir();event('scaffold_removed',path=str(path))
+            for index,move in enumerate(folder_ops):
+                source=Path(move['source']);temporary=month/('.ltt-number-'+plan_digest(plan)[:12]+'-'+str(index))
+                if temporary.exists():raise RepairRefused('Temporary sibling collision')
+                source.rename(temporary);moved.append(dict(source=source,current=temporary,destination=Path(move['destination']),inventory=move['inventory']));event('folder_staged',source=str(source),temporary=str(temporary))
+            for item in moved:
+                if item['destination'].exists():raise RepairRefused('Final folder appeared')
+                item['current'].rename(item['destination']);item['current']=item['destination'];event('folder_installed',destination=str(item['destination']))
+            for item in creates:
+                path=Path(item['path']);path.mkdir();created.append(path)
+                with (path/'.ltt-trade-owner.json').open('x',encoding='utf-8') as handle:json.dump(item['owner'],handle);handle.flush();os.fsync(handle.fileno())
+                event('folder_created',path=str(path))
+            for store,document in documents:
+                path=Path(store['path'])
+                if _sha256(path)!=store['sha256']:raise RepairRefused('JSON changed before replacement')
+                _number_atomic_json(path,document);stores_written.append((store,_sha256(path)));event('json_installed',path=str(path))
+            for record in plan['sql_records']:
+                value=json.loads(record['before']);value.update(record['fields']);payload=json.dumps(value,ensure_ascii=False)
+                con.execute('UPDATE journal_trades SET payload_json=? WHERE id=? AND payload_json=?',(payload,record['id'],record['before']))
+                if con.execute('SELECT changes()').fetchone()[0]!=1:raise RepairRefused('SQL ownership changed')
+            _assert_workbook_available(workbook)
+            if _sha256(workbook)!=plan['workbook_sha256']:raise RepairRefused('Workbook changed before replacement')
+            temporary=workbook.with_name('.'+workbook.name+'.number-candidate')
+            if temporary.exists():raise RepairRefused('Workbook temporary candidate exists')
+            with temporary.open('xb') as handle:handle.write(candidate.read_bytes());handle.flush();os.fsync(handle.fileno())
+            os.replace(temporary,workbook);installed=True;event('workbook_installed')
+            if _sha256(workbook)!=plan['candidate_sha256']:raise RepairRefused('Installed workbook hash mismatch')
+            m.audit_existing_trade_number_package(backup.read_bytes(),workbook.read_bytes(),plan['package_updates'])
+            for item in moved:
+                if _number_inventory(item['destination'])!=item['inventory']:raise RepairRefused('Moved content mismatch')
+            for store,_ in stores_written:
+                document=json.loads(Path(store['path']).read_text(encoding='utf-8'))
+                for change in store['changes']:
+                    target,key=_number_pointer(document,change['pointer'])
+                    if target.get(key)!=change['after']:raise RepairRefused('Installed JSON mismatch')
+            con.commit();sql_committed=True;event('sql_committed')
+            ledger['phase']='committed';_number_atomic_json(ledger_path,ledger)
+            for cache_key in list(m._TRADE_FOLDER_INDEX_CACHE):
+                if str(cache_key[0]).casefold()==str(root).casefold() and cache_key[1]=='C':
+                    m._TRADE_FOLDER_INDEX_CACHE.pop(cache_key,None)
+            return dict(ok=True,noop=False,phase='committed',folders_moved=len(moved),scaffolds_removed=len(removed),folders_created=len(created),sql_records=len(plan['sql_records']),workbook_cells=len(plan['package_updates']),elapsed=time.monotonic()-started)
+        except BaseException as error:
+            rollback_errors=[]
+            try:
+                if not sql_committed:con.rollback()
+                else:
+                    con.execute('BEGIN IMMEDIATE')
+                    for record in plan['sql_records']:
+                        expected=json.loads(record['before']);expected.update(record['fields']);current=con.execute('SELECT payload_json FROM journal_trades WHERE id=?',(record['id'],)).fetchone()
+                        if not current or json.loads(current[0])!=expected:raise RepairRefused('SQL rollback ownership lost')
+                        con.execute('UPDATE journal_trades SET payload_json=? WHERE id=?',(record['before'],record['id']))
+                    con.commit()
+                if installed:
+                    if _sha256(workbook)!=plan['candidate_sha256']:raise RepairRefused('Workbook rollback ownership lost')
+                    temporary=workbook.with_name('.'+workbook.name+'.number-undo')
+                    with temporary.open('xb') as handle:handle.write(backup.read_bytes());handle.flush();os.fsync(handle.fileno())
+                    os.replace(temporary,workbook)
+                for store,owned in reversed(stores_written):
+                    path=Path(store['path'])
+                    if _sha256(path)!=owned:raise RepairRefused('JSON rollback ownership lost')
+                    document=json.loads(path.read_text(encoding='utf-8'))
+                    for change in store['changes']:
+                        target,key=_number_pointer(document,change['pointer'])
+                        if target.get(key)!=change['after']:raise RepairRefused('Sparse JSON rollback ownership lost')
+                        if change['before_exists']:target[key]=change['before']
+                        else:target.pop(key,None)
+                    _number_atomic_json(path,document)
+                for path in reversed(created):
+                    marker=path/'.ltt-trade-owner.json'
+                    if sorted(x.name for x in path.iterdir())!=['.ltt-trade-owner.json']:raise RepairRefused('Created folder gained content; preserve it')
+                    marker.unlink();path.rmdir()
+                # Stage all moved directories again before reversing a rename cycle.
+                for i,item in enumerate(moved):
+                    if _number_inventory(item['current'])!=item['inventory']:raise RepairRefused('Folder rollback ownership lost')
+                    undo=month/('.ltt-number-undo-'+plan_digest(plan)[:12]+'-'+str(i))
+                    if undo.exists():raise RepairRefused('Rollback temporary collision')
+                    item['current'].rename(undo);item['current']=undo
+                for item in moved:
+                    if item['source'].exists():raise RepairRefused('Rollback source occupied')
+                    item['current'].rename(item['source'])
+                for path,raw in removed:
+                    path.mkdir()
+                    with (path/'.ltt-trade-owner.json').open('xb') as handle:handle.write(raw)
+            except BaseException as rollback_error:rollback_errors.append(str(rollback_error))
+            ledger.update(phase='rolled_back' if not rollback_errors else 'rollback_incomplete',error=str(error),rollback_errors=rollback_errors)
+            _number_atomic_json(ledger_path,ledger)
+            raise RepairRefused(json.dumps(dict(error=str(error),rollback_complete=not rollback_errors,rollback_errors=rollback_errors))) from error
+
+
 def main(argv: list[str] | None = None) -> int:
     repo = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -578,7 +835,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recovery-root", type=Path, default=repo / ".job7f_recovery")
     parser.add_argument("--apply", action="store_true", help="apply only the exact C377 mapping in a reviewed plan")
     parser.add_argument("--confirm-plan-sha256", default="")
+    parser.add_argument('--number-plan',type=Path,default=None)
+    parser.add_argument('--confirm-number-plan-sha256',default='')
     args = parser.parse_args(argv)
+    if args.number_plan is not None:
+        try:
+            plan=json.loads(args.number_plan.read_text(encoding='utf-8'))
+            if not args.apply or plan_digest(plan)!=args.confirm_number_plan_sha256:
+                raise RepairRefused('Explicit apply and exact reviewed number-plan digest required')
+            result=apply_number_repair_plan(plan)
+            print(json.dumps(result,indent=2));return 0
+        except Exception as error:
+            print(json.dumps(dict(ok=False,error=str(error)),indent=2));return 2
     try:
         result = repair(args.workbook, args.json, chart_root=args.chart_root, recovery_root=args.recovery_root,
                         apply=args.apply, confirm_plan_sha256=args.confirm_plan_sha256 or None)
