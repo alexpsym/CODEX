@@ -42348,6 +42348,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             validate_path,
             expected_snapshot=snapshot,
             recommendation_bundle=recommendation_chart_bundle,
+            preservation_source=path if path.exists() else None,
         )
         if not recommendation_preflight.get("ok"):
             raise RuntimeError(
@@ -45903,7 +45904,7 @@ def _save_resync_success_metadata(path: Path, fingerprint: Dict[str, object], sn
     return True
 
 
-def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None, recommendation_bundle: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None, recommendation_bundle: Optional[Dict[str, object]] = None, preservation_source: Optional[Path] = None) -> Dict[str, object]:
     diagnostics: Dict[str, object] = {
         "checked_accounts": [],
         "formula_error_cells": [],
@@ -45916,6 +45917,8 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         return {"ok": False, "error": "Trading Journal.xlsx is missing.", "diagnostics": diagnostics}
     wb = load_workbook(path, data_only=False)
     try:
+        from tools.master_journal_workbook import _generated_statistics_height_rows, _statistics_authored_row_heights
+        authored_heights = _statistics_authored_row_heights(preservation_source) if preservation_source is not None else {}
         expected_order = [*SHEET_ORDER, *expected_report_sheet_names(expected_snapshot)]
         diagnostics["sheet_order"] = list(wb.sheetnames)
         missing_sheets = [name for name in expected_order if name not in wb.sheetnames]
@@ -45977,6 +45980,7 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
             re.IGNORECASE,
         )
         for ws in managed_statistics_sheets:
+            height_rows = _generated_statistics_height_rows(ws)
             for row_number in range(1, ws.max_row + 1):
                 populated = False
                 for col_number in range(1, ws.max_column + 1):
@@ -45992,9 +45996,18 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
                         diagnostics["verbose_duration_cells"].append(
                             {"sheet": ws.title, "cell": cell.coordinate, "value": value}
                         )
-                if row_number >= 2 and populated:
+                if row_number >= 2 and populated and row_number in height_rows:
                     height = ws.row_dimensions[row_number].height
-                    if height is None or abs(float(height) - 14.5) > 1e-9:
+                    # Missing explicit metadata inherits the actual worksheet
+                    # default; None itself is neither 14.5 nor a wrong height.
+                    effective_height = height if height is not None else ws.sheet_format.defaultRowHeight
+                    source_label, source_height = authored_heights.get(ws.title, {}).get(row_number, (None, None))
+                    preserved_authored_height = (
+                        height is not None and source_height is not None
+                        and str(ws.cell(row_number, 1).value or '').strip() == source_label
+                        and abs(float(height) - source_height) <= 1e-9
+                    )
+                    if not preserved_authored_height and (effective_height is None or not math.isfinite(float(effective_height)) or abs(float(effective_height) - 14.5) > 1e-9):
                         diagnostics["managed_row_height_mismatches"].append(
                             {"sheet": ws.title, "row": row_number, "height": height}
                         )
@@ -46393,7 +46406,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         fast_snapshot, fast_path_reason, fast_path_diagnostics = _resync_fast_path_snapshot(path, fingerprint)
         if isinstance(fast_snapshot, dict):
             t0 = time.perf_counter()
-            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=fast_snapshot)
+            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=fast_snapshot, preservation_source=path)
             timings["fast_verification"] = round(time.perf_counter() - t0, 6)
             timings["total"] = round(time.perf_counter() - started, 6)
             if verification.get("ok"):
@@ -46433,7 +46446,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         verification = None
         if ok and path.exists():
             t0 = time.perf_counter()
-            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=snapshot if isinstance(snapshot, dict) else None)
+            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=snapshot if isinstance(snapshot, dict) else None, preservation_source=path)
             timings["final_fast_verification"] = round(time.perf_counter() - t0, 6)
             if not verification.get("ok"):
                 ok = False

@@ -4679,7 +4679,17 @@ def _stats2_account_balance_table(ws):
     raise AssertionError("STATS2 Account Balances table not found")
 
 
-def test_fast_verifier_accepts_complete_generated_contract(fast_verifier_workbook_fixture):
+def _rewrite_statistics_fixture(path, transform):
+    """Fixture-only ZIP edit; preserve formula caches and copy ZipInfo objects."""
+    import zipfile
+    from io import BytesIO
+    original = path.read_bytes()
+    with zipfile.ZipFile(BytesIO(original)) as before, zipfile.ZipFile(path, 'w') as after:
+        for info in before.infolist():
+            after.writestr(copy(info), transform(info.filename, before.read(info.filename)))
+
+
+def test_fast_verifier_accepts_complete_generated_contract(fast_verifier_workbook_fixture, tmp_path):
     fixture = fast_verifier_workbook_fixture
     verification = fixture["ms"]._fast_verify_trading_journal_workbook(
         fixture["path"],
@@ -4705,6 +4715,52 @@ def test_fast_verifier_accepts_complete_generated_contract(fast_verifier_workboo
         assert "data-recommended-value=" in html
         assert "http://" not in html
         assert "https://" not in html
+
+    import hashlib
+    import zipfile
+    import tools.master_journal_workbook as journal
+    path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(path)
+    try:
+        metric_rows = {}
+        for ws in wb:
+            if ws.title == 'STATS1' or ws.title == 'YEARLY REPORT' or ws.title.isdigit():
+                metric = next(r for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value == 'Counter Trend')
+                metric_rows[ws.title] = metric
+                assert ws.row_dimensions[metric].height == 14.5  # fresh additive creation
+        metric = metric_rows['STATS1']
+    finally:
+        wb.close()
+    with zipfile.ZipFile(path) as package:
+        part = journal._worksheet_ooxml_part_name(package, 'STATS1')
+    def legacy_missing(name, payload):
+        if name != part: return payload
+        payload = re.sub(rb'(<row\b[^>]*\br="' + str(metric).encode() + rb'"[^>]*>)',
+                         lambda m: re.sub(rb' (?:ht|customHeight)="[^"]*"', b'', m[0]), payload)
+        return re.sub(rb'defaultRowHeight="[^"]*"', b'defaultRowHeight="14.5"', payload, count=1)
+    _rewrite_statistics_fixture(path, legacy_missing)
+    checked = load_workbook(path)
+    assert checked['STATS1'].row_dimensions[metric].height is None
+    assert checked['STATS1'].sheet_format.defaultRowHeight == 14.5
+    checked.close()
+    # Exact legacy signature: omitted explicit height, inherited 14.5. This used
+    # to fail the unconditional `height is None` gate; effective presentation is valid.
+    assert fixture['ms']._fast_verify_trading_journal_workbook(path, expected_snapshot=fixture['snapshot'])['ok']
+    original = path.read_bytes()
+    candidate = tmp_path / 'metric-candidate.xlsx'
+    prepared = journal.prepare_counter_trend_package(path, candidate, expected_sha256=hashlib.sha256(original).hexdigest())
+    assert prepared['preservation_verified']
+    with zipfile.ZipFile(path) as before, zipfile.ZipFile(candidate) as after:
+        for name in before.namelist():
+            if name != part: assert before.read(name) == after.read(name)
+        # The existing package audit also proves all undeclared cells, formulas,
+        # caches and row attributes unchanged, including this legacy repair.
+    assert fixture['ms']._fast_verify_trading_journal_workbook(candidate, expected_snapshot=fixture['snapshot'])['ok']
+    # None must not be blindly treated as 14.5: the actual inherited default matters.
+    _rewrite_statistics_fixture(path, lambda name, payload: payload.replace(b'defaultRowHeight="14.5"', b'defaultRowHeight="18"') if name == part else payload)
+    wrong = fixture['ms']._fast_verify_trading_journal_workbook(path, expected_snapshot=fixture['snapshot'])
+    assert wrong['error'] == 'generated_statistics_row_height_mismatch'
+    assert {'sheet': 'STATS1', 'row': metric, 'height': None} in wrong['diagnostics']['managed_row_height_mismatches']
 
 
 def test_fast_verifier_rejects_trade_log_filter_before_true_last_populated_row(
@@ -4809,6 +4865,12 @@ def test_fast_verifier_rejects_generated_statistics_regressions(
     assert verification["ok"] is False
     assert verification["error"] == expected_error
     assert verification["diagnostics"][diagnostic_key]
+    if mutation == 'row_height':
+        # A preservation-source contract is checked against actual original
+        # label/coordinate/height; it cannot bless a changed generated height.
+        preserved = fixture['ms']._fast_verify_trading_journal_workbook(
+            workbook_path, expected_snapshot=fixture['snapshot'], preservation_source=fixture['path'])
+        assert preserved['error'] == expected_error
 
 
 @pytest.mark.parametrize(
@@ -5989,10 +6051,27 @@ def test_resync_fast_path_survives_journal_only_commits_but_invalidates_code_and
 
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx is not installed")
-def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, monkeypatch):
+def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, monkeypatch, request):
     from openpyxl.styles import Alignment, Font, PatternFill
     from tools.master_journal_workbook import build_master_journal_workbook
     import tools.master_journal_workbook as journal_module
+    import socket
+    def forbidden_external(*_args, **_kwargs):
+        raise AssertionError('External network/Git publication is forbidden in this isolated fixture')
+    monkeypatch.setattr(socket, 'create_connection', forbidden_external)
+    monkeypatch.setattr(master_service, '_sync_journal_excel_files_to_github', forbidden_external)
+
+    # Real local coordination/publication; only external stores/folders/snapshot
+    # inputs are isolated. Never replace verifier, writer, reservation or publish.
+    monkeypatch.setattr(master_service, '_journal_transaction_lock_path', lambda _p: tmp_path / 'fixture-journal.lock')
+    monkeypatch.setattr(master_service, 'assign_trade_numbers_and_create_folders', lambda rows, **_kw: {'assigned_count': 0, 'preserved_count': len(rows)})
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_RESYNC_CACHE_PATH', tmp_path / 'resync-cache.json')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SYNC_STATE_PATH', tmp_path / 'sync-state.json')
+    monkeypatch.setattr(master_service, 'MONTHLY_AUD_REVALUATION_PATH', tmp_path / 'monthly-aud.json')
+    monkeypatch.setattr(master_service, 'MONTHLY_AUD_REVALUATION_STATE_PATH', tmp_path / 'monthly-aud-state.json')
+    monkeypatch.setattr(master_service, '_trade_context_source_fingerprint', lambda: [])
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_RESYNC_LAST_SUCCESS', {})
+    monkeypatch.setattr(master_service, '_PENDING_MANUAL_SYNC_ROWS', [])
 
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
@@ -6007,7 +6086,17 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     ]
     stats = master_service._compute_journal_stats(rows, balances)
     snapshot = {"items": rows, "balances": balances, "stats": stats}
-    build_master_journal_workbook(snapshot, path)
+    prepared_input = request.config.getoption('journal_preservation_input', default=None)
+    if prepared_input:
+        prepared_input = Path(prepared_input)
+        shutil.copy2(prepared_input, path)
+        prepared_assets = prepared_input.parent / (prepared_input.stem + '.assets')
+        if prepared_assets.exists():
+            shutil.copytree(prepared_assets, path.parent / prepared_assets.name)
+        captured = journal_module.read_master_journal_source(path)
+        assert {r['id'] for r in captured['items']} == {'fx', 'crypto'}
+    else:
+        build_master_journal_workbook(snapshot, path)
 
     wb = load_workbook(path)
     dash = wb["STATS1"]
@@ -6017,6 +6106,18 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     sentinel.font = Font(name="Calibri", size=13, bold=True, color="123456")
     sentinel.fill = PatternFill("solid", fgColor="ABCDEF")
     sentinel.alignment = Alignment(horizontal="center")
+    dash.row_dimensions[149].height = 27.0
+    dash['J149'] = '=6*7'
+    dash['I150'] = 'CUSTOM DEFAULT-HEIGHT NOTE'
+    authored_metric = next(r for r in range(2, dash.max_row + 1) if dash.cell(r, 1).value == 'Trades')
+    dash.row_dimensions[authored_metric].height = 22.5
+    metric = next(r for r in range(2, dash.max_row + 1) if dash.cell(r, 1).value == 'Counter Trend')
+    # Current user workbook has this exact legacy missing-height generated row.
+    dash.row_dimensions[metric].height = None
+    dash.sheet_format.defaultRowHeight = 14.5
+    if ' SIM' not in wb.sheetnames: wb.create_sheet(' SIM', 5)
+    wb[' SIM']['A1'] = 'PRESERVED SIM'
+    sheet_order = list(wb.sheetnames)
     symbols = wb["SYMBOLS"]
     for coordinate in ("S3", "T3", "AA3", "AB3"):
         assert symbols[coordinate].value == 0
@@ -6039,6 +6140,16 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     report_names = ["YEARLY REPORT", *[str(year) for year in range(2018, 2027)]]
     for sheet_name in report_names:
         report = wb[sheet_name]
+        # Small preservation fixture: authored report layouts may omit optional
+        # metrics. Keep every year sheet, real Trades/Test/Counter Trend rows and
+        # period headers, rather than repeatedly processing unrelated metrics.
+        keep = {1, *(r for r in range(2, report.max_row + 1)
+                     if str(report.cell(r, 1).value or '') in {'Trades', 'Test', 'Counter Trend'})}
+        for r in range(report.max_row, 1, -1):
+            if r not in keep: report.delete_rows(r, 1)
+        # Keep the original row-dimension map even for omitted metric cells:
+        # the existing structural audit owns that presentation too.
+        for r in range(2, report.max_row + 1): report.row_dimensions[r].height = 14.5
         last_managed_row = max(
             row
             for row, _spec in journal_module._report_spec_rows(report)
@@ -6054,9 +6165,106 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     ]
     wb.save(path)
     wb.close()
+    import zipfile
+    with zipfile.ZipFile(path) as seeded:
+        stats_part = journal_module._worksheet_ooxml_part_name(seeded, 'STATS1')
+    def seed_formula_cache(name, payload):
+        if name != stats_part: return payload
+        matches = list(re.finditer(rb'<c\b(?=[^>]*\br="J149")[^>]*>.*?</c>', payload, re.S))
+        assert len(matches) == 1
+        cell = matches[0]
+        assert b'<f>6*7</f>' in cell[0]
+        patched, count = re.subn(rb'<v\b[^>]*?(?:/>|>.*?</v>)', b'<v>42</v>', cell[0], count=1, flags=re.S)
+        assert count == 1
+        return payload[:cell.start()] + patched + payload[cell.end():]
+    _rewrite_statistics_fixture(path, seed_formula_cache)
+    with zipfile.ZipFile(path) as seeded:
+        import xml.etree.ElementTree as ET
+        ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        seeded_cell = ET.fromstring(seeded.read(stats_part)).find('.//' + ns + 'c[@r="J149"]')
+        assert seeded_cell.find(ns + 'f').text == '6*7'
+        assert seeded_cell.find(ns + 'v').text == '42', 'Cache sentinel must be seeded before exercising the writer'
+    source_values = load_workbook(path, data_only=True)
+    try:
+        assert source_values['STATS1']['J149'].value == 42
+    finally:
+        source_values.close()
 
-    result = master_service._sync_master_journal_workbook(prebuilt_snapshot=snapshot, sync_caller="test")
-    assert result["master_journal_ok"] is True, result
+    # Cheap eligibility/type cases use the SAME canonical cache helpers, not
+    # another full workbook pipeline or extra parametrized test nodes.
+    cases = tmp_path.parent / 'authored-cache-cases'; cases.mkdir()
+    source_case = cases / 'source.xlsx'; candidate_case = cases / 'candidate.xlsx'
+    small = Workbook(); sheet = small.active; sheet.title = 'STATS1'
+    sheet['J9'] = 2
+    for coordinate, formula in {'J10': '=6*7', 'J11': '=0', 'J12': '="0"', 'J13': '=J9', 'J14': '=1', 'J15': '=0'}.items():
+        sheet[coordinate] = formula
+    small.save(source_case)
+    small.close()
+    def seed_cases(name, payload):
+        if name != 'xl/worksheets/sheet1.xml': return payload
+        root = ET.fromstring(payload)
+        for coordinate, value, kind in [('J10','42',None),('J11','0',None),('J12','0','str'),('J13','2',None),('J14',None,None),('J15',None,None)]:
+            cell = root.find('.//' + ns + 'c[@r="' + coordinate + '"]')
+            for previous in list(cell.findall(ns + 'v')): cell.remove(previous)
+            if coordinate != 'J14': ET.SubElement(cell, ns + 'v').text = value
+            cell.attrib.pop('t', None)
+            if kind: cell.set('t', kind)
+        return ET.tostring(root)
+    _rewrite_statistics_fixture(source_case, seed_cases)
+    small = load_workbook(source_case)
+    try:
+        records = journal_module._snapshot_trade_log_formula_caches(source_case, small['STATS1'], authored_statistics=True)
+        plan, diag = journal_module._plan_trade_log_formula_cache_transplant(small['STATS1'], records, strict=True, authored_statistics=True)
+        assert len(plan) == 6 and diag['stats1_formula_cache_refused_cells'] == 0
+        small['STATS1']['J10'] = '=6*8'
+        changed, rejected = journal_module._plan_trade_log_formula_cache_transplant(small['STATS1'], records, strict=False, authored_statistics=True)
+        assert 'J10' not in {r['target_coordinate'] for r in changed}
+        assert rejected['stats1_formula_cache_refused_cells'] == 1
+        with pytest.raises(journal_module.IncrementalWorkbookUpdateNotEligible):
+            journal_module._plan_trade_log_formula_cache_transplant(small['STATS1'], records, strict=True, authored_statistics=True)
+        small['STATS1']['J10'] = '=6*7'; small['STATS1']['J9'] = 3
+        changed, rejected = journal_module._plan_trade_log_formula_cache_transplant(small['STATS1'], records, strict=False, authored_statistics=True)
+        assert 'J13' not in {r['target_coordinate'] for r in changed}
+        assert any('dependency values changed' in r['reason'] for r in rejected['stats1_formula_cache_refused'])
+        small['STATS1']['J9'] = 2
+        small.save(candidate_case)
+    finally:
+        small.close()
+    journal_module._preserve_candidate_ooxml(candidate_case, 'Trade Log', [], journal_module._snapshot_chart_ooxml(source_case), authored_statistics_plan=plan)
+    journal_module._verify_trade_log_formula_cache_transplant(candidate_case, 'STATS1', plan)
+    restored = load_workbook(candidate_case, data_only=True)
+    try:
+        assert restored['STATS1']['J10'].value == 42
+        assert restored['STATS1']['J11'].value == 0
+        assert restored['STATS1']['J12'].value == '0'
+        assert restored['STATS1']['J13'].value == 2
+    finally:
+        restored.close()
+    with zipfile.ZipFile(candidate_case) as package:
+        part = journal_module._worksheet_ooxml_part_name(package, 'STATS1')
+        root = ET.fromstring(package.read(part))
+        assert root.find('.//' + ns + 'c[@r="J14"]/' + ns + 'v') is None
+        assert root.find('.//' + ns + 'c[@r="J15"]/' + ns + 'v') is not None
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda **_kwargs: snapshot)
+    # Capture the real, audited writer output once. The rejection exercise below
+    # reuses this same isolated candidate; it does not rebuild a whole journal.
+    produced = {}
+    original_writer = master_service.update_master_journal_workbook_data_only
+    def recording_writer(*args, **kwargs):
+        result = original_writer(*args, **kwargs)
+        produced.update(result=dict(result), payload=Path(result['candidate_path']).read_bytes())
+        return result
+    monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', recording_writer)
+
+    result = master_service._run_trading_journal_resync()
+    assert result['ok'] is True and result['fast_verification']['ok'] is True, result
+    cache_diag = produced['result']['diagnostics']
+    assert cache_diag['stats1_formula_cache_source_cells'] == 1
+    assert cache_diag['stats1_formula_cache_planned_cells'] == 1
+    assert cache_diag['stats1_formula_caches_restored'] == 1
+    assert cache_diag['stats1_formula_caches_post_counter_verified'] == 1
+    assert not master_service.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+    assert master_service._MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE is None
     wb = load_workbook(path)
     dash = wb["STATS1"]
     labels_after = [
@@ -6071,9 +6279,19 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     assert str(sentinel.font.color.rgb)[-6:].upper() == "123456"
     assert str(sentinel.fill.fgColor.rgb)[-6:].upper() == "ABCDEF"
     assert sentinel.alignment.horizontal == "center"
+    assert dash.row_dimensions[149].height == 27.0
+    assert dash.row_dimensions[150].height is None
+    assert dash.row_dimensions[authored_metric].height == 22.5
+    assert dash.row_dimensions[metric].height == 14.5
+    assert dash['J149'].value == '=6*7'
     trades_row = labels_after.index("Trades") + 1
     assert dash.cell(trades_row, 2).value == 2
     wb.close()
+    cached = load_workbook(path, data_only=True)
+    try:
+        assert cached['STATS1']['J149'].value == 42
+    finally:
+        cached.close()
 
     def assert_generator_owned_repairs() -> None:
         checked = load_workbook(path)
@@ -6110,12 +6328,29 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
             checked.close()
 
     assert_generator_owned_repairs()
-    second = master_service._sync_master_journal_workbook(
-        prebuilt_snapshot=snapshot,
-        sync_caller="test-second-pass",
-    )
-    assert second["master_journal_ok"] is True, second
+    second = master_service._run_trading_journal_resync()
+    assert second['ok'] is True and second['skipped_snapshot_build'] is True, second
     assert_generator_owned_repairs()
+    # Fail the REAL candidate gate with an actual invalid generated height. The
+    # existing workbook remains byte-identical and both reservations are released.
+    import hashlib
+    before = path.read_bytes()
+    def invalid_candidate(*args, **kwargs):
+        result = dict(produced['result'])
+        candidate = Path(result['candidate_path'])
+        candidate.write_bytes(produced['payload'])
+        _rewrite_statistics_fixture(candidate, lambda name, payload: re.sub(
+            rb'(<row\b[^>]*\br="' + str(metric).encode() + rb'"[^>]*\bht=")14\.5(")',
+            rb'\g<1>20\2', payload) if name == 'xl/worksheets/sheet1.xml' else payload)
+        return result
+    monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', invalid_candidate)
+    rejected = master_service._sync_master_journal_workbook(prebuilt_snapshot=snapshot, sync_caller='fixture-invalid', defer_github_sync=True)
+    assert not rejected['master_journal_ok'] and 'generated_statistics_row_height_mismatch' in rejected['master_journal_error'], rejected
+    assert path.read_bytes() == before
+    assert not master_service.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+    assert master_service._MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE is None
+    assert master_service.TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False)
+    master_service.TRADING_JOURNAL_RESYNC_LOCK.release()
 
 
 def test_counter_trend_manual_snapshot_statistics_pipeline(tmp_path,monkeypatch):

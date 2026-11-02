@@ -12349,6 +12349,62 @@ def _normalize_generated_statistics_row_heights(
                 ws.row_dimensions[row].height = 14.5
 
 
+def _generated_statistics_height_rows(ws) -> set[int]:
+    """Identify metric rows by the existing semantic/report ownership contracts.
+
+    Authored appendices (including populated cells outside the metric columns)
+    are not evidence that the generator owns their row presentation.
+    """
+    if ws.title == STATS1_SHEET:
+        labels = {str(label).strip().casefold() for label in REPORT_METRIC_LABELS}
+        labels.update({'trades', 'test', 'counter trend'})
+        policies = _stats1_semantic_row_policies(ws)
+        return {row for row, (kind, _semantic, _section) in policies.items()
+                if kind != 'text' or _stats1_label_at(ws, row).casefold() in labels}
+    if ws.title == REPORT_YEARLY_SHEET or (ws.title.isdigit() and int(ws.title) >= REPORT_START_YEAR):
+        owned = {row for row, _spec in _report_spec_rows(ws)}
+        owned.update(row for row in range(2, ws.max_row + 1)
+                     if str(ws.cell(row, 1).value or '').strip() == COUNTER_TREND_HEADER)
+        return owned
+    return set()
+
+
+def _statistics_authored_row_heights(path) -> Dict[str, Dict[int, Tuple[str, float]]]:
+    """Read explicit source heights/labels without another openpyxl workbook load.
+
+    This is a source-bound presentation contract, never a persisted exemption.
+    Implicit defaults cannot authorize an incorrect generated metric height.
+    """
+    result = {}
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    with zipfile.ZipFile(path) as package:
+        strings = []
+        if 'xl/sharedStrings.xml' in package.namelist():
+            strings = [''.join(t.itertext()) for t in ET.fromstring(package.read('xl/sharedStrings.xml'))]
+        workbook = ET.fromstring(package.read('xl/workbook.xml'))
+        for sheet in workbook.find(ns + 'sheets'):
+            name = sheet.attrib['name']
+            if name not in {STATS1_SHEET, REPORT_YEARLY_SHEET} and not (name.isdigit() and int(name) >= REPORT_START_YEAR):
+                continue
+            explicit = {}
+            root = ET.fromstring(package.read(_worksheet_ooxml_part_name(package, name)))
+            for row in root.find(ns + 'sheetData'):
+                if 'ht' not in row.attrib:
+                    continue
+                label = next((c for c in row if c.get('r') == 'A' + row.attrib['r']), None)
+                text = ''
+                if label is not None:
+                    value = label.find(ns + 'v')
+                    text = ''.join(label.find(ns + 'is').itertext()) if label.find(ns + 'is') is not None else (value.text or '') if value is not None else ''
+                    if label.get('t') == 's': text = strings[int(text)]
+                height = float(row.attrib['ht'])
+                if not math.isfinite(height) or height <= 0:
+                    raise ValueError('Invalid authored statistics row height')
+                explicit[int(row.attrib['r'])] = (text.strip(), height)
+            result[name] = explicit
+    return result
+
+
 def _normalize_generated_duration_text(
     wb,
     *,
@@ -17307,11 +17363,30 @@ def _managed_stats2_account_balance_formula_cells(wb) -> Tuple[str, ...]:
 def _snapshot_trade_log_formula_caches(
     path: Path,
     ws,
+    *,
+    authored_statistics: bool = False,
 ) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    entries = {
-        str(entry["coordinate"]): entry
-        for entry in _trade_log_authored_formula_entries(ws)
-    }
+    if authored_statistics:
+        if ws.title != STATS1_SHEET:
+            raise ValueError('Authored statistics cache scope must be STATS1')
+        entries = {}
+        owned = set(_stats1_semantic_row_policies(ws))
+        market_columns = set(_stats1_market_columns(ws).values())
+        for cell in list(ws._cells.values()):
+            if not _cell_contains_formula(cell): continue
+            if cell.row in owned and cell.column in market_columns:
+                continue  # Generator-owned recalculated metric, never transplant.
+            if cell.data_type != 'f' or not isinstance(cell.value, str):
+                raise IncrementalWorkbookUpdateNotEligible('Unsupported STATS1 authored formula representation', unsafe_full_rebuild=True)
+            entries[cell.coordinate] = dict(coordinate=cell.coordinate, row_id=ws.title,
+                header=cell.coordinate, formula=cell.value,
+                row_label=ws.cell(cell.row, 1).value,
+                dependency=_trade_log_formula_dependency_signature(ws, cell.coordinate, cell.value))
+    else:
+        entries = {
+            str(entry["coordinate"]): entry
+            for entry in _trade_log_authored_formula_entries(ws)
+        }
     if not entries:
         return {}
     with zipfile.ZipFile(path) as package:
@@ -17324,6 +17399,8 @@ def _snapshot_trade_log_formula_caches(
     records: Dict[Tuple[str, str], Dict[str, Any]] = {}
     ambiguous: Set[Tuple[str, str]] = set()
     for coordinate, entry in entries.items():
+        if authored_statistics and sum(c.get('r') == coordinate for c in root.findall(f'.//{{{_SPREADSHEETML_NAMESPACE}}}c')) != 1:
+            raise IncrementalWorkbookUpdateNotEligible('Ambiguous STATS1 formula coordinate', unsafe_full_rebuild=True)
         xml_cell = xml_cells.get(coordinate)
         if xml_cell is None:
             continue
@@ -17333,7 +17410,9 @@ def _snapshot_trade_log_formula_caches(
         cached_value = xml_cell.find(
             f"{{{_SPREADSHEETML_NAMESPACE}}}v"
         )
-        if (
+        if authored_statistics and (formula_element is None or any(k in formula_element.attrib for k in ('t', 'si', 'ref'))):
+            raise IncrementalWorkbookUpdateNotEligible('Unsupported shared/array STATS1 authored formula', unsafe_full_rebuild=True)
+        if not authored_statistics and (
             formula_element is None
             or cached_value is None
             or cached_value.text is None
@@ -17346,8 +17425,9 @@ def _snapshot_trade_log_formula_caches(
         records[key] = {
             **entry,
             "formula_ooxml_signature": _formula_ooxml_signature(formula_element),
-            "cached_value": str(cached_value.text),
+            "cached_value": (cached_value.text if cached_value is not None else None) if authored_statistics else str(cached_value.text),
             "cached_type": xml_cell.attrib.get("t"),
+            **({'cache_present': cached_value is not None} if authored_statistics else {}),
         }
     for key in ambiguous:
         records.pop(key, None)
@@ -17359,7 +17439,37 @@ def _plan_trade_log_formula_cache_transplant(
     source_records: Mapping[Tuple[str, str], Mapping[str, Any]],
     *,
     strict: bool,
+    authored_statistics: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if authored_statistics:
+        plan, refused = [], []
+        owned = set(_stats1_semantic_row_policies(ws))
+        market_columns = set(_stats1_market_columns(ws).values())
+        for (_sheet, coordinate), record in source_records.items():
+            cell = ws[coordinate]; reason = ''
+            if ws.title != STATS1_SHEET or _sheet != ws.title or cell.data_type != 'f' or cell.value != record['formula']:
+                reason = 'formula identity/coordinate/text changed'
+            elif ws.cell(cell.row, 1).value != record['row_label']:
+                reason = 'authored row identity changed'
+            elif cell.row in owned and cell.column in market_columns:
+                reason = 'target is generator-owned'
+            else:
+                original = record['dependency']
+                current = _trade_log_formula_dependency_signature(ws, coordinate, cell.value)
+                if not original.get('safe') or not current.get('safe'):
+                    reason = original.get('reason') or current.get('reason') or 'unsupported dependencies'
+                elif original.get('signature') != current.get('signature'):
+                    reason = 'formula dependency values changed'
+                elif any(ws[c].row in owned and ws[c].column in market_columns for c in original.get('coordinates', ())):
+                    reason = 'dependency is generator-owned/postprocessed'
+            if reason: refused.append(dict(cell=coordinate, reason=reason))
+            else: plan.append({**dict(record), 'target_coordinate': coordinate})
+        diagnostics = dict(stats1_formula_cache_source_cells=len(source_records),
+            stats1_formula_cache_planned_cells=len(plan), stats1_formula_cache_refused_cells=len(refused),
+            stats1_formula_cache_refused=refused)
+        if strict and refused:
+            raise IncrementalWorkbookUpdateNotEligible('STATS1 authored cache refused: ' + str(refused), unsafe_full_rebuild=True)
+        return plan, diagnostics
     headers = _trade_log_header_map(ws)
     row_id_col = headers.get("Row ID")
     rows_by_id: Dict[str, List[int]] = defaultdict(list)
@@ -17458,8 +17568,8 @@ def _verify_trade_log_formula_cache_transplant(
             formula_element is None
             or _formula_ooxml_signature(formula_element)
             != record.get("formula_ooxml_signature")
-            or cached_value is None
-            or str(cached_value.text) != str(record.get("cached_value"))
+            or (cached_value is not None) != record.get('cache_present', True)
+            or (cached_value.text if cached_value is not None else None) != record.get("cached_value")
             or xml_cell.attrib.get("t") != record.get("cached_type")
         ):
             raise RuntimeError(
@@ -17493,8 +17603,9 @@ def _patch_formula_caches_in_worksheet_payload(
         if cached_type is not None:
             escaped_type = _xml_escape(str(cached_type), {'"': "&quot;"})
             start_tag = start_tag[:-1] + f' t="{escaped_type}">'
-        cached_text = _xml_escape(str(record.get("cached_value") or ""))
+        cached_text = _xml_escape('' if record.get('cached_value') is None else str(record['cached_value']))
         value_element = f"<v>{cached_text}</v>"
+        if record.get('cache_present', True) is False: value_element = ''
         value_pattern = re.compile(
             r"<(?:[A-Za-z_][\w.-]*:)?v(?:\s[^>]*)?>.*?"
             r"</(?:[A-Za-z_][\w.-]*:)?v\s*>",
@@ -17531,6 +17642,8 @@ def _preserve_candidate_ooxml(
     sheet_name: str,
     formula_cache_plan: Sequence[Mapping[str, Any]],
     chart_snapshot: Mapping[str, Any],
+    *,
+    authored_statistics_plan: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     expected_chart_parts = dict(chart_snapshot.get("parts") or {})
     expected_chart_relationships = tuple(
@@ -17583,6 +17696,30 @@ def _preserve_candidate_ooxml(
                     package.read(worksheet_part), formula_cache_plan
                 )
             )
+        if authored_statistics_plan:
+            part = _worksheet_ooxml_part_name(package, STATS1_SHEET)
+            original = package.read(part)
+            root = ET.fromstring(original)
+            cells = {c.get('r'): c for c in root.findall(f'.//{{{_SPREADSHEETML_NAMESPACE}}}c')}
+            for record in authored_statistics_plan:
+                cell = cells.get(record['target_coordinate'])
+                formula = cell.find(f'{{{_SPREADSHEETML_NAMESPACE}}}f') if cell is not None else None
+                if formula is None or _formula_ooxml_signature(formula) != record['formula_ooxml_signature']:
+                    raise RuntimeError('STATS1 authored formula OOXML changed before cache restoration')
+            patched = _patch_formula_caches_in_worksheet_payload(original, authored_statistics_plan)
+            # This phase can change only the declared value/cache-type fields.
+            old, new = ET.fromstring(original), ET.fromstring(patched)
+            for doc in (old, new):
+                for record in authored_statistics_plan:
+                    found = doc.findall(f'.//{{{_SPREADSHEETML_NAMESPACE}}}c[@r="{record["target_coordinate"]}"]')
+                    if len(found) != 1: raise RuntimeError('Ambiguous cache restoration target')
+                    cell = found[0]; cell.attrib.pop('t', None)
+                    values = cell.findall(f'{{{_SPREADSHEETML_NAMESPACE}}}v')
+                    if len(values) > 1: raise RuntimeError('Ambiguous cache value')
+                    for value in values: cell.remove(value)
+            if ET.tostring(old) != ET.tostring(new):
+                raise RuntimeError('Authored cache restoration changed unrelated XML/formula/presentation')
+            replacements[part] = patched
         changed_replacements = {
             part_name: payload
             for part_name, payload in replacements.items()
@@ -17602,7 +17739,7 @@ def _preserve_candidate_ooxml(
                             payload = changed_replacements[info.filename]
                         else:
                             payload = source_package.read(info.filename)
-                        target_package.writestr(info, payload)
+                        target_package.writestr(copy(info), payload)
             with rewrite_path.open("r+b") as handle:
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -17611,6 +17748,8 @@ def _preserve_candidate_ooxml(
                     rewrite_path, sheet_name, formula_cache_plan
                 )
             _verify_chart_ooxml_snapshot(rewrite_path, chart_snapshot)
+            if authored_statistics_plan:
+                _verify_trade_log_formula_cache_transplant(rewrite_path, STATS1_SHEET, authored_statistics_plan)
             os.replace(rewrite_path, candidate_path)
             replaced = True
         finally:
@@ -17622,12 +17761,15 @@ def _preserve_candidate_ooxml(
                 candidate_path, sheet_name, formula_cache_plan
             )
         _verify_chart_ooxml_snapshot(candidate_path, chart_snapshot)
+        if authored_statistics_plan:
+            _verify_trade_log_formula_cache_transplant(candidate_path, STATS1_SHEET, authored_statistics_plan)
     changed_chart_parts = sum(
         1
         for part_name in expected_chart_parts
         if part_name in changed_replacements
     )
     return {
+        'stats1_formula_caches_restored': len(authored_statistics_plan),
         "trade_log_formula_caches_transplanted": len(formula_cache_plan),
         "trade_log_formula_cache_candidate_verified": True,
         "chart_ooxml_parts_verified": len(expected_chart_parts),
@@ -17809,6 +17951,8 @@ def update_master_journal_workbook_data_only(
     preserved_trade_log_formula_caches: Dict[
         Tuple[str, str], Dict[str, Any]
     ] = {}
+    preserved_stats1_formula_caches = {}
+    stats1_formula_cache_plan = []
     preserved_trade_log_profit_percent_fractions: Dict[
         str, List[Dict[str, Any]]
     ] = {}
@@ -17857,6 +18001,9 @@ def update_master_journal_workbook_data_only(
             preserved_trade_log_formula_caches = (
                 _snapshot_trade_log_formula_caches(path, source_trade_log)
             )
+            if STATS1_SHEET in wb.sheetnames:
+                preserved_stats1_formula_caches = _snapshot_trade_log_formula_caches(
+                    path, wb[STATS1_SHEET], authored_statistics=True)
         except Exception:
             wb.close()
             raise
@@ -19491,12 +19638,17 @@ def update_master_journal_workbook_data_only(
         )
         wb.save(candidate)
         if preserve_existing_layout:
+            stats1_formula_cache_plan, stats1_cache_diagnostics = _plan_trade_log_formula_cache_transplant(
+                wb[STATS1_SHEET], preserved_stats1_formula_caches,
+                strict=True, authored_statistics=True)
+            diagnostics.update(stats1_cache_diagnostics)
             diagnostics.update(
                 _preserve_candidate_ooxml(
                     candidate,
                     TRADE_LOG_SHEET,
                     formula_cache_plan,
                     source_chart_snapshot,
+                    authored_statistics_plan=stats1_formula_cache_plan,
                 )
             )
             if (
@@ -19544,7 +19696,8 @@ def update_master_journal_workbook_data_only(
             )
         else:
             diagnostics["recommendation_chart_assets_deferred"] = True
-        return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
+        return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics,
+                '_stats1_formula_cache_plan': stats1_formula_cache_plan}
     finally:
         wb.close()
 
@@ -21540,11 +21693,12 @@ def _ensure_trade_log_schema(ws, diagnostics=None):
     _apply_trade_log_dropdown_validations(ws)
 
 
-def _counter_cell_package_patch(payload, changes, *, new_column=None, validation=None, merge=None):
+def _counter_cell_package_patch(payload, changes, *, new_column=None, validation=None, merge=None, metric_heights=None):
     """Patch cells and additive ranges without round-tripping an Excel package."""
     from xml.sax.saxutils import escape
     cell_pattern = rb'<c\b[^<>]*\br="([A-Z]+[0-9]+)"[^<>]*?(?:/>|>(?:(?!</?(?:c|row)\b).)*</c>)'
     grouped = defaultdict(dict)
+    metric_heights = metric_heights or {}
     for coordinate, value in changes.items():
         grouped[int(re.search(r"[0-9]+", coordinate).group())][coordinate] = value
     def cell_xml(coordinate, spec):
@@ -21561,13 +21715,18 @@ def _counter_cell_package_patch(payload, changes, *, new_column=None, validation
         for coordinate, spec in edits.items(): cells[coordinate] = cell_xml(coordinate,spec)
         opening = row[:row.index(b'>')+1]
         if opening.endswith(b'/>'): opening=opening[:-2]+b'>'
+        if n in metric_heights:
+            if re.search(rb'\b(?:ht|customHeight)=', opening):
+                raise ValueError('Authored metric row height must not be overwritten')
+            opening = opening[:-1] + b' ht="14.5" customHeight="1">'
         return opening+b''.join(cells[k] for k in sorted(cells,key=lambda c: coordinate_to_column(c)))+b'</row>'
     sd = re.search(rb'<sheetData\b[^>]*>(.*?)</sheetData>',payload,re.S)
     if not sd: raise ValueError("Worksheet has no sheetData")
     body = re.sub(rb'<row\b[^>]*?(?:/>|>.*?</row>)',row_patch,sd.group(1),flags=re.S)
     for n, edits in sorted(grouped.items()):
         # Additive rows are at the edge, never inserted between existing rows.
-        body += f'<row r="{n}">'.encode()+b''.join(cell_xml(c,v) for c,v in sorted(edits.items(),key=lambda pair:coordinate_to_column(pair[0])))+b'</row>'
+        height = ' ht="14.5" customHeight="1"' if n in metric_heights else ''
+        body += f'<row r="{n}"{height}>'.encode()+b''.join(cell_xml(c,v) for c,v in sorted(edits.items(),key=lambda pair:coordinate_to_column(pair[0])))+b'</row>'
     payload=payload[:sd.start(1)]+body+payload[sd.end(1):]
     if new_column:
         index,width = new_column
@@ -21621,7 +21780,7 @@ def _prepare_counter_trend_cells_package(path, candidate_path, *, expected_sha25
     source_rows=source.get('items') or []
     supplied={str(key):r for r in (rows or []) for key in _master_journal_manual_override_keys(r)}
     wb=load_workbook(BytesIO(original),data_only=False)
-    payloads={};approved={};meta={}
+    payloads={};approved={};meta={};metric_heights={}
     ns='{'+_SPREADSHEETML_NAMESPACE+'}'
     with zipfile.ZipFile(BytesIO(original)) as style_package:
         styles_by_sheet={ws.title:{cell.attrib['r']:int(cell.attrib.get('s','0')) for cell in ET.fromstring(style_package.read(_worksheet_ooxml_part_name(style_package,ws.title))).findall('.//'+ns+'c')} for ws in wb}
@@ -21653,6 +21812,11 @@ def _prepare_counter_trend_cells_package(path, candidate_path, *, expected_sha25
             existing=[r for r in range(1,ws.max_row+1) if str(ws.cell(r,1).value or '').strip()==COUNTER_TREND_HEADER]
             if len(existing)>1:raise RuntimeError('Duplicate Counter Trend metric rows')
             row=existing[0] if existing else ws.max_row+1
+            # Only this uniquely identified generated count metric may acquire
+            # missing row metadata. Never normalize an authored explicit height.
+            if (ws.row_dimensions[row].height is None
+                    and not ws.row_dimensions[row].customHeight):
+                metric_heights[ws.title] = {row: 14.5}
             ref=next((r for r in range(1,ws.max_row+1) if str(ws.cell(r,1).value or '').strip().lower() in {'test','trades','total trades'}),1)
             edits={f'A{row}':(COUNTER_TREND_HEADER,cell_style(ws,ref,1))}
             for col,val in values_by_col.items():edits[f'{get_column_letter(col)}{row}']=(int(val),cell_style(ws,ref,col))
@@ -21677,8 +21841,9 @@ def _prepare_counter_trend_cells_package(path, candidate_path, *, expected_sha25
                 metric_row(ws,{c:counter_trend_count(_report_rows_for_period({'items':source_rows},year=int(ws.title),month=c-1)) for c in range(2,min(13,ws.max_column)+1)})
         with zipfile.ZipFile(BytesIO(original)) as package:
             for sheet,(edits,col,dv,merge) in plans.items():
-                part=_worksheet_ooxml_part_name(package,sheet);payloads[part]=_counter_cell_package_patch(package.read(part),edits,new_column=col,validation=dv,merge=merge)
-                approved[part]=set(edits);meta[part]={'new_column':col,'validation':dv,'merge':merge}
+                heights=metric_heights.get(sheet,{})
+                part=_worksheet_ooxml_part_name(package,sheet);payloads[part]=_counter_cell_package_patch(package.read(part),edits,new_column=col,validation=dv,merge=merge,metric_heights=heights)
+                approved[part]=set(edits);meta[part]={'new_column':col,'validation':dv,'merge':merge,'metric_heights':heights}
             # Excel tables, when present, must remain consistent with appended edge columns.
             for part in package.namelist():
                 if not part.startswith('xl/tables/') or not part.endswith('.xml'):continue
@@ -21699,7 +21864,8 @@ def _prepare_counter_trend_cells_package(path, candidate_path, *, expected_sha25
                     new=new.replace(b'</tableColumns>',f'<tableColumn id="{max(int(c.attrib["id"]) for c in cols)+1}" name="Counter Trend"/></tableColumns>'.encode())
                     new=re.sub(rb'(<tableColumns count=")[0-9]+',lambda m:m.group(1)+str(count+1).encode(),new,count=1);payloads[part]=new
             with zipfile.ZipFile(candidate_path,'w') as candidate:
-                for info in package.infolist():candidate.writestr(info,payloads.get(info.filename,package.read(info.filename)))
+                from copy import copy
+                for info in package.infolist():candidate.writestr(copy(info),payloads.get(info.filename,package.read(info.filename)))
         validate_counter_trend_package(path,candidate_path,approved,meta)
         return {'changed_cells':{part:sorted(cells) for part,cells in approved.items()},'source_sha256':expected_sha256,'candidate_sha256':hashlib.sha256(candidate_path.read_bytes()).hexdigest(),'counts':counts,'preservation_verified':True}
     finally:wb.close()
@@ -21728,6 +21894,15 @@ def validate_counter_trend_package(source,candidate,approved,meta):
             oldrows={r.attrib['r']:r for r in old.find(ns+'sheetData')};newdata=new.find(ns+'sheetData')
             oldcells={c.attrib['r']:c for r in oldrows.values() for c in r}
             for row in list(newdata):
+                number=int(row.attrib['r'])
+                if number in meta[name].get('metric_heights',{}):
+                    if row.get('ht')!='14.5' or row.get('customHeight')!='1':raise RuntimeError('Generated metric height contract missing')
+                    prior=oldrows.get(str(number))
+                    if prior is not None:
+                        label=next((c for c in prior if c.get('r')=='A'+str(number)),None)
+                        text=''.join(label.itertext()) if label is not None else ''
+                        if text!=COUNTER_TREND_HEADER or 'ht' in prior.attrib or 'customHeight' in prior.attrib:raise RuntimeError('Unproved metric row height change')
+                    row.attrib.pop('ht');row.attrib.pop('customHeight')
                 for cell in list(row):
                     coord=cell.attrib.get('r')
                     if coord in approved[name]:
@@ -21785,8 +21960,12 @@ _counter_update = update_master_journal_workbook_data_only
 def update_master_journal_workbook_data_only(path,snapshot,*args,**kwargs):
     result=_counter_update(path,snapshot,*args,**kwargs)
     if result and result.get('ok'):
+        cache_plan = result.pop('_stats1_formula_cache_plan', [])
         candidate=Path(result.get('candidate_path') or path)
         result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(candidate)
+        if cache_plan:
+            _verify_trade_log_formula_cache_transplant(candidate, STATS1_SHEET, cache_plan)
+        result['diagnostics']['stats1_formula_caches_post_counter_verified'] = len(cache_plan)
     return result
 
 _counter_incremental = update_master_journal_workbook_incremental

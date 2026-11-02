@@ -5283,3 +5283,367 @@ ACCEPTED CLOSEOUT - NATIVE DELIVERY PREFLIGHT COMPLETED
 Cleanup remains completed:262 files,5 empty directories,34476251 logical bytes; no repair or cleanup replay.
 Protected verify completed with fresh equality and authenticated no-op push of existing b7d9f83a47227125009a2a3431294ddefa48b1cd.
 Acceptance COMPLETE; queue NONE; Job6 CANCELLED. Actual scoped commit/push and CURRENT equality follow in native terminal/private final receipt.
+
+
+JOURNAL RESYNC STATISTICS ROW HEIGHT - LOCAL FIX / VERIFICATION BOUNDARY (2026-11-01)
+Current job only; prior cleanup and BTC numbering remain accepted, sorter Job6
+CANCELLED. Current master/HEAD and fresh GitHub master observation both
+3f2b9c1b1e46ca70bba1835a783251fc370002da (delivered accepted closeout); later workbook
+b7d9f83 preserved. Initial authorized source targets clean/index empty. Unrelated
+runtime/configuration/deleted briefs/untracked work preserved; no Git write attempted.
+
+ONE scoped capture0.23668390000239015sec,706614-byte original, SHA256
+27994145309ceae82022573ac59913b42bd662c0c020438c9f9a94ff4a2498e3.
+STATS1 row137 proved Counter Trend A137/B137/C137/D137=label/5/5/0; row attributes
+only r=137, worksheet defaultRowHeight14.5. Other Counter Trend report rows128 all
+explicit ht14.5/customHeight1. Original sheet order includes STATS1,STATS2,SYMBOLS,
+Trade Log,P&L Calendar,actual leading-space ' SIM',YEARLY REPORT,2018..2026.
+No current Excel owner marker at capture. Canonical known temporary candidates absent;
+no failed candidate overwritten/rebuilt. Saved log excerpt confirms request
+resync-b6cf264774c1: observed1140.641025sec total/842.782471sec data-only update.
+No claim about failed resync's earlier allocation/store operations being rolled back,
+missing trades, corruption or cleanup causation. Monthly AUD pending message separate;
+no AUD/calendar logic change.
+
+Reproduction: executed ORIGINAL canonical verifier function from saved source baseline
+against immutable captured copy; exact generated_statistics_row_height_mismatch and
+[{sheet:STATS1,row:137,height:None}]. Fixed verifier on same copy reports NO managed
+height mismatch (full check later stops on absent private-copy recommendation assets;
+not called full live verification). Canonical additive Counter Trend patch previously
+emitted new rows without ht; presentation-mode updater skipped broad normalization.
+Proven contract inconsistency; original failed candidate bytes unavailable.
+
+Local source: new generated Counter Trend rows get explicit14.5/customHeight1;
+uniquely identified existing missing-height metric can acquire only those attributes.
+Authored explicit heights untouched. Existing package audit verifies exact declared
+row attributes, restores them in-memory for complete XML preservation comparison;
+ZipInfo objects copied. Semantic/report ownership distinguishes generated metrics from
+custom appended content. Verifier uses actual inherited sheet default, never treats
+all None as14.5. Wrong generated height still fails. Preservation source's explicit
+height may survive only with matching source coordinate/label/height, read via small
+XML contract rather than another openpyxl source load. Same source-bound policy used
+at prepublication, final and unchanged-source fast paths. No wholesale STATS1 exemption,
+row137 hardcode, disabled verifier, broad normalization or performance rewrite.
+
+Focused checks consumed3 distinct nodes/2 invocations/5 scheduled executions.
+Invocation1 child OS exit3221225477,203.28074440010823sec: acceptance node reported
+FAIL; row_height-only regression node PASS; publication fixture interrupted by Windows
+access violation (stderr retained). No completed JUnit for crashed process; no false
+pass. Acceptance fixture error diagnosed from saved bytes: after removing explicit
+height it retained generator default15, instead of observed14.5; corrected fixture.
+Invocation2 ONLY failed/incomplete nodes: child exit1,normal completed JUnit bodies,
+186.5316723000724sec. Generation/additive/legacy/inherited-default node PASS; publication
+fixture FAIL before publication on existing YEARLY REPORT structural height invariant.
+Trimmed optional report cells also cleared original row dimensions; now corrected to
+retain that source dimension map, without weakening production audit. Last failed
+node body100.870765700005sec. Total child389.8124167001806sec. Passing row_height
+parameter ID confirmed exactly by collection; source/verbose cases never run.
+
+The two authorized invocations are exhausted. User asked via asynchronous question to
+authorize ONE additional invocation ONLY of failed
+ test_sync_preserves_canonical_stats1_layout_and_manual_formatting,
+with node/invocation<=240sec (two real isolated writer/publication passes), raising
+cumulative to3 invocations/6 executions but NOT repeating either passing node. Pending
+explicit answer; no additional execution scheduled yet. Source/test correction saved,
+not claimed verified. Publication/rollback/reservation-release and formula-cache
+sentinel assertions after successful fixture resync still UNEXECUTED/unproven.
+
+Real workbook metadata applies0: inherited14.5 already meets corrected contract, so
+no direct patch needed/planned. Workbook and all runtime stores/allocations/context/
+SQL/Dropbox untouched by this job; no live Resync/import/broker request. No new claim
+about changes made by the earlier failed live Resync. BTC Test and C379-C384 repair
+not replayed/reopened. Application/worker restart/kill,installs/builds/MQL/MT5,
+scheduled executions/subagents0. Current source not proved loaded by running worker;
+activation/manual acceptance PENDING, no Resync requested during failed verification.
+
+Private managed paths .codex-work/active/journal-resync-row-height-20261101 and
+.codex-work/retained/journal-resync-row-height-20261101. Keep captured original,
+source baselines, two fixture sets/runners and compact OS/JUnit/body/log receipts to
+resolve this concrete failed check. Release disposable fixtures/baselines via existing
+cleaner only after corrected verification; original capture until manual acceptance.
+No bulk DB/cache/folder backup. One capture plus fixtures within25MiB recovery/50MiB
+peak caps; no second capture. Housekeeping Audit/Apply0 pending verification success.
+
+Budget checkpoint: accounted new active1471.002sec of2400 (initial read85sec
+conservatively included), verification cap900,ordinary300,discovery120; capture1/1<=180,
+real metadata apply0/1<=180,live Resync0. Test cap3 nodes/2 invocations/6 executions,
+node120/invocation240 exhausted INVOCATIONS; requested bounded exception described
+above, NOT assumed approved. Historical crypto3 nodes/4 invocations/9 executions/
+62.3036947999747sec and cleanup history unchanged. Git commit/protected-helper/push0;
+no known-denied sandbox .git/identity operation retried. No delivery handoff emitted
+before publication check passes. Final exact task paths remain workbook helper,
+master service,affected existing sync-test file,this summary; no workbook staged.
+
+
+ROW HEIGHT CONTINUATION - AUTHORIZED ADDITIONAL NODE FAILED (2026-11-01)
+User "run the additional test" authorized exactly one failed-node invocation/node240.
+Ran ONLY test_sync_preserves_canonical_stats1_layout_and_manual_formatting. Actual
+child exit1,completed normal JUnit/setup/call/teardown bodies,143.82488030008972sec;
+node call126.40605850005522sec. No passing-node repeat or live data operation.
+Cumulative3 distinct nodes/3 invocations/6 scheduled executions,533.6372970002703sec child time.
+The invocation/execution allowances including explicit exception are now exhausted.
+
+This time the fixture passed its earlier report-dimension boundary but Counter Trend
+package preparation refused: Authored metric row height must not be overwritten.
+Offline exact fixture evidence in guard-failure-row-evidence.json: saved base candidate
+STATS1 Counter Trend row134 had only r; generated report metric cells had been removed
+by ordinary report update while their styled rows retained explicit14.5. Appending a
+new metric into such an already styled row incorrectly scheduled an unnecessary
+height write solely because the metric label was new. Guard correctly refused the
+redundant mutation. Corrected planner to schedule row-height metadata ONLY when the
+actual destination row height is missing; an existing explicit14.5 already satisfies
+the contract. Protective overwrite guard/audit remains intact, no authored height
+normalization. Correction AST-valid but NOT rerun/claimed verified. Original saved
+row137 diagnosis and two passing checks remain history; no source success claim.
+Full publication, cache sentinel and rollback assertions still unexecuted/unproven.
+
+No real workbook patch, live Resync, broker/import, store/allocation/folder mutation,
+restart, cleanup apply, Git commit/protected helper/push. Real workbook left untouched.
+Keep exact fixture/candidate and direct logs/JUnit/body receipts for this unresolved
+failure; do not discard/overwrite or rerun an apply. New production attempts remain0.
+Private continuation-accounting.json retains original start clock/counters and
+excludes inactive human-authorization wait using saved checkpoint/resumption metadata,
+with conservative60sec resumption-read allowance; no clock reset. Accounted active
+1787.008sec of2400; verification900 cap still applies, test child total above.
+Next boundary: NEW explicit authorization for any further test, at most the single
+corrected failed node; would raise totals to4 invocations/7 executions if authorized.
+No activation or manual live Resync requested while verification is incomplete.
+
+
+ROW HEIGHT CONTINUATION - FAILED NODE HIT AUTHORIZED TIME LIMIT (2026-11-01)
+User "run failed node" authorized ONE additional corrected failed-node invocation,
+node/invocation240sec, bringing counters to3 distinct IDs/4 invocations/7 scheduled
+executions. No unchanged passing-node repeats. Actual subprocess.run TimeoutExpired
+at240.13925839983858sec; no CompletedProcess/child OS exit value available, recorded
+null rather than invented. Setup completed; call/teardown/JUnit bodies NOT completed.
+Result INCONCLUSIVE, not pass. Own worker timeout handled by bounded subprocess.run;
+no application/worker service kill/restart or production data operation.
+Cumulative child test time773.7765554001089sec of verification900 cap (other verification also
+counts); at most126.223sec remains before other checks/delivery, insufficient
+for another240sec node. Invocation/execution allowances exhausted. No auto retry.
+
+Current row-height source correction remains local and NOT fully verified. Earlier
+generation/inherited-default acceptance and wrong-generated-height rejection remain
+passing history; publication/preservation/failure-reservation proof remains incomplete.
+Do not infer success from setup or preliminary height checks. No completed publication
+fixture receipt and no running-service activation proof. No real workbook metadata
+apply needed/planned for captured valid inherited14.5; real workbook/stores/allocations/
+Dropbox unchanged by this job. No live Resync/import/broker call; BTC Test/C379-C384
+accepted repair not replayed. Git commit/helper/push0,cleanup Audit/Apply0.
+
+Preserve pytest4 exact fixture/candidate/source baselines/runners and compact timeout/
+body/stdout/stderr receipts under managed job paths for offline diagnosis. Exact files
+in timeout-fixture-presence.json; original capture remains sole current immutable
+workbook evidence. Do not replace/delete this evidence or repeat the native old repair.
+Release only after verified resolution/manual acceptance. Existing claims/history and
+unrelated work remain preserved. Accounted active2141.067sec of2400 using unchanged
+original clock minus documented inactive authorization waits, all counters carried.
+Concrete remaining step: diagnose bounded fixture cost/blocking from retained inputs,
+then obtain revised verification/time authorization before another test. Do NOT ask
+user to activate/restart or try a live Resync while this proof remains incomplete.
+
+Offline bounded inspection after timeout (NO node rerun): retained pytest4 fixture
+has Counter Trend row134 ht14.5/customHeight1, confirming it passed the previous
+redundant-height guard; this is not completed resync/preservation proof. Source
+pytest3 fixture and timed-out pytest4 both have J149 formula6*7 with EMPTY cached
+value. Therefore no claim of cache loss OR cache preservation: fixture seeding only
+matched <v></v>, while actual serializer emitted <v/>. Corrected fixture to handle
+both and assert cached42 exists BEFORE calling the writer. This seed correction is
+AST-valid but unexecuted. Exact offline ZIP facts retained; no production diagnosis
+of cache loss inferred. Next verification needs explicit revised invocation/execution
+AND sufficient total-verification/active allowance, not another blind retry under
+exhausted caps. No new test, cleanup/apply or Git operation performed.
+
+
+RESYNC ROW HEIGHT - TIMEOUT DIAGNOSED / CACHE-PRESERVATION BOUNDARY (2026-11-01)
+Latest continuation authorized ONE additional failed-node invocation240, additional
+active1200/verification450; cumulative declared3600/1350. Original counters/clocks and
+all receipts preserved. Current branch master/HEAD3f2b9c1b1e46ca70bba1835a783251fc370002da;
+index empty at recovery. Existing local unpublished source changes recovered, never
+replaced with remote. Unrelated dirty/staged/untracked work preserved.
+
+Diagnosis BEFORE invocation: prior direct output lacked post-setup stage/trace; exact
+old timeout stack therefore unavailable. Existing test performed canonical generation,
+full Resync, unchanged-source Resync and a second full writer for rejection. Saved
+prior writer timing89.500282sec; this repeated whole pipeline could not be assumed
+bounded. Reused exact job-owned pytest3 prepared workbook (SHA25699ec9e049922ad0194a77d527ee39432c2f0d626358f7c112a1ad9ea2b1b041e),
+not a new real capture. Kept ONE real writer/audit/publication/final Resync flow;
+negative gate prepared to reuse the actual audited writer candidate, without repeating
+whole generation. Real verifier/publication/reservation not mocked. External snapshot/
+folder/context inputs isolated; network/Git subprocess fail-fast in owned child.
+Cache fixture seed now patches ONLY STATS1 J149, accepts legitimate <v/>/<v></v>
+spellings, and asserts actual formula6*7/cache42 BEFORE the writer. No blanket worksheet
+cache edits, no fabricated production cache metadata. Sheet order/leading-space SIM,
+all historical report sheets, source dimensions,27/22.5 custom heights retained.
+
+Invocation5 ONLY failed node: actual child OS exit1,162.9680900000967sec. Setup PASS,
+call FAIL149.2378338999115sec,teardown PASS; direct body reports persisted. Cumulative
+3 distinct nodes/5 invocations/8 executions,936.7446454002056sec child time. Allowance
+spent; no retry. Logs now prove actual isolated Resync returned ok=True in141.517909sec;
+data-only writer138.359426sec,prepublication verifier0.785032sec,atomic replace0.001723sec.
+Earlier inherited-height and wrong-generated-height checks remain passing evidence;
+planner's only subsequent change skips a redundant write to already explicit14.5,
+not those passing branches. No claim the entire failed node passes.
+
+New concrete failure AFTER publication: authored formula still =6*7 but actual seeded
+cached42 became blank/None at STATS1 J149. Preceding authored content/font/fill/alignment,
+custom/inherited heights,Counter Trend metric height,source sheet order/labels,trade
+count and real journal-gate release assertions passed. Cache assertion failed;
+unchanged-source second check/negative original-on-failure assertions NOT reached.
+Cached workbook handle now has try/finally cleanup even on assertion failure; this
+resource-only test edit is syntax-checked, not rerun. Do NOT remove cache assertion.
+
+One150sec delayed trace is saved: after the test failure it was formatting pytest
+tracebacks in ntpath.realpath -> inspect.getmodule/findsource -> pytest getsource.
+This is evidence of Windows failure-report formatting cost, not an async/socketpair
+or journal-lock trace. No old-stack location invented. Actual new request stages
+show fast reservation and no network operation; repeated writer is no longer needed.
+JUnit finalization also hit a PRIVATE RUNNER mistake: overbroad subprocess fail-fast
+blocked benign platform.node -> Windows cmd /c ver metadata probe. pytest5.xml is
+INVALID/truncated38-byte header; process exit1/body failure retained, never called a
+valid completed success. This was not sandbox/auto-review/security-policy denial.
+Future runner should use actual socket.gethostname metadata directly and short
+traceback formatting; no policy/env/identity changes or alternate loaders.
+
+Source inspection narrows the new preservation defect: base updater does wb.save;
+existing _preserve_candidate_ooxml restores Trade Log cache plans/charts, with no
+corresponding authored STATS1 cache restoration. Additive Counter Trend package audit
+preserves its input's unrelated formula/cache payloads. Extending unchanged authored
+STATS1 cache preservation would exceed this continuation's explicit production
+row-height/owned-row-planner-only scope. NO such production change made. Concrete
+next scope/verification proposal in private remaining-scope-plan.json. Do not claim
+cache preservation, source readiness or deliver a candidate with this failure.
+
+Real workbook writes/patches/applies0,live Resync0,new captures0,broker/import0,
+allocation/context/JSON/SQL/folder mutations0. No old cleanup/crypto replay, claim/ledger
+reset,AGENTS/custom-instructions edits,worker restart/kill,installs/builds/MQL/MT5,
+schedules/subagents. Earlier repairs remain accepted; Job6 CANCELLED. Source/Git
+commit/helper/push0; no denied sandbox operation repeated. No successful test receipt,
+therefore NO delivery handoff and no user activation/Resync instruction now.
+
+Supplement accounted active at checkpoint868.553sec of1200,plus preceding recorded
+active history retained separately; cumulative declared3600. Supplemental test child
+162.9680900000967sec,other diagnostics/static checks within450 verification cap;
+cumulative declared1350. Node/invocation240 unchanged. No automatic invocation beyond
+5/8. Housekeeping Apply0: conditional successful-verification prerequisite unmet.
+Keep concrete failed fixture/input/source baseline/one trace and compact receipts;
+exact reasons/release conditions in remaining-scope-plan.json/supplement-retention.json.
+Bounded own-job measurement: active66 files4561842 bytes,retained61 files876054 bytes
+at measurement (before checkpoint/plan append), well below25MiB recovery/50MiB combined.
+No broad inventory or inaccessible-directory probe. No large backup/DB/cache copy.
+Full job remains INCOMPLETE at proven cache-preservation/scope/verification boundary.
+
+
+RESYNC HEIGHT + STATS1 CACHE PRESERVATION - VERIFIED LOCAL / DELIVERY PENDING (2026-11-02)
+Latest continuation expressly authorized the exposed STATS1 authored-cache defect;
+supersedes prior scope/verification blockers. Earlier cleanup/crypto repairs accepted,
+Job6 CANCELLED. Current job only; manual Resync acceptance remains pending.
+Current local master/HEAD3f2b9c1b1e46ca70bba1835a783251fc370002da,initial index empty;
+initial authorized targets clean before this job. Preserve all unrelated dirty/staged/
+untracked work and later/manual journal changes. Known-denied sandbox .git/helper
+route NOT retried; no security/identity/configuration change or alternate Git storage.
+
+Confirmed inherited-height cause: original verifier rejects captured STATS1 row137
+Counter Trend with no explicit ht despite sheet default14.5. New metric creation
+sets explicit14.5; only uniquely identified missing-height metric metadata can be
+repaired. Already explicit/authored heights untouched. Actual inherited sheet default
+used; generated ownership checked; custom appended rows preserved. Checked source
+coordinate/label/explicit height permits unchanged authored presentation. Same rule
+at candidate,final and unchanged-source verification. No row137 production hardcode,
+blanket STATS1 exemption or broad normalization. Real saved workbook needs NO patch.
+
+Confirmed cache-loss stage: normal base workbook serialization clears authored cache;
+prior OOXML restore covered Trade Log only. Counter Trend package audit preserves its
+input's unrelated formulas/caches. Existing snapshot/planner now has narrowly opt-in
+STATS1 authored scope; Trade Log stable-row/header defaults retained. Source formula
+OOXML/cache captured before save; actual sheet part resolved through relationships.
+Only unchanged authored coordinate/formula/row identity and safe dependency signatures
+can be restored. Generated metrics/dependencies,changed inputs/formulas,moved/replaced/
+ambiguous/unsupported shared-array representations fail closed; no stale-cache replay.
+Missing/empty cache nodes, numeric zero and string cache types stay distinct. Existing
+worksheet patcher/verifier and candidate OOXML flow reused; no second cache system.
+Cache phase audits only declared value/type fields, keeping formulas/attributes/styles/
+row metadata/unrelated XML/package payloads unchanged. Cache verified after restoration,
+again after final Counter Trend package step, and in actually published fixture.
+Counts/reasons exposed in existing diagnostics; no silent required-cache disappearance.
+
+Verification NOW COMPLETE: invocation6,ONLY affected existing publication node,
+actual child exit0/completed normal JUnit/body/teardown,96.78287669993006sec.
+Node body84.48905139998533sec. Valid JUnit1 test/0 failures/0 errors/0 skips.
+Source and published data_only=False AND True prove formula6*7 and actual cached42;
+real cache plans/audit/type/zero/missing-vs-empty and changed-formula/input refusal
+cases pass. Real isolated writer+candidate gate+atomic publication+final Resync pass
+75.669060sec (writer73.161258sec); subsequent unchanged-source fast path passes
+0.924959sec. Negative candidate reuses actual audited writer output, changes only
+owned metric height to20,real prepublication verifier rejects; original fixture bytes
+identical and actual reservations/OS handles released. No verifier/publication fake.
+Custom heights27/22.5,default-height note,authored font/fill/alignment,formula cache,
+actual sheet order incl leading-space SIM/historical years and report dimensions
+preserved. No claim of faster LIVE Resync: fixture timing is not a performance benchmark.
+
+Timeout diagnosis retained precisely: old stack was not captured, so exact old
+blocking location not invented. Repeated generation/full writer passes removed via
+verified prepared fixture and reuse of real candidate for rejection. One diagnostic
+trace showed Windows pytest failure formatting (inspect/getmodule/ntpath.realpath).
+Prior private fail-fast also blocked benign Windows-version probe during JUnit
+metadata,not a sandbox/security rejection. Corrected OWNED runner uses actual
+socket.gethostname and short traceback output; real external network/Git still fail
+fast. Normal JUnit completes now. Prior failures/timeouts remain immutable receipts.
+
+Cumulative current-job3 distinct nodes/6 invocations/9 executions,1033.5275221001357sec child time.
+Latest allowance used1of2 additional invocations/1of2 executions; STOP after normal
+pass, second unused. Two earlier passing generation/inheritance and wrong-height
+checks not repeated; cache changes do not change their production height branches.
+Main guard planner correction is exercised in current passing node. Historical
+crypto/cleanup verification counters remain separate, unchanged. No broad suites.
+
+Successful automatic housekeeping, single original batch spent1/1: Audit exit0,
+95 exact targets; Apply exit0/completed,2.613981399917975sec parent:
+67 files/28 empty directories/4647023 logical bytes deleted.
+Exact absence postcheck passed; no observed disk-free claim made.19 retained entries
+are protected synthetic fixture lock files and mixed parents; no guard relaxation.
+Exact paths/reasons/release conditions in completion-housekeeping-manifest.json.
+Old baselines/runners/fixtures/candidates retired, not copied elsewhere. Keep compact
+OS/JUnit/stage/diagnostic receipts and sole original source capture706614 bytes until
+manual acceptance; then retire redundant recovery through normal reviewed housekeeping.
+Original capture SHA25627994145309ceae82022573ac59913b42bd662c0c020438c9f9a94ff4a2498e3.
+No duplicate capture, DB/cache/folder backup; retained25MiB/combined50MiB ceilings kept.
+Old immutable cleanup/crypto claims/ledgers/digests/receipts untouched.
+
+Real journal/Trading Journal.xlsx UNTOUCHED. New captures/applies/patches/live Resyncs0,
+broker/import calls0,live JSON/SQL/allocation/context/folder edits0. Preserve all current
+manual values/formulas/caches/presentation/sheet names/order/Counter Trend/commissions.
+BTC2026-10-18 09:21:51 Test Yes/blank number/no link; Q1 C379,Q2 C380,TREE C381,WET C382,
+DOOD C383,live BTW C384 remains accepted and unreplayed; no history fabricated.
+Worker/app restarts/kills,installs/builds/MQL/MT5,schedules/subagents0. Running worker
+has NOT been proved to load corrected code; activation/manual acceptance still pending.
+
+Latest allowance active1200 incl diagnosis/test/housekeeping/summary/delivery; accounted
+at checkpoint803.451sec including conservative60sec opening-read allowance.
+Cumulative declared4800/verification1950,latest verification600; known latest test
+96.78287669993006 plus cleanup Audit/Apply/static/delivery carried. Original clocks/
+prior actual usage and human-authorization wait accounting preserved, not reset.
+Node/invocation240,ordinary300,discovery60; capture/apply0. Final task delta reviewed
+once against initial baseline and passing source hashes. Tracked paths ONLY
+ tools/master_journal_workbook.py; render/master_service.py;
+ tests/test_master_service_master_journal_sync.py; summary/CODEX_SUMMARY_latest.txt.
+No workbook/private logs/runtime stores in commit. Source/test success LOCAL; task
+commit/protected push still PENDING permitted native saved-user delivery route.
+ONE new digest/source/JUnit/cleanup-pinned native handoff must perform protected verify
+(authenticated no-op push of EXISTING3f2b9c1,not read-only) before exact path-only commit,
+inspect actual commit/preserved unrelated staging,protected push ONCE,fresh CURRENT
+local/remote equality. No tests/repair/cleanup/Resync replay in handoff; stop on errors
+or changed baseline, no delivery retry. Actual SHA/status follow native receipt.
+
+After successful source delivery: save/close Excel; stop/reopen LocalTradingTools via
+its normal user controls to load code; perform ONE manual Resync and confirm success,
+BTC Test/blank number/no link,C379-C384 sequence and authored layout. No new trade or
+broker import needed. Do not call fixture success live Resync/manual acceptance.
+
+
+RESYNC HEIGHT/CACHE SOURCE - NATIVE DELIVERY PREFLIGHT COMPLETED
+Normal passing publication test exit0/96.78287669993006sec with valid JUnit; cached42/type/zero/dependency refusals and original-on-failure assertions passed.
+Housekeeping complete:67 files,28 empty directories,4647023 logical bytes. Workbook untouched; no live Resync, repair, cleanup or test replay.
+Protected verify completed with fresh equality and authenticated no-op push of existing 3f2b9c1b1e46ca70bba1835a783251fc370002da.
+Worker activation/manual acceptance PENDING. After delivery: save/close Excel, normal LocalTradingTools stop/reopen, then ONE Resync and inspect preserved Test/numbering/layout.
+Actual scoped commit/push SHA and CURRENT equality follow in native terminal/private final receipt.
