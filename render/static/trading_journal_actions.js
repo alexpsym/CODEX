@@ -29,7 +29,7 @@
   const makeFallbackButton = () => ({ id: '', textContent: '', style: { display: 'none' }, disabled: false, addEventListener: () => {} });
   const resumeBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
   const cancelBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
-  resumeBtn.id = 'journal-retry-resume-btn'; resumeBtn.textContent = 'Resume after closing Excel'; resumeBtn.style.display = 'none';
+  resumeBtn.id = 'journal-retry-resume-btn'; resumeBtn.textContent = 'Retry'; resumeBtn.style.display = 'none';
   cancelBtn.id = 'journal-retry-cancel-btn'; cancelBtn.textContent = 'Cancel'; cancelBtn.style.display = 'none';
   const hasRetryControls = Boolean(status && typeof status.after === 'function');
   if (status && typeof status.after !== 'function') status.after = () => {};
@@ -63,9 +63,15 @@
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
   const isExcelLockPayload = (payload) => {
-    if (payload?.code === 'EXCEL_WORKBOOK_OPEN') return true;
+    if (['WORKBOOK_ACCESS_DENIED', 'WORKBOOK_ACCESS_PROBE_FAILED', 'MASTER_JOURNAL_SYNC_IN_PROGRESS', 'TRADING_JOURNAL_RESYNC_IN_PROGRESS'].includes(payload?.code)) return false;
+    if (['EXCEL_WORKBOOK_OPEN', 'WORKBOOK_IN_USE'].includes(payload?.code)) return true;
     const errs = Array.isArray(payload?.errors) ? payload.errors.map((e) => String(e)) : [];
     return errs.includes('workbook_locked') || errs.includes('excel_open');
+  };
+  const workbookBusyMessage = (payload) => {
+    const message = String(payload?.message || '').trim();
+    // Legacy codes/markers/messages identify a retry category, never an owner.
+    return message && !/\bexcel\b/i.test(message) ? message : 'Trading Journal.xlsx is in use by another process. Retry when it is available.';
   };
   const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (openBtn) openBtn.disabled = false; if (importBtn) importBtn.disabled = false; if (resyncBtn) resyncBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
   const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true; };
@@ -170,7 +176,7 @@
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
         if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
-        setStatus(`Import failed: ${formatImportError(payload, 'Trading Journal.xlsx appears to be open/locked. Close Excel, then press Resume.')}`, true);
+        setStatus(`Import failed: ${workbookBusyMessage(payload)}`, true);
         setPendingRetry('import', () => runImport(file, explicitMode));
         return;
       }
@@ -235,7 +241,7 @@
       const res = await fetch('/api/trading-journal/resync', { method: 'POST', headers: { Accept: 'application/json' } });
       const payload = await res.json().catch(() => ({}));
       if (isExcelLockPayload(payload)) {
-        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setStatus(workbookBusyMessage(payload), true);
         setPendingRetry('resync', runResync);
         return;
       }
@@ -343,12 +349,10 @@
       const payload = await res.json().catch(() => ({}));
       if (isExcelLockPayload(payload)) {
         if (!hasRetryControls) {
-          const retry = window.confirm('Trading Journal.xlsx appears to be open in Excel. Close it, then click OK to retry.');
-          if (retry) return await runBybitAdjust(amount, reason);
-          setStatus('Adjustment cancelled. Close Excel before trying again.', true);
+          setStatus(workbookBusyMessage(payload), true);
           return;
         }
-        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setStatus(workbookBusyMessage(payload), true);
         setPendingRetry('bybit_demo_adjustment', () => runBybitAdjust(amount, reason));
         return;
       }

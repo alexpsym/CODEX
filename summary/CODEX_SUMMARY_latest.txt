@@ -5647,3 +5647,100 @@ Housekeeping complete:67 files,28 empty directories,4647023 logical bytes. Workb
 Protected verify completed with fresh equality and authenticated no-op push of existing 3f2b9c1b1e46ca70bba1835a783251fc370002da.
 Worker activation/manual acceptance PENDING. After delivery: save/close Excel, normal LocalTradingTools stop/reopen, then ONE Resync and inspect preserved Test/numbering/layout.
 Actual scoped commit/push SHA and CURRENT equality follow in native terminal/private final receipt.
+
+
+JOURNAL RESYNC FILE-ACCESS DIAGNOSIS - 2026-11-02 (LOCAL VERIFIED; NATIVE DELIVERY PENDING)
+Current job journal-resync-lock-20261102; no next feature job. Earlier cleanup/crypto
+accepted; sorter Job6 CANCELLED. Preserve delivered inherited-height/STATS1 authored
+formula-cache fixes at9b0e0a59146bf8664043cd323c4c55914f7d38fb. Supplied native receipt
+confirms protected push exit0/current equality/native15.03932540002279sec. Prior job
+3 nodes/6 invocations/9 executions/1033.5275221001357sec, last pass96.78287669993006sec;
+prior housekeeping67 files/28 directories/4647023 bytes remains complete, not replayed.
+User reports Excel CLOSED. Screen's 'Resume after closing Excel' was hardcoded for
+unknown-owner WORKBOOK_IN_USE/workbook_locked and legacy codes. It was not owner
+identification. No actual Excel owner or own leaked workbook reader has been proved.
+
+ONE scoped diagnostic capture exit0/11.998626200016588sec (core10.509964799974114sec):
+request resync-8335deda3b40, workerPID70620. Initial exclusive probe/reservation passed;
+snapshot71.942114sec, data-only writer938.934030sec, candidate validation passed,
+recommendation preflight22.597196sec; failure total1087.157484sec at final probe/replace
+boundary, with no completed final_replace. Existing log lacks original WinError,
+exception filenames and owner, so final probe versus replacement remains unresolved.
+Earlier snapshot/cache/SQLite operations ran; do NOT infer their state was undone.
+Log records NORMAL user Exit17:54:17 and worker shutdown17:54:18.75, not agent action.
+Current exact canonical exclusive-access probe SUCCEEDED (lockedFalse) and closed its
+own handle. This is current evidence, not denial of the prior conflict. Build-info GET
+ONCE: connection refused10061; running loaded build not established. Exact prior PID
+query unavailable87. Exact-file Restart Manager start failed29 before a session existed;
+no owner list obtained, no shutdown/restart APIs called. Diagnostic sandbox identity
+is not saved-user identity; failed owner query is uncertainty. No current reproduced
+conflict justifies a speculative unlock, handle-lifetime edit or another capture.
+
+Canonical changes: neutral Retry and owner-neutral sharing message, including legacy
+Excel-specific messages; access denied/probe failures and app-owned operations cannot
+enter external-lock retry branch. Explicit retry/cancel, captured action arguments,
+duplicate-click guards retained; no automatic re-POST, including missing-controls
+financial fallback. Existing journal reservation precedes external access probe so
+known in-process work reports active caller/elapsed; early Resync busy includes same
+known ownership. All reservations/OS handles release normally on blocked preflight.
+Exclusive probe/share modes/publication checks unchanged. No second lock system.
+Before conversion, blocked paths log request/sync ID,currentPID,stage,operation,
+WinError,exception type,filename/filename2/resource,reason and ownerunknown. Final
+probe/replace and asset publication distinguished; a candidate/asset error identifies
+its actual resource rather than blindly blaming canonical workbook. No tools helper
+handle changes because diagnosis did not establish a leak.
+
+Focused verification COMPLETE:4 distinct nodes,2 invocations,5 scheduled executions.
+Invocation1 exit1/completed,27.501233299961314sec:3 pass; backend own-operation test
+failed on test's wrong 'message' field assumption (existing payload uses
+master_journal_error), before later assertions. Concrete assertion corrected only.
+Invocation2 ONLY failed node,exit0/completed23.10032740002498sec. Total child
+50.601560699986294sec. Valid JUnit and setup/call/teardown receipts for every execution.
+Real Windows isolated fixtures prove sharing32/33 unknown owner, probe closes own
+handle, stale marker not ownership, release restores exclusive access, real other-thread
+journal gate/Resync gate report own caller/elapsed, blocked paths release gates/handles,
+denied/probe distinct, fixture originals/marker unchanged. Node behavioral harness
+proves neutral label/message, legacy owner scrubbing, one request per explicit click,
+double-click guard, cancel without POST, controls restored, own-operation status and
+no unrelated import/financial replay. Existing static capture guards retained.
+No unchanged passing reruns, full suites or prior publication-node rerun.
+
+Automatic exact-manifest housekeeping Audit exit0/12 targets; ONE Apply exit0,
+0.36235289997421205sec parent:11 files/1 empty directory/2685793 logical bytes deleted.
+Exact absence postcheck passed; no disk-free recovery claim. Two protected synthetic
+fixture-transaction.lock files and their5 mixed ancestor directories retained; no
+cleaner guard weakened. Exact paths/reasons in private housekeeping-manifest.json.
+Keep diagnostic-capture.json/worker-request-excerpt.txt and completed test/OS/JUnit/
+body receipts, reviewed task patch and housekeeping receipts in
+.codex-work/retained/journal-resync-lock-20261102/ for pending activation/acceptance
+and unresolved historical owner/stage; retire redundant diagnostic detail when issue
+accepted/resolved, retain compact final receipts. No private data committed.
+
+Workbook UNTOUCHED; no content capture/copy/write,live Resync/import/broker calls,
+live JSON/SQL/allocation/context/folder edits,app/worker restarts/kills,build/install,
+schedules/subagents. Counter Trend/commissions and accepted BTC Test/blank number/no
+link,Q1C379,Q2C380,TREEC381,WETC382,DOODC383,liveBTW C384 preserved by no data writes.
+Initial task targets clean/index empty; unrelated dirty/untracked work preserved.
+Final task delta reviewed against saved baseline: ONLY render/master_service.py,
+render/static/trading_journal_actions.js,two affected existing test files and summary.
+Active accounted at checkpoint 956.190sec/1800 (conservative opening allowance included);
+verification child50.601560699986294sec plus diagnostic11.998626200016588sec, cleanup,
+static checks and bounded native delivery. Discovery120/ordinary300/node120/test240;
+capture1/1; cleanup1/1; live Resync/workbook mutations0. Prior budgets remain history.
+Fresh sandbox ls-remote exit128 SEC_E_NO_CREDENTIALS; this is unavailable remote
+verification, not divergence. Do not retry known-denied Git metadata/helper operations.
+Source/test verified LOCAL; commit/push pending one pinned native saved-user handoff.
+It must verify BASE9b0e0a5 fresh equality and authenticated no-op push of existingHEAD,
+then exact path-only commit/preserved staging, protected push ONCE/current equality;
+stop on changed baseline/error. No test/cleanup/repair/Resync replay in delivery.
+Running-worker/manual Resync acceptance remains UNVERIFIED. After source delivery,
+normal user-controlled LocalTradingTools open (normal stop/reopen only if running)
+loads backend and refreshed UI; one explicit Resync if desired. Do not demand closing
+Excel absent an actual verified Excel owner or pretend this code released a lock.
+
+
+RESYNC FILE-ACCESS FIX - NATIVE DELIVERY PREFLIGHT COMPLETED
+Four affected nodes finally pass;2 invocations/5 executions/50.601560699986294sec. Housekeeping11 files/1 empty directory/2685793 bytes already completed,not replayed.
+Protected verify completed authenticated no-op push of existing 9b0e0a59146bf8664043cd323c4c55914f7d38fb with fresh equality.
+User reports Excel closed; previous owner unresolved,current exclusive access succeeded. Worker activation/manual Resync acceptance pending. Workbook untouched.
+Actual task commit/push SHA,current equality and preserved staging follow in private final receipt. No tests,cleanup,diagnostic or Resync replay.

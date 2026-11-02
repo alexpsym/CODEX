@@ -2585,35 +2585,49 @@ def _is_workbook_lock_exception(exc: BaseException) -> bool:
     return "sharing violation" in text or "being used by another process" in text
 
 
-def _workbook_access_failure_status(exc: BaseException, path: Path) -> Optional[Dict[str, object]]:
+def _workbook_access_failure_status(exc: BaseException, path: Path, *, stage: str = "", operation: str = "") -> Optional[Dict[str, object]]:
     winerror = getattr(exc, "winerror", None)
+    details = dict(path=str(getattr(exc, 'filename2', None) or getattr(exc, 'filename', None) or path),
+        filename=getattr(exc, 'filename', None), filename2=getattr(exc, 'filename2', None),
+        error_type=type(exc).__name__, error=str(exc), stage=stage, operation=operation)
     if winerror in {32, 33} or _is_workbook_lock_exception(exc):
-        return {"locked": True, "code": "WORKBOOK_IN_USE", "reason": "sharing_violation", "path": str(path), "winerror": winerror, "owner": "unknown"}
+        return {**details, "locked": True, "code": "WORKBOOK_IN_USE", "reason": "sharing_violation", "winerror": winerror, "owner": "unknown"}
     if winerror == 5 or isinstance(exc, PermissionError):
-        return {"locked": True, "code": "WORKBOOK_ACCESS_DENIED", "reason": "access_denied", "path": str(path), "winerror": winerror, "error": str(exc), "error_type": type(exc).__name__}
+        return {**details, "locked": True, "code": "WORKBOOK_ACCESS_DENIED", "reason": "access_denied", "winerror": winerror}
     return None
+
+
+def _log_master_journal_access_block(lock_status: Dict[str, object], *, sync_id: Optional[str], stage: str, operation: str) -> None:
+    APP_LOGGER.warning(
+        "journal_workbook_access_blocked sync_id=%s stage=%s operation=%s pid=%s code=%s reason=%s winerror=%s error_type=%s filename=%r filename2=%r resource=%r owner=%s",
+        sync_id, stage, operation, os.getpid(), lock_status.get('code'), lock_status.get('reason'),
+        lock_status.get('winerror'), lock_status.get('error_type'), lock_status.get('filename'),
+        lock_status.get('filename2'), lock_status.get('path'), lock_status.get('owner') or 'unknown')
 
 
 def _excel_workbook_open_payload(*, message_prefix: str = "", status_code: int = 423, extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     lock_status = dict((extra or {}).get("lock_status") or {})
     reason = str(lock_status.get("reason") or "workbook_in_use")
+    resource = str(lock_status.get('path') or '')
+    workbook = str((extra or {}).get('master_journal_path') or _master_journal_path())
+    subject = 'Trading Journal.xlsx' if not resource or os.path.normcase(resource) == os.path.normcase(workbook) else 'An output file needed by the journal'
     if reason == "access_denied":
         code = "WORKBOOK_ACCESS_DENIED"
         error = "workbook_access_denied"
-        message = "Trading Journal.xlsx could not be opened for update because access was denied. Check file permissions and try again."
+        message = f"{subject} could not be opened for update because access was denied. Review access before trying again."
     elif reason == "probe_failure":
         code = "WORKBOOK_ACCESS_PROBE_FAILED"
         error = "workbook_access_probe_failed"
-        message = "Trading Journal.xlsx access could not be checked. Review the workbook access error and try again."
+        message = f"{subject} access could not be checked. Review the access error before trying again."
     else:
         code = "WORKBOOK_IN_USE"
         error = "workbook_in_use"
-        message = "Trading Journal.xlsx is in use by another process. Close the program using it and try the update again."
+        message = f"{subject} is in use by another process. Retry when it is available."
     payload: Dict[str, object] = {
         "ok": False,
         "status_code": status_code,
         "code": code,
-        "retryable": True,
+        "retryable": code == 'WORKBOOK_IN_USE',
         "errors": [error, "workbook_locked"] if reason == "workbook_in_use" or reason == "sharing_violation" else [error],
         "message": message,
     }
@@ -41649,12 +41663,15 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
+    blocked_stage = 'snapshot_build'
+    blocked_operation = 'prepare_candidate'
     validation_warnings: List[str] = []
     snapshot_shrink_guard: Dict[str, object] = {}
     substage_timings: Dict[str, float] = {}
     _substage_t0 = time.perf_counter()
     def _start_substage(stage: str) -> None:
-        nonlocal _substage_t0
+        nonlocal _substage_t0, blocked_stage
+        blocked_stage = stage
         _substage_t0 = time.perf_counter()
         _update_trading_journal_import_status(
             stage=f"workbook_sync:{stage}",
@@ -42358,20 +42375,17 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             )
         _finish_substage("recommendation_preflight")
         if created_tmp:
+            _start_substage('final_replace')
+            blocked_operation = 'exclusive_access_probe'
             lock_status = _master_journal_lock_status(path)
             if lock_status.get("locked"):
+                _log_master_journal_access_block(lock_status, sync_id=sync_id, stage=blocked_stage, operation=blocked_operation)
                 payload = _excel_workbook_open_payload(extra={"master_journal_path": str(path), "master_journal_ok": False, "master_journal_exists": path.exists(), "lock_status": lock_status, "diagnostics": {"workbook_sync_substage_timings": dict(substage_timings)}})
+                payload.update(blocked_stage=blocked_stage, blocked_operation=blocked_operation, sync_id=sync_id)
                 payload["master_journal_error"] = payload["message"]
                 return payload
-            try:
-                os.replace(tmp, path)
-            except Exception as replace_exc:
-                if _is_workbook_lock_exception(replace_exc):
-                    payload = _excel_workbook_open_payload(extra={"master_journal_path": str(path), "master_journal_ok": False, "master_journal_exists": path.exists(), "replace_error": str(replace_exc), "diagnostics": {"workbook_sync_substage_timings": dict(substage_timings)}})
-                    payload["master_journal_error"] = payload["message"]
-                    payload["master_journal_error_type"] = type(replace_exc).__name__
-                    return payload
-                raise
+            blocked_operation = 'replace_candidate'
+            os.replace(tmp, path)
         _finish_substage("final_replace")
         if not path.exists() or path.stat().st_size <= 0:
             raise RuntimeError("Trading Journal.xlsx was not created.")
@@ -42380,6 +42394,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             if not enforce_post.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         _finish_substage("enforce_single_file")
+        blocked_stage = 'publish_recommendation_assets'
+        blocked_operation = 'publish_assets'
         recommendation_chart_asset_directory = (
             _publish_recommendation_chart_bundle(recommendation_chart_bundle)
         )
@@ -42431,13 +42447,19 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 tmp.unlink()
         except Exception:
             pass
-        if _is_workbook_lock_exception(exc):
+        access_status = _workbook_access_failure_status(exc, path, stage=blocked_stage, operation=blocked_operation)
+        if access_status is not None:
+            _log_master_journal_access_block(access_status, sync_id=sync_id, stage=blocked_stage, operation=blocked_operation)
             payload = _excel_workbook_open_payload(extra={
                 'master_journal_path': str(path),
                 'master_journal_ok': False,
                 'master_journal_exists': path.exists(),
                 'master_journal_error': str(exc),
                 'master_journal_error_type': type(exc).__name__,
+                'lock_status': access_status,
+                'blocked_stage': blocked_stage,
+                'blocked_operation': blocked_operation,
+                'sync_id': sync_id,
                 'diagnostics': {'workbook_sync_substage_timings': dict(substage_timings)},
             })
             return payload
@@ -46368,6 +46390,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
     master_reserved = False
     if not TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False):
         return {
+            **_master_journal_active_sync_payload(path, request_id, 'resync'),
             "ok": False,
             "button": "resync",
             "code": "TRADING_JOURNAL_RESYNC_IN_PROGRESS",
@@ -46381,12 +46404,6 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         }
     APP_LOGGER.info("trading_journal_resync_start request_id=%s path=%s", request_id, path)
     try:
-        lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
-        if lock_status.get("locked"):
-            payload = _excel_workbook_open_payload(extra={"button": "resync", "request_id": request_id, "app_version": _trading_journal_code_version(), "fast_path_reason": "workbook_locked", "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
-            payload["status_code"] = 409
-            return payload
-
         rejected = _reserve_master_journal_workbook_sync(path, request_id, "resync")
         if rejected is not None:
             rejected.update({
@@ -46400,6 +46417,14 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             })
             return rejected
         master_reserved = True
+        lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
+        if lock_status.get("locked"):
+            _log_master_journal_access_block(lock_status, sync_id=request_id, stage="initial_access", operation="exclusive_access_probe")
+            payload = _excel_workbook_open_payload(extra={"button": "resync", "request_id": request_id, "app_version": _trading_journal_code_version(), "fast_path_reason": "workbook_locked", "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
+            payload.update(blocked_stage="initial_access", blocked_operation="exclusive_access_probe")
+            payload["status_code"] = 409
+            return payload
+
         APP_LOGGER.info("master_journal_workbook_sync_start sync_id=%s caller=resync path=%s prebuilt_snapshot=True reserved_before_snapshot=True", request_id, path)
 
         fingerprint = _resync_source_fingerprint(path)

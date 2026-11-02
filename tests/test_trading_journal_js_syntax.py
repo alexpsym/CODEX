@@ -237,9 +237,10 @@ def test_trading_journal_actions_notifies_equity_curve_after_authoritative_updat
 
 def test_trading_journal_actions_excel_lock_retry_controls_and_guards_present() -> None:
     js = ACTIONS_JS_PATH.read_text(encoding="utf-8")
-    assert "payload?.code === 'EXCEL_WORKBOOK_OPEN'" in js
+    assert "['EXCEL_WORKBOOK_OPEN', 'WORKBOOK_IN_USE'].includes(payload?.code)" in js
     assert "payload?.retryable === true" not in js
-    assert "Resume after closing Excel" in js
+    assert "resumeBtn.textContent = 'Retry'" in js
+    assert "Resume after closing Excel" not in js
     assert "Retry canceled." in js
     assert "let retryInFlight = false;" in js
     assert "if (!pendingRetry.run || retryInFlight) return;" in js
@@ -554,41 +555,46 @@ vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
 
 
 def test_trading_journal_actions_resync_excel_lock_sets_retry() -> None:
-    node = shutil.which("node")
-    assert node, "node is required for JS runtime smoke test"
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     harness = r"""
-const fs = require('fs');
-const vm = require('vm');
+const fs = require('fs'), vm = require('vm');
 const source = fs.readFileSync(process.argv[1], 'utf8');
-const listeners = {};
-function element(id) { return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } }; }
-const elements = {
-  'open-journal-btn': element('open-journal-btn'),
-  'import-journal-btn': element('import-journal-btn'),
-  'journal-resync-btn': element('journal-resync-btn'),
-  'journal-file-input': element('journal-file-input'),
-  'journal-import-drop-zone': element('journal-import-drop-zone'),
-  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
-  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
-  'journal-account-mode': element('journal-account-mode'),
-  'journal-actions-status': element('journal-actions-status'),
-};
-const context = { console, document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) }, Date: { now: () => 1000 }, setInterval: () => 11, clearInterval: () => {}, setTimeout: () => 22, clearTimeout: () => {}, fetch: async () => ({ ok: false, json: async () => ({ ok: false, code: 'EXCEL_WORKBOOK_OPEN', message: 'Close Excel then retry', errors: ['workbook_locked'] }) }) };
-context.window = context; context.globalThis = context;
-vm.createContext(context);
-vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
-(async () => {
-  await listeners['journal-resync-btn:click']();
-  const status = elements['journal-actions-status'].textContent;
-  if (!status.includes('Close Excel then retry')) throw new Error('lock message missing: ' + status);
-  if (elements['open-journal-btn'].disabled !== true) throw new Error('open should be disabled for retry');
-  if (elements['import-journal-btn'].disabled !== true) throw new Error('import should be disabled for retry');
-  if (elements['journal-resync-btn'].disabled !== true) throw new Error('resync should be disabled for retry');
-})();
+const listeners = {}, elements = {};
+function element(id) { return {id, style:{}, classList:{add(){},remove(){}}, textContent:'', value:'', disabled:false, files:[], focus(){}, click(){}, after(...buttons){for(const b of buttons) elements[b.id]=b;}, addEventListener(type,fn){listeners[this.id+':'+type]=fn;}}; }
+for(const id of ['open-journal-btn','import-journal-btn','journal-resync-btn','journal-file-input','journal-import-drop-zone','crypto-monthly-pnl-btn','bybit-demo-balance-adjustment-btn','journal-account-mode','journal-actions-status']) elements[id]=element(id);
+let calls=0, payload, deferred=null;
+const context={console,document:{getElementById:id=>elements[id]||null,createElement:tag=>element(tag)},Date:{now:()=>1000},setInterval:()=>11,clearInterval(){},setTimeout:()=>22,clearTimeout(){},fetch:async(url)=>{
+ if(url!='/api/trading-journal/resync') throw new Error('unrelated action replayed: '+url);
+ calls++; if(deferred) return await deferred;
+ return {ok:payload.ok===true,json:async()=>payload};
+}};
+context.window=context;context.globalThis=context;vm.createContext(context);vm.runInContext(source,context);
+const assert=(value,message)=>{if(!value) throw new Error(message);};
+const click=id=>listeners[id+':click']();
+const status=()=>elements['journal-actions-status'].textContent;
+const retry=()=>elements['journal-retry-resume-btn'];
+const cancel=()=>elements['journal-retry-cancel-btn'];
+const controls=disabled=>{for(const id of ['open-journal-btn','import-journal-btn','journal-resync-btn'])assert(elements[id].disabled===disabled,id+' disabled='+disabled);};
+(async()=>{
+ payload={ok:false,code:'WORKBOOK_IN_USE',owner:'unknown',errors:['workbook_locked'],message:'Trading Journal.xlsx is in use by another process. Retry when it is available.'};
+ await click('journal-resync-btn');assert(calls===1,'one initial request');assert(!/excel/i.test(status()),'invented Excel owner');assert(retry().textContent==='Retry','neutral retry');controls(true);
+ let resolve;deferred=new Promise(r=>resolve=r);
+ const first=click('journal-retry-resume-btn');await click('journal-retry-resume-btn');assert(calls===2,'duplicate retry blocked');assert(retry().disabled,'retry in flight');
+ resolve({ok:true,json:async()=>({ok:true,message:'Complete'})});await first;deferred=null;controls(false);assert(retry().style.display==='none','retry cleared after success');
+ payload={ok:false,code:'EXCEL_WORKBOOK_OPEN',message:'Close Excel then retry',errors:['workbook_locked']};
+ await click('journal-resync-btn');assert(!/excel/i.test(status()),'legacy message owner scrubbed');const before=calls;await click('journal-retry-cancel-btn');assert(calls===before,'cancel cannot POST');controls(false);assert(status()==='Retry canceled.','cancel status');
+ for(const code of ['WORKBOOK_ACCESS_DENIED','WORKBOOK_ACCESS_PROBE_FAILED']){
+  payload={ok:false,code,errors:['workbook_locked'],retryable:true,message:code==='WORKBOOK_ACCESS_DENIED'?'Workbook access denied.':'Workbook access could not be checked.'};
+  await click('journal-resync-btn');assert(status().includes(payload.message),'distinct access message');assert(!/excel/i.test(status()),'no Excel attribution');assert(retry().style.display==='none','nonsharing not retry category');controls(false);
+ }
+ for(const code of ['MASTER_JOURNAL_SYNC_IN_PROGRESS','TRADING_JOURNAL_RESYNC_IN_PROGRESS']){
+  payload={ok:false,code,active_caller:'background_reader',active_elapsed_seconds:12,errors:['workbook_locked']};
+  await click('journal-resync-btn');assert(status().includes('background_reader')&&status().includes('12s'),'known own operation');assert(retry().style.display==='none','own operation not external lock');controls(false);
+ }
+ assert(calls===7,'exact explicit request count');
+})().catch(e=>{console.error(e);process.exitCode=1;});
 """
-    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
-
-
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True, timeout=30)
 
 def test_trading_journal_actions_resync_active_sync_message_includes_caller_and_elapsed() -> None:
     node = shutil.which("node")

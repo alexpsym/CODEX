@@ -4230,7 +4230,7 @@ def test_check_master_journal_write_lock_does_not_treat_stale_lock_file_as_locke
     assert kernel32.CreateFileW.restype is ctypes.c_void_p
 
 
-def test_workbook_access_payload_preserves_legacy_retry_marker_only_for_in_use():
+def test_workbook_access_payload_preserves_legacy_retry_marker_only_for_in_use(tmp_path, caplog):
     cases = [
         (
             {'locked': True, 'reason': 'sharing_violation', 'winerror': 32, 'owner': 'unknown'},
@@ -4261,9 +4261,25 @@ def test_workbook_access_payload_preserves_legacy_retry_marker_only_for_in_use()
         assert set(payload['errors']) == expected_errors
         assert payload['lock_status'] == lock_status
         assert message_fragment in payload['message']
+        assert 'excel' not in payload['message'].lower()
+        assert payload['retryable'] is (code == 'WORKBOOK_IN_USE')
         if code != 'WORKBOOK_IN_USE':
             assert 'workbook_locked' not in payload['errors']
             assert 'excel_open' not in payload['errors']
+    candidate = tmp_path / 'candidate.xlsx'
+    output = tmp_path / 'recommendation.html'
+    exc = OSError('sharing conflict'); exc.winerror = 32
+    exc.filename = str(candidate); exc.filename2 = str(output)
+    native = master_service._workbook_access_failure_status(exc, tmp_path / 'Trading Journal.xlsx', stage='publish_assets', operation='replace')
+    assert native['owner'] == 'unknown' and native['path'] == str(output)
+    assert native['filename'] == str(candidate) and native['filename2'] == str(output)
+    assert native['error_type'] == 'OSError' and native['winerror'] == 32
+    payload = master_service._excel_workbook_open_payload(extra={'lock_status': native, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
+    assert 'output file' in payload['message'] and 'Trading Journal.xlsx' not in payload['message']
+    with caplog.at_level('WARNING', logger='uvicorn.error'):
+        master_service._log_master_journal_access_block(native, sync_id='fixture-request', stage='publish_assets', operation='replace')
+    assert 'fixture-request' in caplog.text and 'winerror=32' in caplog.text
+    assert repr(str(output)) in caplog.text and 'owner=unknown' in caplog.text
 
 
 def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchors(tmp_path, monkeypatch):
@@ -5529,12 +5545,65 @@ def test_resync_returns_excel_lock_payload(monkeypatch, tmp_path):
     path = tmp_path / 'Trading Journal.xlsx'
     path.write_bytes(b'placeholder')
     monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
-    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': True, 'lock_file': '~$Trading Journal.xlsx'})
+    monkeypatch.setattr(ms, '_journal_transaction_lock_path', lambda _path: tmp_path / 'fixture-transaction.lock')
     monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('lock preflight must happen before snapshot build')))
-    result = ms._run_trading_journal_resync()
-    assert result['ok'] is False
-    assert result['code'] == 'WORKBOOK_IN_USE'
-    assert result['status_code'] == 409
+    original = path.read_bytes()
+    # A different application thread really owns the established journal gate.
+    ready, release = threading.Event(), threading.Event(); errors = []
+    def owned_operation():
+        acquired = False
+        try:
+            assert ms._reserve_master_journal_workbook_sync(path, 'fixture-owner', 'background_reader') is None
+            acquired = True; ready.set()
+            assert release.wait(20)
+        except BaseException as exc: errors.append(exc); ready.set()
+        finally:
+            if acquired: ms._release_master_journal_workbook_sync()
+    thread = threading.Thread(target=owned_operation); thread.start()
+    try:
+        assert ready.wait(5) and not errors
+        with monkeypatch.context() as busy:
+            busy.setattr(ms, '_master_journal_lock_status', lambda _p: (_ for _ in ()).throw(AssertionError('own operation must be classified before external probe')))
+            result = ms._run_trading_journal_resync()
+            assert result['code'] == 'MASTER_JOURNAL_SYNC_IN_PROGRESS'
+            assert result['active_caller'] == 'background_reader'
+            assert 'active_elapsed_seconds' in result and 'excel' not in result['master_journal_error'].lower()
+            assert ms.TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False)
+            try:
+                result = ms._run_trading_journal_resync()
+                assert result['code'] == 'TRADING_JOURNAL_RESYNC_IN_PROGRESS'
+                assert result['active_caller'] == 'background_reader'
+            finally: ms.TRADING_JOURNAL_RESYNC_LOCK.release()
+    finally:
+        release.set(); thread.join(10)
+    assert not thread.is_alive() and not errors
+    assert not ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+    assert ms._MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE is None
+    # Real Windows handles: stale marker is not ownership; a sharing conflict is.
+    marker = path.with_name('~$' + path.name); marker.write_bytes(b'stale fixture marker')
+    assert ms._check_master_journal_write_lock(path)['locked'] is False
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]; kernel.CloseHandle.restype = ctypes.c_int
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    assert handle not in (None, ctypes.c_void_p(-1).value)  # proves probe closed its own handle
+    try:
+        result = ms._run_trading_journal_resync()
+        assert result['code'] == 'WORKBOOK_IN_USE' and result['status_code'] == 409
+        assert result['lock_status']['winerror'] in (32, 33)
+        assert result['lock_status']['owner'] == 'unknown'
+        assert result['blocked_stage'] == 'initial_access' and 'excel' not in result['message'].lower()
+        assert not ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+    finally: assert kernel.CloseHandle(handle)
+    assert ms._check_master_journal_write_lock(path)['locked'] is False
+    for status, code in [({'locked': True, 'reason': 'access_denied', 'winerror': 5}, 'WORKBOOK_ACCESS_DENIED'), ({'locked': True, 'reason': 'probe_failure', 'winerror': 87}, 'WORKBOOK_ACCESS_PROBE_FAILED')]:
+        with monkeypatch.context() as failed:
+            failed.setattr(ms, '_master_journal_lock_status', lambda _p: status)
+            result = ms._run_trading_journal_resync()
+            assert result['code'] == code and 'workbook_locked' not in result['errors']
+        assert not ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+    assert path.read_bytes() == original and marker.read_bytes() == b'stale fixture marker'
 
 
 
