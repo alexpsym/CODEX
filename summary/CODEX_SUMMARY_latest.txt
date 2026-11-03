@@ -5932,3 +5932,31 @@ New-job outputs alone eligible after last use via canonical exact-manifest Audit
 and bounded reconciliation. MQL builds/installs0, realdata/broker/app/workbook/DB/cache
 operations0, subagents/schedules0. Manual fresh-calculation acceptance remains pending
 after user's normal LTT restart/refresh; no trade/download/broker connection required.
+
+
+2026-11-04 PEPPERSTONE USER PASS / EXACT CLEANUP CLOSEOUT
+Manual acceptance PASSED, explicit user Pass; no acceptance request remains. Accepted
+deliveries e52e37271f6663f70f2680823231e420747aafea (selector) and
+bd5e18f90c63c31893d7c0d61ae1119028bdcffe (spread correction), prior fresh remote equality.
+Earlier test failures preserved: account4nodes/3invocations/9executions; correction added
+2nodes/1invocation/2executions, final exit0/16.128138sec; NO tests repeated in cleanup.
+Prior active1218.188715sec; new cleanup allowance300active/120verification/30discovery,
+commands60 (cleanup90max if needed); current added at precommit136.751sec.
+One newly reviewed principal canonical Audit/Apply succeeded: 32 regular files,
+7815494 logicalbytes removed,0failed/0skipped; earlier cleanup0 outcomes remain history.
+Proper saved-host route used, but exact old fixture access still denied. Before further
+stat/open/descent excluded retained-uninspected/unknown roots:
+ .codex-work/active/pepperstone-account-type/fixtures/
+ .codex-work/active/pepperstone-account-type/fixtures-retry/
+ .codex-work/active/pepperstone-account-type/fixtures-final/
+ .codex-work/active/pepperstone-spread-correction/fixtures/
+Protected run-final-result.json and source manifests/current compact receipts/replay evidence
+remain; required original per-object registration/owner proof absent for retained-root
+release, never fabricated. Exact remaining paths/reasons/release conditions in the single
+current .codex-work/retained/pepperstone-cleanup-closeout/receipt.json and manifest.
+No claim all artifacts disposed; bounded final reconciliation records inspection limits.
+One nonoverlapping helper batch after LAST delivery use remains within authorization;
+actual late counts/summary commit/push/equality and reconciliation in compact receipt.
+Only this summary tracked delta; unrelated work preserved. Calculator/source/tests and
+cleanup policy untouched. Featuretests/builds/installs/realdata/apps/broker/workbook/cache/
+DB/resync/restarts/schedules/subagents0. No ACL/permission/security/helper changes.
