@@ -5905,3 +5905,30 @@ Fresh protected verify required before commit; push once after actual inspected 
 Cleanup remains0files/0bytes; protected result evidence retained; no Apply/retry authorized.
 MQL builds/installations0; no broker/workbook/app/cache/DB operations. Manual LTT acceptance
 pending user normal restart/refresh. Actual commit/push/equality belongs in private receipt.
+
+
+2026-11-03 PEPPERSTONE SPREAD CORRECTION - VERIFIED LOCAL / PREDELIVERY
+Prior Razor/Standard commit e52e372 was delivered with fresh remote equality; prior test
+history remains4distinct nodes/3invocations/9executions, including recorded earlier failures.
+Prior consumed active867.835119sec retained. Manual acceptance FAILED specifically on
+spread double-counting; this correction uses fresh estimates only, no old plan rewrites.
+Pepperstone entry-to-stop/target P/L now uses executable Ask/Bid entry and explicit
+round-trip AUD commission only; reference spread remains informational and excluded from
+risk/reward/extra-fee totals. Separate gain/loss conversions, chart ticks/manual distances,
+signed rewards, rate snapshots/.set safeguards and OANDA/Bybit behavior preserved.
+Only master_service, existing calculator API tests and this summary changed for correction.
+Two authorized affected nodes PASSED normal exit0/16.128138100sec, completed bodies
+and JUnit. Added2nodes/1invocation/2executions; no prior selector/security reruns. Cash
+benchmarks:10ticks/equal1.5 conversions/AUD10: Standard20ticks/66666.666667units; Razor
+AUD3.50perlotperside34ticks/45454.545455units. Spread1/5/9 invariance, buy/sell, live/demo,
+unequal factors, JPY, signed manual-target profit and .set distances/rates verified.
+Normal Windows asyncio used, no socketpair workaround or startup workers/live stores.
+Added ceilings600active/180verification/60discovery,2nodes/2invocations/3executions,
+pertest60/outer120/ordinary120; added active at checkpoint208.052sec. Prior+added
+counts/time carried privately; final Git/cleanup outcomes in compact correction receipt.
+Fresh protected verify before one task-only commit/one protected push; no speculative
+delivery claim here. Old cleanup remains0files/0bytes retained; NO old-batch retry.
+New-job outputs alone eligible after last use via canonical exact-manifest Audit/Apply
+and bounded reconciliation. MQL builds/installs0, realdata/broker/app/workbook/DB/cache
+operations0, subagents/schedules0. Manual fresh-calculation acceptance remains pending
+after user's normal LTT restart/refresh; no trade/download/broker connection required.

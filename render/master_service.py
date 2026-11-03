@@ -32080,7 +32080,9 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 if not all(part in currencies for part in symbol.split("_")) or len(symbol.split("_")) != 2:
                     raise HTTPException(status_code=400, detail="Pepperstone commission-aware estimate requires currency FX; CFD lot contracts are not inferred.")
                 commission_per_unit_aud = commission_rate * Decimal("2") / Decimal("100000")
-            loss_per_unit_home = (abs(entry - sl) + spread_quote) * loss_factor + commission_per_unit_aud
+            # Pepperstone distances start at the executable Ask/Bid entry.
+            # Spread is already in those prices; only commission is an extra debit.
+            loss_per_unit_home = (abs(entry - sl) + (Decimal("0") if is_pepperstone else spread_quote)) * loss_factor + commission_per_unit_aud
             if loss_per_unit_home <= 0:
                 raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
 
@@ -32127,13 +32129,13 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             else:
                 target_distance = (tp_ticks or Decimal("0")) * distance_tick_size
                 if target_mode == "rr" and rr_requested is not None:
-                    target_distance = (rr_requested * loss_per_unit_home + commission_per_unit_aud) / gain_factor + spread_quote
+                    target_distance = (rr_requested * loss_per_unit_home + commission_per_unit_aud) / gain_factor
                     requested_rr_net = rr_requested
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
-                reward_home = ((abs(tp - entry) - spread_quote) * gain_factor - commission_per_unit_aud) * units
+                reward_home = ((abs(tp - entry) - (Decimal("0") if is_pepperstone else spread_quote)) * gain_factor - commission_per_unit_aud) * units
                 if is_pepperstone:
                     effective_rr_net = reward_home / (loss_per_unit_home * units)
-                    fee_buffer_r = (spread_quote * loss_factor + commission_per_unit_aud) / loss_per_unit_home
+                    fee_buffer_r = commission_per_unit_aud / loss_per_unit_home
                 else:
                     reward_home = max(Decimal("0"), reward_home)
             margin_available = Decimal(str(summary.get("marginAvailable") or "0")) if summary is not None else Decimal("0")
@@ -32237,9 +32239,9 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "commission_currency": "AUD",
                     "estimated_commission_aud": _fmt_dec(commission_per_unit_aud * units),
                     "estimated_spread_aud": _fmt_dec(spread_home),
-                    "estimated_fees_or_spread_aud": _fmt_dec(spread_home + commission_per_unit_aud * units),
-                    "estimated_fees_or_spread": _fmt_dec(spread_home + commission_per_unit_aud * units),
-                    "spread_estimate_note": "OANDA reference prices/spreads, not measured Pepperstone Razor/Standard spreads. Actual Standard FX spreads include broker markup; final costs/lots depend on Trader and the actual account. Zero separate FX commission does not describe share CFDs.",
+                    "estimated_fees_or_spread_aud": _fmt_dec(commission_per_unit_aud * units),
+                    "estimated_fees_or_spread": _fmt_dec(commission_per_unit_aud * units),
+                    "spread_estimate_note": "OANDA reference prices/spreads, not measured Pepperstone Razor/Standard spreads. Spread is already reflected in executable entry/exit prices; the reference spread value is informational and is not added again to risk, reward or extra fees. Actual Standard FX spreads include broker markup; final costs/lots depend on Trader and the actual account. Zero separate FX commission does not describe share CFDs.",
                 })
                 distance_conversion: Dict[str, object] = {
                     "symbol": symbol,

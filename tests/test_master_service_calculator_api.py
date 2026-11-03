@@ -4233,6 +4233,7 @@ def pepperstone_account_fixture(monkeypatch, tmp_path):
 
 
 def test_pepperstone_account_quote_costs(monkeypatch, tmp_path, pepperstone_account_fixture):
+    monkeypatch.setattr(asyncio, "run", asyncio.runners.run)
     _mock_pepperstone_quote_dependencies(monkeypatch)
     monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", pepperstone_account_fixture)
     D = Decimal
@@ -4244,15 +4245,15 @@ def test_pepperstone_account_quote_costs(monkeypatch, tmp_path, pepperstone_acco
                         target_mode=mode, take_profit_ticks="25", risk_reward="2", chart_tick_size=str(step))
                     q = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
                     cost = D("8.40") / D("100000") if kind == "razor" else D(0)
-                    loss = (43 * step + D("0.00020")) * factor + cost
+                    loss = 43 * step * factor + cost
                     units = D(10) / loss
                     assert abs(D(q["quantity"]) - units) < D("0.000001")
                     assert abs(D(q["estimated_commission_aud"]) - units * cost) < D("0.000001")
                     assert abs(D(q["estimated_spread_aud"]) - units * D("0.00020") * factor) < D("0.000001")
                     assert abs(D(q["estimated_total_loss_aud"]) - 10) < D("0.000001")
-                    distance = 25 * step if mode == "ticks" else (D(2) * loss + cost) / factor + D("0.00020")
+                    distance = 25 * step if mode == "ticks" else (D(2) * loss + cost) / factor
                     assert abs(D(q["target_distance"]) - distance) < D("0.000001")
-                    reward = ((distance - D("0.00020")) * factor - cost) * units
+                    reward = (distance * factor - cost) * units
                     assert abs(D(q["estimated_reward_aud"]) - reward) < D("0.000001")
                     assert D(q["effective_rr_net"]) == (reward / D(10)).quantize(D("0.01"), rounding=master_service.ROUND_HALF_UP)
                     assert q["commission_currency"] == "AUD"
@@ -4308,3 +4309,76 @@ def test_pepperstone_account_export_integrity(monkeypatch, tmp_path, pepperstone
             omitted = dict(payload); omitted.pop("pepperstone_account_type")
             text, _ = master_service._build_pepperstone_trader_set(omitted)
             assert Decimal(_parse_set_file(text)["CommissionPerLotPerSide"]) == Decimal("3.50")
+
+
+def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatch, tmp_path, pepperstone_account_fixture):
+    # Cash ledger from signed entry/exit prices and two separate commission charges.
+    # Benchmarks: 1 lot loses AUD15 at 10 ticks; Razor adds AUD7 per lot.
+    monkeypatch.setattr(asyncio, "run", asyncio.runners.run)
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", pepperstone_account_fixture)
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50")
+    D = Decimal
+    cases = [("EURUSD", "1.20000", "0.00001", "1.5", "1.5"),
+             ("EURUSD", "1.20000", "0.00001", "1.4", "1.5"),
+             ("USDJPY", "150.000", "0.001", "0.01", "0.011")]
+    for symbol, entry_text, tick_text, gain_text, loss_text in cases:
+        entry, tick, gain, loss = map(D, (entry_text, tick_text, gain_text, loss_text))
+        for side in ("buy", "sell"):
+            direction = D(1) if side == "buy" else D(-1)
+            for account in ("demo", "live"):
+                for kind in ("standard", "razor"):
+                    unchanged = None
+                    for spread_ticks in (1, 5, 9):
+                        spread = tick * spread_ticks
+                        async def prices(**kwargs):
+                            bid = entry if side == "sell" else entry - spread
+                            ask = entry if side == "buy" else entry + spread
+                            return {"prices": [{"bids": [{"price": str(bid)}], "asks": [{"price": str(ask)}]}],
+                                "homeConversions": [{"currency": "JPY" if symbol.endswith("JPY") else "USD",
+                                  "accountGain": str(gain), "accountLoss": str(loss), "positionValue": str(loss)}]}
+                        monkeypatch.setattr(master_service, "_fetch_oanda_json", prices)
+                        request = _pepperstone_quote_payload(symbol=symbol, side=side, account=account,
+                            pepperstone_account_type=kind, stop_loss_ticks="10", chart_tick_size=tick_text,
+                            target_mode="rr", risk_reward="2")
+                        q = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+                        qty, actual_entry, stop, target = map(D, (q["quantity"], q["entry_price"], q["stop_price"], q["target_price"]))
+                        assert actual_entry == entry and stop == entry - direction * 10 * tick
+                        lots = qty / D(100000)
+                        opening = lots * (D("3.50") if kind == "razor" else D(0))
+                        closing = opening
+                        stop_cash = direction * (stop - actual_entry) * qty * loss - opening - closing
+                        target_cash = direction * (target - actual_entry) * qty * gain - opening - closing
+                        assert abs(stop_cash + 10) < D("1e-18")
+                        assert abs(target_cash - 20) < D("1e-18")
+                        assert abs(D(q["estimated_total_loss_aud"]) + stop_cash) < D("1e-18")
+                        assert abs(D(q["estimated_reward_aud"]) - target_cash) < D("1e-18")
+                        assert abs(D(q["estimated_fees_or_spread_aud"]) - opening - closing) < D("1e-18")
+                        assert D(q["estimated_spread_aud"]) > 0 and D(q["spread_quote"]) == spread
+                        ledger = (qty, stop, target, stop_cash, target_cash)
+                        if unchanged is not None:
+                            assert ledger == unchanged
+                        unchanged = ledger
+                        if gain == loss == D("1.5"):
+                            assert abs(target - entry) / tick == (20 if kind == "standard" else 34)
+                            expected_qty = D(200000) / 3 if kind == "standard" else D(500000) / 11
+                            assert abs(qty - expected_qty) < D("1e-18")
+                    # Manual distances remain literal; an inactive R cannot affect the ledger.
+                    request.update(target_mode="ticks", take_profit_ticks="1", risk_reward="inactive")
+                    manual = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+                    assert D(manual["stop_price"]) == entry - direction * 10 * tick
+                    assert D(manual["target_price"]) == entry + direction * tick
+                    qty = D(manual["quantity"])
+                    fees = qty / 100000 * (D(7) if kind == "razor" else D(0))
+                    profit = direction * (D(manual["target_price"]) - entry) * qty * gain - fees
+                    assert abs(D(manual["estimated_reward_aud"]) - profit) < D("1e-18")
+                    if kind == "razor" and symbol == "EURUSD":
+                        assert profit < 0
+                    text, _ = master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request, manual))
+                    preset = _parse_set_file(text)
+                    assert D(preset["CommissionPerLotPerSide"]) == (D("3.50") if kind == "razor" else 0)
+                    assert preset["IncludeCommissionInRisk"] == "true" and preset["AutoTP_NetRR_Enabled"] == "false"
+                    assert D(preset["SL_PriceDistance"]) == 10 * tick
+                    assert D(preset["TP_PriceDistance"]) == tick
+    contexts = master_service._load_trade_contexts()
+    assert any(row.get("planned_quantity_estimate") and row.get("original_target_distance") for row in contexts)
