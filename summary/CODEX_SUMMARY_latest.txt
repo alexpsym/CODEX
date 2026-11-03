@@ -5744,3 +5744,73 @@ Four affected nodes finally pass;2 invocations/5 executions/50.601560699986294se
 Protected verify completed authenticated no-op push of existing 9b0e0a59146bf8664043cd323c4c55914f7d38fb with fresh equality.
 User reports Excel closed; previous owner unresolved,current exclusive access succeeded. Worker activation/manual Resync acceptance pending. Workbook untouched.
 Actual task commit/push SHA,current equality and preserved staging follow in private final receipt. No tests,cleanup,diagnostic or Resync replay.
+
+
+2026-11-03 AUTOMATIC HOUSEKEEPING LIFECYCLE - VERIFIED LOCAL CHANGE / NATIVE DELIVERY
+User confirms journal Resync FIXED AND ACCEPTED, superseding historical pending sections.
+Resync and accepted crypto/cleanup repairs untouched; Job6 remains CANCELLED. No other
+feature queue. This job changed only existing AGENTS/TXT/DOCX housekeeping rules, canonical
+cleaner, thin forwarding wrapper, two existing cleanup nodes and this summary append.
+
+Outputs must register at creation through final closeout, including external backups,
+briefs/pointers/patches/logs/XML and postverification/delivery helpers. Default Audit is
+shallow; explicit reviewed job roots/exclusions bound descent. Hashed independent creation
+records and normally completed owner PID/start evidence admit exact root artifacts and
+named task-owned external backup roots; never C:\GPT/arbitrary roots. Exact synthetic
+fixture release protects real .git/data/notes/locks while allowing independently proven
+mock objects. Retention can end for accepted recovery/redundant evidence with a hashed
+superseding closeout receipt; actual immutable claims/ledgers/replay guards remain protected.
+Final Audit --manifest --reconcile reports registered leftovers and unregistered outputs.
+No new cleaner/service/instruction file, scheduled/startup deletion or security changes.
+
+Focused verification: ONLY the two existing tests/test_repo_artifact_cleanup.py nodes.
+First invocation normal exit1/10.684593999991193sec, both failed when hash verification
+reopened a path after its DELETE handle was pinned. Corrected to hash the SAME owned
+readable handle; sharing guards unchanged. Second invocation normal exit0/
+13.0151226001326sec, both nodes' setup/call/teardown and JUnit passed. Total2nodes/
+2invocations/4executions; no tests remain or repeat. Document validation one run, normal
+exit0/0.6286404998973012sec: complete normalized TXT/DOCX parity, ZIP/XML integrity,
+unrelated paragraph/package payload preservation, styles/numbering/headers/footers/page
+setup preserved. No visual render claimed; container renderer unavailable, no installs.
+
+Actual first cleanup:305 files +138 individually empty directories,371508 logicalbytes,
+canonical helper Audit exit0/2.814589799847454sec then Apply exit0/12.242589500034228sec.
+Exact443-target manifest with unchanged identity/non-reparse checks and independent
+fixture creation/finished-owner evidence; no live/user data or failed-batch retry. Four
+named external job9/11/13/15 backup roots absent, not recreated or counted as our cleanup.
+11 manual root brief deletions individually reviewed but no exact completed checkpoint
+proved per brief, so ALL excluded from this commit and preserved as unrelated deletions.
+Root .pytest_cache inaccessible, retained UNMEASURED/no further probe; root __pycache__
+and unknown root/runtime/journal assets preserved, no provenance or safe scope to delete.
+User's manual250+ removals not counted. No C: free-space measurement/recovery claim.
+
+One final NONOVERLAPPING closeout Apply remains, restricted to exact current active
+provenance/manifest/candidate/delivery-helper paths after LAST use. Native handoff must
+keep pending helper executable until consumed; runpy loads/closes its source before
+postdelivery disposal. Final observed reconciliation checks bounded active/retained job
+roots against every registered output, including late native receipts. Compact receipts
+kept for current verification/replay/manual review with exact release conditions; no
+permanent full backup archive. Current leftovers until delivery are batch1-provisional/
+manifest, provenance records, empty fixtures parent and delivery/candidate inputs in
+.codex-work/active/housekeeping-lifecycle-20261103/. Their release condition is successful
+scoped delivery and final cleanup. Final counts/outcomes belong in compact native receipt,
+not another commit loop. Do not call housekeeping complete before final reconciliation.
+
+Baseline masterHEAD71f1e8972dc9f424a02161a5c106ed5d95426ca0/indexempty; all unrelated
+application/runtime/source dirt, user files and unpublished work preserved. Summary was
+ALREADY dirty before this job. Task-only committed summary is HEAD plus THIS appendix;
+full dirty working summary is durably backed up, temporarily staged, then hash-guarded
+restored unchanged. No unrelated summary hunks or application source enter this commit.
+Native saved-user route required; known sandbox index/identity failures not retried.
+Delivery-only helper verifies origin/branch/currentHEAD/pins, protected verify performs
+existingHEAD authenticated no-op push/fresh equality; exact7 task files staged/inspected,
+one path-only commit inspected, unrelated staging/dirty summary checked, protectedpush
+ONCE/current equality. No raw push/BAT/addall/pull/rebase/stash/force/login/helper changes.
+
+Earlier2400 active allowance exhausted with checkpoint; user explicitly authorized600
+additional active seconds for finishing delivery/closeout, no extra tests or Resync. Keep
+all previous actual counts/elapsed; no reset. Native cap120, each cleanup stage<=120,
+remaining verification within900. Actual protected commit/push and second cleanup are
+PENDING at this precommit checkpoint. Postcommit receipt reports actual SHA/current equality,
+counts, retained paths and final reconciliation. No workbook reads/captures/writes, Resync,
+app/broker/import operations/restarts/kills/builds/installs/MQL/MT5/schedules/subagents.
