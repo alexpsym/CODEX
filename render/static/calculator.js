@@ -6,6 +6,7 @@
     asset: 'crypto',
     broker: 'bybit',
     fx_broker: 'oanda',
+    pepperstone_account_type: 'razor',
     resolvedVenue: 'Bybit',
     side: 'buy',
     order_type: 'market',
@@ -646,6 +647,10 @@
       ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];
     if (pepperstone) {
+      rows.push(['Account type', q.pepperstone_account_type || 'razor']);
+      rows.push(['Estimated round-trip commission (AUD)', q.estimated_commission_aud]);
+      rows.push(['Estimated reference spread (AUD)', q.estimated_spread_aud]);
+      rows.push(['Spread estimate limitation', q.spread_estimate_note]);
       const conversion = q.pepperstone_distance_conversion || {};
       const exportStatus = q.pepperstone_mt5_export_status || {};
       const chartStep = conversion.chart_tick_size || q.chart_tick_size || '-';
@@ -734,6 +739,7 @@
       `broker=${resolvedBroker}`,
       `venue=${resolvedVenue}`,
       `account=${payload.account}`,
+      ...(resolvedBroker === 'pepperstone' ? [`pepperstone_account_type=${resolved?.pepperstone_account_type || payload.pepperstone_account_type || 'razor'}`] : []),
       `symbol=${payload.symbol}`,
       `webhook=${payload.webhook}`,
       `test=${payload.test}`,
@@ -774,6 +780,7 @@
     const payload = {
       asset: 'fx',
       broker: 'pepperstone',
+      pepperstone_account_type: quote?.pepperstone_account_type || state.pepperstone_account_type,
       account: state.account,
       symbol: quote?.symbol || state.resolvedSymbol || $('calc-symbol').value,
       side: state.side,
@@ -1203,6 +1210,8 @@
       toggleWebhookPanel(false);
       cleanupPendingWebhook();
     }
+    if ($('pepperstone-account-type-wrap')) $('pepperstone-account-type-wrap').style.display = isPepperstoneFx() ? '' : 'none';
+    syncToggleState('pepperstone-account-type-toggle', 'pepperstone_account_type');
     syncToggleState('broker-toggle', 'broker');
     syncToggleState('webhook-toggle', 'webhook_mode');
     syncTargetUi();
@@ -1613,6 +1622,7 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
+      if (!isPepperstoneFx()) delete payload.pepperstone_account_type;
       delete payload.chartTickOverrides;
       delete payload.activeChartTickSymbol;
       if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
@@ -1853,6 +1863,7 @@
   if (typeof window !== 'undefined' && window.__CALCULATOR_TESTING__) {
     window.__expiryTestHooks = {state, expiryPayload, expiryPreviewDeadline, syncExpiryControls, refreshExpiryStatus};
   }
+  setToggle('pepperstone-account-type-toggle', 'pepperstone_account_type');
   setToggle('account-toggle', 'account', () => { refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
   setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); updateBrokerUiForAsset(); refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
   setToggle('broker-toggle', 'broker', () => { updateBrokerUiForAsset(); resolveSymbolAndLoad(); });

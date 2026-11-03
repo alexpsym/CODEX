@@ -29428,7 +29428,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <tbody>
               <tr><th>Account</th><td><div class="group toggle" id="account-toggle"><button type="button" data-v="live" class="active">Live</button><button type="button" data-v="demo">Demo</button></div></td></tr>
               <tr><th>Asset</th><td><div class="group toggle" id="asset-toggle"><button type="button" data-v="crypto" class="active">Crypto</button><button type="button" data-v="fx">FX</button></div></td></tr>
-              <tr id="broker-toggle-wrap" style="display:none"><th>Broker</th><td><div class="group toggle" id="broker-toggle"><button type="button" data-v="oanda" class="active">OANDA</button><button type="button" data-v="pepperstone">Pepperstone</button></div></td></tr>
+              <tr id="broker-toggle-wrap" style="display:none"><th>Broker</th><td><div class="group toggle" id="broker-toggle"><button type="button" data-v="oanda" class="active">OANDA</button><button type="button" data-v="pepperstone">Pepperstone</button></div><span id="pepperstone-account-type-wrap" style="display:none"> <span>Account type</span> <span class="group toggle" id="pepperstone-account-type-toggle" role="group" aria-label="Pepperstone account type"><button type="button" data-v="razor" class="active">Razor</button><button type="button" data-v="standard">Standard</button></span></span></td></tr>
               <tr><th>Side</th><td><div class="group toggle" id="side-toggle"><button type="button" data-v="buy" class="active">Buy</button><button type="button" data-v="sell">Sell</button></div></td></tr>
               <tr><th>Order type</th><td><div class="group toggle" id="order-toggle"><button type="button" data-v="market" class="active">Market</button><button type="button" data-v="limit">Limit</button></div></td></tr>
               <tr><th><label for="calc-symbol">Symbol</label></th><td><input id="calc-symbol" placeholder="BTC or EUR_USD"/><div class="muted" id="calc-canonical-symbol"></div></td></tr>
@@ -29953,6 +29953,26 @@ def _pepperstone_set_risk_target(payload: Dict[str, object]) -> Decimal:
     )
 
 
+def _pepperstone_account_type(payload: Dict[str, object]) -> str:
+    value = str(payload.get("pepperstone_account_type", "razor")).strip().lower()
+    if value not in {"razor", "standard"}:
+        raise HTTPException(status_code=400, detail="pepperstone_account_type must be razor or standard.")
+    return value
+
+
+def _pepperstone_commission_rate(value=None) -> Decimal:
+    # Trader's configured rate is AUD per standard currency-FX lot per side.
+    raw = os.getenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50") if value is None else value
+    try:
+        rate = Decimal(str(raw))
+        if not rate.is_finite() or rate < 0:
+            raise ValueError()
+        # Match the two-decimal rate written to the existing Trader preset.
+        return rate.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Pepperstone commission must be finite nonnegative AUD per lot per side.") from exc
+
+
 def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]:
     asset = str(payload.get("asset") or "").strip().lower()
     broker = str(payload.get("broker") or "").strip().lower()
@@ -29963,6 +29983,12 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     if not context_id:
         raise HTTPException(status_code=409, detail="Calculate a Pepperstone quote before downloading the .set file.")
     quote_snapshot = _get_pepperstone_quote_snapshot(context_id)
+    account_type = _pepperstone_account_type(payload)
+    if account_type != _pepperstone_account_type(quote_snapshot):
+        raise HTTPException(status_code=409, detail="Pepperstone account type changed. Recalculate before downloading.")
+    commission_rate = _pepperstone_commission_rate(quote_snapshot.get("commission_per_lot_per_side_aud", "3.50"))
+    if account_type == "standard":
+        commission_rate = Decimal("0")
     export_status = quote_snapshot.get("pepperstone_mt5_export_status")
     if not isinstance(export_status, dict) or export_status.get("file_ready", export_status.get("ready")) is not True:
         reason = str(export_status.get("reason") or "this quote is not ready") if isinstance(export_status, dict) else "this quote is not ready"
@@ -29974,6 +30000,9 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "pepperstone_mt5_export_status", "pepperstone_mt5_point_status", "mt5_point", "mt5_point_size",
         "mt5_symbol", "point_source_path", "stop_loss_mt5_points", "take_profit_mt5_points",
         "chart_tick_size", "chart_tick_size_source", "chart_tick_profile_id",
+        "commission_per_lot_per_side_aud", "commission_currency", "CommissionPerLotPerSide",
+        "estimated_commission_aud", "estimated_spread_aud", "estimated_fees_or_spread_aud",
+        "estimated_fees_or_spread", "commission_rate", "IncludeCommissionInRisk",
     ):
         if forged_field in payload:
             raise HTTPException(status_code=400, detail=f"{forged_field} is server-owned and cannot be supplied to the .set exporter.")
@@ -30091,7 +30120,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "RiskAUD_Min": _pepperstone_set_decimal(risk_min, places="0.01"),
         "RiskAUD_Max": _pepperstone_set_decimal(risk_max, places="0.01"),
         "IncludeCommissionInRisk": _pepperstone_trader_set_bool(True),
-        "CommissionPerLotPerSide": _pepperstone_set_decimal(Decimal(str(os.getenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50") or "3.50")), places="0.01"),
+        "CommissionPerLotPerSide": "0.00" if account_type == "standard" else _pepperstone_set_decimal(commission_rate, places="0.01"),
         "RiskSlippageBufferPoints": str(_pepperstone_default_risk_slippage_buffer_points()),
         "SlippagePoints": str(_pepperstone_default_slippage_points()),
         "AutoFitRiskSlippageBuffer": _pepperstone_trader_set_bool(True),
@@ -31903,6 +31932,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
 
         if asset == "fx":
             is_pepperstone = broker == "pepperstone"
+            account_type = _pepperstone_account_type(payload) if is_pepperstone else None
+            commission_rate = _pepperstone_commission_rate() if is_pepperstone and account_type == "razor" else Decimal("0")
             if is_pepperstone and risk_mode == "percent":
                 raise HTTPException(
                     status_code=400,
@@ -32043,7 +32074,13 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 except ValueError as exc:
                     raise HTTPException(status_code=502, detail=str(exc)) from exc
             spread_quote = max(Decimal("0"), ask - bid)
-            loss_per_unit_home = (abs(entry - sl) + spread_quote) * loss_factor
+            commission_per_unit_aud = Decimal("0")
+            if is_pepperstone:
+                currencies = {"AUD", "USD", "GBP", "EUR", "JPY", "NZD", "CAD", "CHF", "NOK", "SEK", "DKK", "SGD", "HKD", "CNH", "ZAR", "MXN", "TRY", "PLN", "HUF", "CZK", "THB"}
+                if not all(part in currencies for part in symbol.split("_")) or len(symbol.split("_")) != 2:
+                    raise HTTPException(status_code=400, detail="Pepperstone commission-aware estimate requires currency FX; CFD lot contracts are not inferred.")
+                commission_per_unit_aud = commission_rate * Decimal("2") / Decimal("100000")
+            loss_per_unit_home = (abs(entry - sl) + spread_quote) * loss_factor + commission_per_unit_aud
             if loss_per_unit_home <= 0:
                 raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
 
@@ -32090,10 +32127,15 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             else:
                 target_distance = (tp_ticks or Decimal("0")) * distance_tick_size
                 if target_mode == "rr" and rr_requested is not None:
-                    target_distance = abs(entry - sl) * rr_requested
+                    target_distance = (rr_requested * loss_per_unit_home + commission_per_unit_aud) / gain_factor + spread_quote
                     requested_rr_net = rr_requested
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
-                reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
+                reward_home = ((abs(tp - entry) - spread_quote) * gain_factor - commission_per_unit_aud) * units
+                if is_pepperstone:
+                    effective_rr_net = reward_home / (loss_per_unit_home * units)
+                    fee_buffer_r = (spread_quote * loss_factor + commission_per_unit_aud) / loss_per_unit_home
+                else:
+                    reward_home = max(Decimal("0"), reward_home)
             margin_available = Decimal(str(summary.get("marginAvailable") or "0")) if summary is not None else Decimal("0")
             effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0")) if summary is not None else Decimal("0")
             estimated_position_value_home = units * entry * _position_value_factor
@@ -32189,6 +32231,16 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     }
                 )
             if broker == "pepperstone":
+                response_payload.update({
+                    "pepperstone_account_type": account_type,
+                    "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),
+                    "commission_currency": "AUD",
+                    "estimated_commission_aud": _fmt_dec(commission_per_unit_aud * units),
+                    "estimated_spread_aud": _fmt_dec(spread_home),
+                    "estimated_fees_or_spread_aud": _fmt_dec(spread_home + commission_per_unit_aud * units),
+                    "estimated_fees_or_spread": _fmt_dec(spread_home + commission_per_unit_aud * units),
+                    "spread_estimate_note": "OANDA reference prices/spreads, not measured Pepperstone Razor/Standard spreads. Actual Standard FX spreads include broker markup; final costs/lots depend on Trader and the actual account. Zero separate FX commission does not describe share CFDs.",
+                })
                 distance_conversion: Dict[str, object] = {
                     "symbol": symbol,
                     "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
@@ -32258,6 +32310,9 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             response_payload["quote_created_at_ms"] = int(time.time() * 1000)
             if is_pepperstone:
                 quote_snapshot = {
+                        "pepperstone_account_type": account_type,
+                        "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),
+                        "commission_currency": "AUD",
                         "account": account,
                         "symbol": symbol,
                         "side": side,
@@ -32334,7 +32389,10 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "calculator_distance_tick_size": _fmt_dec(distance_tick_size),
                         "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                         "status": "QUOTED",
-                        **({"local_tracking": False} if is_pepperstone else {}),
+                        **({"local_tracking": False,
+                            "pepperstone_account_type": account_type,
+                            "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),
+                            "commission_currency": "AUD"} if is_pepperstone else {}),
                         **({
                             "local_tracking": True,
                             "local_tracking_kind": "pepperstone_calculator",

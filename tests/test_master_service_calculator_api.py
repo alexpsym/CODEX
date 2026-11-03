@@ -133,6 +133,7 @@ def _pepperstone_set_payload_from_quote(request_payload: dict, quote_body: dict)
     payload = {
         "asset": "fx",
         "broker": "pepperstone",
+        "pepperstone_account_type": quote_body.get("pepperstone_account_type", "razor"),
         "account": request_payload.get("account", "demo"),
         "symbol": quote_body["symbol"],
         "side": request_payload["side"],
@@ -2361,7 +2362,7 @@ def test_pepperstone_tick_distances_convert_exactly_for_fx_and_jpy_steps(monkeyp
         master_service._load_pepperstone_symbol_point("GBP_USD")
 
 
-def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inactive_r(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inactive_r(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pepperstone_account_fixture) -> None:
     export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00001")])
     monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
     calls = _mock_pepperstone_quote_dependencies(monkeypatch)
@@ -4190,3 +4191,120 @@ def test_unused_trendline_plan_delete_route_is_permanent_and_protected(tmp_path,
         assert failure.value.status_code == 500
     assert store.path.read_bytes() == before
     assert not external and "can_delete" not in store.path.read_text()
+
+
+@pytest.fixture
+def pepperstone_account_fixture(monkeypatch, tmp_path):
+    import selectors
+    import threading
+    service = master_service
+    # Single-thread fixture loop: no socket self-pipe or external I/O, real task/lock semantics.
+    class FixtureSelector(selectors.SelectSelector):
+        def select(self, timeout=None):
+            if not self.get_map():
+                if timeout:
+                    time.sleep(timeout)
+                return []
+            return super().select(timeout)
+    class FixtureLoop(asyncio.SelectorEventLoop):
+        def _make_self_pipe(self):
+            self._ssock = self._csock = None
+        def _close_self_pipe(self):
+            pass
+        def _write_to_self(self):
+            pass
+    def run(coro):
+        loop = FixtureLoop(FixtureSelector())
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+    monkeypatch.setattr(asyncio, "run", run)
+    monkeypatch.setattr(service, "TRADE_CONTEXTS_PATH", tmp_path / "contexts.json")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_LOCK", threading.RLock())
+    monkeypatch.setattr(service, "_PEPPERSTONE_QUOTE_SNAPSHOTS", {})
+    monkeypatch.setattr(service, "_PEPPERSTONE_QUOTE_SNAPSHOTS_LOCK", threading.RLock())
+    monkeypatch.setattr(service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(tmp_path / "no-broker-metadata.json"))
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "4.20")
+    return service._upsert_calculator_trade_context
+
+
+def test_pepperstone_account_quote_costs(monkeypatch, tmp_path, pepperstone_account_fixture):
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", pepperstone_account_fixture)
+    D = Decimal
+    for symbol, factor, step in [("GBPUSD", D("1.5"), D("0.00001")), ("USDJPY", D("0.01"), D("0.001"))]:
+        for side in ("buy", "sell"):
+            for kind in ("razor", "standard"):
+                for mode in ("ticks", "rr"):
+                    request = _pepperstone_quote_payload(symbol=symbol, side=side, pepperstone_account_type=kind,
+                        target_mode=mode, take_profit_ticks="25", risk_reward="2", chart_tick_size=str(step))
+                    q = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+                    cost = D("8.40") / D("100000") if kind == "razor" else D(0)
+                    loss = (43 * step + D("0.00020")) * factor + cost
+                    units = D(10) / loss
+                    assert abs(D(q["quantity"]) - units) < D("0.000001")
+                    assert abs(D(q["estimated_commission_aud"]) - units * cost) < D("0.000001")
+                    assert abs(D(q["estimated_spread_aud"]) - units * D("0.00020") * factor) < D("0.000001")
+                    assert abs(D(q["estimated_total_loss_aud"]) - 10) < D("0.000001")
+                    distance = 25 * step if mode == "ticks" else (D(2) * loss + cost) / factor + D("0.00020")
+                    assert abs(D(q["target_distance"]) - distance) < D("0.000001")
+                    reward = ((distance - D("0.00020")) * factor - cost) * units
+                    assert abs(D(q["estimated_reward_aud"]) - reward) < D("0.000001")
+                    assert D(q["effective_rr_net"]) == (reward / D(10)).quantize(D("0.01"), rounding=master_service.ROUND_HALF_UP)
+                    assert q["commission_currency"] == "AUD"
+                    assert "not measured Pepperstone" in q["spread_estimate_note"]
+    legacy = json.loads(asyncio.run(master_service.calculator_quote(_pepperstone_quote_payload())).body)
+    assert legacy["pepperstone_account_type"] == "razor"
+    for invalid in ("invalid", "", None):
+        with pytest.raises(master_service.HTTPException):
+            asyncio.run(master_service.calculator_quote(_pepperstone_quote_payload(pepperstone_account_type=invalid)))
+    for invalid in ("NaN", "Infinity", "-1", "bad"):
+        monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", invalid)
+        with pytest.raises(master_service.HTTPException):
+            asyncio.run(master_service.calculator_quote(_pepperstone_quote_payload()))
+    rows = master_service._load_trade_contexts()
+    assert any(row.get("pepperstone_account_type") == "standard" for row in rows)
+
+
+def test_pepperstone_account_export_integrity(monkeypatch, tmp_path, pepperstone_account_fixture):
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", pepperstone_account_fixture)
+    for kind in ("razor", "standard"):
+        monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "4.20")
+        request = _pepperstone_quote_payload(pepperstone_account_type=kind)
+        q = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        payload = _pepperstone_set_payload_from_quote(request, q)
+        monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "99.00")
+        text, _ = master_service._build_pepperstone_trader_set(payload)
+        values = _parse_set_file(text)
+        assert Decimal(values["CommissionPerLotPerSide"]) == (Decimal("4.20") if kind == "razor" else 0)
+        assert values["IncludeCommissionInRisk"] == "true"
+        assert values["AutoTP_NetRR_Enabled"] == "true"
+        assert values["AutoFitRiskSlippageBuffer"] == "true"
+        assert values["EnforceOneTradeAtATime"] == "true"
+        assert Decimal(values["RiskAUD_Min"]) == 9 and Decimal(values["RiskAUD_Max"]) == 12
+        def forbidden():
+            raise AssertionError("must reject before generating token")
+        with monkeypatch.context() as guard:
+            guard.setattr(master_service, "uuid4", forbidden)
+            for field in ("commission_per_lot_per_side_aud", "estimated_commission_aud", "CommissionPerLotPerSide", "estimated_fees_or_spread"):
+                with pytest.raises(master_service.HTTPException):
+                    master_service._build_pepperstone_trader_set(dict(payload, **{field: "0"}))
+            with pytest.raises(master_service.HTTPException):
+                master_service._build_pepperstone_trader_set(dict(payload, pepperstone_account_type="standard" if kind == "razor" else "razor"))
+            omitted = dict(payload); omitted.pop("pepperstone_account_type")
+            if kind == "standard":
+                with pytest.raises(master_service.HTTPException):
+                    master_service._build_pepperstone_trader_set(omitted)
+        if kind == "razor":
+            snap = master_service._get_pepperstone_quote_snapshot(q["calculation_context_id"])
+            for field in ("pepperstone_account_type", "commission_per_lot_per_side_aud", "commission_currency"):
+                snap.pop(field, None)
+            master_service._store_pepperstone_quote_snapshot(q["calculation_context_id"], snap)
+            omitted = dict(payload); omitted.pop("pepperstone_account_type")
+            text, _ = master_service._build_pepperstone_trader_set(omitted)
+            assert Decimal(_parse_set_file(text)["CommissionPerLotPerSide"]) == Decimal("3.50")

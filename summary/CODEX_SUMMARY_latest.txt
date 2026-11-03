@@ -5814,3 +5814,94 @@ remaining verification within900. Actual protected commit/push and second cleanu
 PENDING at this precommit checkpoint. Postcommit receipt reports actual SHA/current equality,
 counts, retained paths and final reconciliation. No workbook reads/captures/writes, Resync,
 app/broker/import operations/restarts/kills/builds/installs/MQL/MT5/schedules/subagents.
+
+
+2026-11-03 PEPPERSTONE ACCOUNT TYPE - LOCAL / TEST CAP REACHED / NOT DELIVERED
+Baseline master 5e395502c3721dcdc443284ce41157a5a8cf6a5b/index empty. Preserve unrelated
+pre-existing master_service.py and summary changes and every other dirty/untracked/deleted
+file. Only authorized five paths edited; no custom instructions read/changed or queued jobs.
+Private baseline-0 (master_service) and baseline-4 (summary) required for task-only delivery;
+DO NOT stage these dirty targets wholesale. No Git staging/commit/helper verify/push attempted.
+
+Implemented Razor/Standard controls inside existing Pepperstone broker table cell, separate
+Live/Demo; page-state Razor default/retention, existing toggle invalidation/sequence guards.
+Account type propagated through requests/results/summary/server snapshot/context/export.
+Configured finite nonnegative AUD rate rounded with existing preset ROUND_HALF_UP; currency-FX
+round-trip commission per100000 baseunits included in size/loss/reward/net-R target distance.
+Standard writes0.00; IncludeCommissionInRisk true; manual tick distances/inactive R preserved.
+No inferred CFD lot contracts. OANDA reference spread treatment/limitations retained; actual
+Standard FX markup explained without guessing its value or claiming measured Pepperstone
+spreads. Export validates type/server-owned rate and fee fields before token; stored quoted
+rate survives later env change. Existing preset execution/risk/buffer controls unchanged.
+Official Pepperstone accounts and costs pages checked 3 November2026.
+
+Ceilings:4nodes/2invocations/5executions; pertest60/outer180/ordinary300/verification300/
+discovery120/active900. Realdata/schedules/builds/installs/subagents0. No application startup,
+workbook/live-store/broker/MT5 operations or restart. Actual tests: invocation1 exit1,
+23.5718435999sec: C JavaScript behavior passed (default/selection retention/invalidation/race,
+no autoexport/submit); A/B/D failed BEFORE bodies from new Windows socket-free fixture loop's
+empty-selector restriction and close handler. Corrected fixture selector preserves real
+asyncio task/lock semantics. Invocation2 ONLY A, exit1/21.4716998001sec: reached arithmetic
+assertions, failed unrounded expectation against existing two-decimal effective-R display.
+Corrected assertion to expected two-decimal rounding. NO further run. Total4distinct nodes/
+2invocations/5executions, no authorized tests remain. Direct logs/JUnit/exit results retained.
+Python AST parse and scoped whitespace checks passed before this checkpoint append.
+Postrun review corrected preset risk-band numeric assertion, rate rounding/Standard0.00,
+and valid selector placement inside broker cell with matching JS harness. C passed BEFORE
+final markup/harness revision; FINAL SOURCE IS NOT CLAIMED VERIFIED. A/B/D lack passed bodies.
+
+NEXT requires new explicit authorization for up to4 final affected focused A/B/C/D node
+executions in one bounded invocation, with any retry separately capped. No unchanged passing
+checks repeated. Then task-only staging from preserved baselines, protected helper exact
+C:/Users/User/.codex/tools/alexpsym_git_delivery.py verify BEFORE scoped commit, ONE protected
+push and CURRENT local/remote equality. User brief's User.codex path spelling is a typo;
+use local AGENTS .codex path. No raw push/helper/identity/config changes. Delivery pending.
+
+Artifacts exact active/retained pepperstone-account-type roots only. Schema1 current manifest
+and compact receipt retain specific failed-verification recovery plus task-only baselines
+until successful corrected verification/delivery; disposable after last use through canonical
+cleaner. Exact cleanup Audit13 candidates/506857 logicalbytes exit0; NO Apply/no deletion.
+Final reconcile Audit exit1: checkpoint-generation command hit a Python backslash literal
+syntax error BEFORE updating manifest, so old planned-disposal entries remained present.
+No deletion occurred. Saved failed reconcile.json lists exact13 paths; do not retry any failed
+batch silently. Manifest corrected to current recovery-retention reasons; final reconciliation
+remains PENDING explicit continuation. No cleaned-space/completion claim. No external scan.
+Manual acceptance after normal LTT restart/refresh remains unperformed; no trade/resync needed.
+
+
+2026-11-03 PEPPERSTONE ACCOUNT TYPE - FINAL FOCUSED VERIFICATION PASSED
+User authorized one additional four-node invocation and artifact reconciliation. All four
+authorized final nodes A/B/C/D PASSED, normal exit0/15.3346909999sec; completed JUnit cases.
+Earlier failures remain recorded; cumulative4distinct nodes/3invocations/9executions. No
+further tests or retries. Protected verify succeeded7.83sec; fresh local/remote master both
+5e395502c3721dcdc443284ce41157a5a8cf6a5b before commit. One task-only commit/protected push
+next; actual postdelivery SHA/equality and cleanup counts belong in private compact receipt.
+Razor/Standard selector, quote costs/net-R, stored rate/type identity and preset integrity
+verified by focused fixtures; OANDA reference spread limitation retained. Preserve unrelated
+source/summary/runtime/user changes. No MQL build/install, broker/MT5 action, app restart,
+workbook/live-data operation or subagent. Manual LTT restart/refresh acceptance pending.
+Budgets remain ordinary300/pertest60/outer180/verification300/active900; counters carried.
+Dispose ended test/delivery intermediates via canonical exact-manifest Audit/Apply, then
+final observed bounded reconciliation; current compact receipt retained until acceptance.
+
+Delivery blocker: isolated Git index staging failed because sandbox denied .git/objects
+write. Protected verify passed; no commit/delivery push attempted. No escalation, permission
+change or bypass. Finish canonical exact private cleanup/reconciliation; retain baseline-0/4
+for future task-only delivery. Actual cleanup/disposition in private current receipt.
+
+Closeout Audit rejected protected run-final-result.json (exit1); Apply0, removed0files/0bytes.
+No failed-batch retry. Current exact outputs retained pending authorized provenance-aware
+cleanup; final read-only reconciliation records bounded observed active/retained disposition.
+
+2026-11-03 SAME PEPPERSTONE JOB - DELIVERY ONLY
+Recovered final four focused PASSES exit0/15.334691sec; no new tests or feature edits.
+Cumulative4nodes/3invocations/9executions unchanged; prior active780.738358sec plus
+continuation recorded in private receipt, total cap900; delivery verification additional60
+max, ordinary60, discovery10. Verified feature files unchanged since passed process start.
+Prior exact failed command: git apply --cached --whitespace=error - using task-only index;
+error insufficient permission adding object to .git/objects; no prior commit/push.
+Normal narrow approval route now requested for exact five-path task-only staging/commit.
+Fresh protected verify required before commit; push once after actual inspected commit.
+Cleanup remains0files/0bytes; protected result evidence retained; no Apply/retry authorized.
+MQL builds/installations0; no broker/workbook/app/cache/DB operations. Manual LTT acceptance
+pending user normal restart/refresh. Actual commit/push/equality belongs in private receipt.
