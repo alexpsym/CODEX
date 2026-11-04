@@ -741,7 +741,10 @@ def _instrument_averages_header_row(ws) -> int:
     if str(ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, 1).value or "").strip().lower() == "symbol":
         return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
     if str(ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, 1).value or "").strip().lower() == "symbol":
-        return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+        # Canonical two-row headers vertically merge Symbol. A genuine single
+        # header row must not be mistaken for a two-row header and lose record1.
+        if _vertical_header_anchor_value(ws, 1):
+            return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
     return 1
 
 
@@ -8232,6 +8235,12 @@ def _apply_trade_log_win_loss_direct_row_fills_for_rows(
     test_fill = PatternFill("solid", fgColor=TEST_TRADE_FILL)
     for row in sorted({int(value) for value in row_numbers}):
         row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
+        if _trade_log_monthly_aud_row(ws, row, headers):
+            for col in range(1, last_col + 1):
+                cell = ws.cell(row,col)
+                if _cell_has_generated_trade_log_win_loss_fill(cell):
+                    cell.fill = empty_fill
+            continue
         if row_type != "trade":
             continue
         net_pl = _as_float(ws.cell(row, net_pl_col).value)
@@ -8249,6 +8258,16 @@ def _apply_trade_log_win_loss_direct_row_fills_for_rows(
                 cell.fill = fill
             elif _cell_has_generated_trade_log_win_loss_fill(cell):
                 cell.fill = empty_fill
+
+
+def _trade_log_monthly_aud_row(ws, row: int, headers=None) -> bool:
+    """Use the existing monthly semantic identity and canonical stable ID."""
+    headers = headers or _trade_log_header_map(ws)
+    def value(header):
+        col = headers.get(header)
+        return ws.cell(row,col).value if col else None
+    return bool(_monthly_aud_reval_row_id_month(value('Row ID'))) and _is_monthly_aud_reval_semantic_row({
+        'row_type':value('Row Type'),'symbol':value('Symbol'),'account':value('Account')})
 
 
 def _apply_trade_log_recommendation_conditional_formatting(ws, start_row: int, last_row: int, headers: Dict[str, int]) -> None:
@@ -8743,16 +8762,13 @@ def _populate_symbols_metrics_preserving_layout(
             continue
         payload = analysis.get(symbol)
         if not payload:
-            for col, key in metric_cols.items():
-                if key.endswith("_recommendation"):
-                    cell = ws.cell(row, col)
-                    cell.value = ""
-                    cell.number_format = "General"
-                    _apply_recommendation_cell_style(cell)
-                skipped.append({"column": get_column_letter(col), "metric": key, "reason": "symbol_not_in_trade_log"})
+            # A partial snapshot carries no authority over an absent symbol's
+            # authored record, including its zero-trade/manual recommendations.
             continue
         for col, key in metric_cols.items():
             cell = ws.cell(row, col)
+            if _cell_contains_formula(cell):
+                continue
             value = payload.get(key)
             if value is None:
                 if key.endswith("_recommendation"):
@@ -17604,7 +17620,9 @@ def _patch_formula_caches_in_worksheet_payload(
             escaped_type = _xml_escape(str(cached_type), {'"': "&quot;"})
             start_tag = start_tag[:-1] + f' t="{escaped_type}">'
         cached_text = _xml_escape('' if record.get('cached_value') is None else str(record['cached_value']))
-        value_element = f"<v>{cached_text}</v>"
+        prefix_match = re.match(r'<([A-Za-z_][\w.-]*:)?c\b',start_tag)
+        value_prefix = (prefix_match[1] or '') if prefix_match else ''
+        value_element = f"<{value_prefix}v>{cached_text}</{value_prefix}v>"
         if record.get('cache_present', True) is False: value_element = ''
         value_pattern = re.compile(
             r"<(?:[A-Za-z_][\w.-]*:)?v(?:\s[^>]*)?>.*?"
@@ -17896,6 +17914,17 @@ def update_master_journal_workbook_data_only(
             + "; ".join(external_formula_references[:10])
         )
     wb = load_workbook(path, keep_links=False)
+    source_symbols_presentation = {}
+    if preserve_existing_layout:
+        original_symbols = _symbols_sheet(wb)
+        sh = _instrument_averages_header_map(original_symbols)
+        for row in range(_instrument_averages_data_start_row(original_symbols),original_symbols.max_row+1):
+            symbol = str(original_symbols.cell(row,sh.get('Symbol',1)).value or '').strip().upper()
+            if symbol:
+                if symbol in source_symbols_presentation:raise ValueError('Ambiguous duplicate SYMBOLS identity')
+                source_symbols_presentation[symbol] = {
+                    col:copy(original_symbols.cell(row,col)._style)
+                    for col in range(1,original_symbols.max_column+1)}
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     if symbol_win_rate_fingerprint_error:
         diagnostics["symbol_win_rate_fingerprint_error"] = (
@@ -19133,141 +19162,6 @@ def update_master_journal_workbook_data_only(
             _apply_trade_log_win_loss_row_formatting(live_trade_log)
             _apply_trade_log_win_loss_direct_row_fills(live_trade_log)
 
-            def _copy_instrument_rows_header_aware(src_ws, dst_ws):
-                aliases = {
-                    'trades': ['trades','total trades','total_trades'],
-                    'wins':['wins'],'losses':['losses'],'break-even':['break-even','break even'],
-                    'longs':['longs','long trades'],'shorts':['shorts','short trades'],
-                    'long wins':['long wins'],'long losses':['long losses'],'long break-even':['long break-even'],
-                    'short wins':['short wins'],'short losses':['short losses'],'short break-even':['short break-even'],
-                    'net p/l %':['net p/l %'],'avg p/l %':['avg p/l %'],'win rate %':['win rate %'],
-                    'avg stop % (w)':['avg stop % (w)'],'avg stop % (l)':['avg stop % (l)'],'avg target % (w)':['avg target % (w)'],'avg target % (l)':['avg target % (l)'],
-                    'stop recommendation':['stop loss recommendation'],
-                    'target recommendation':['target recommendation'],
-                    'shortest':['shortest duration (dd:hh:mm:ss)','shortest (dd:hh:mm:ss)'],
-                    'avgdur':['avg duration (dd:hh:mm:ss)'],
-                    'longest':['longest duration (dd:hh:mm:ss)','longest (dd:hh:mm:ss)'],
-                    'movebe':['move to break even'],'moveprofit':['move to profit'],
-                    'pattern':['most traded pattern','pattern'],'ema':['most traded ema','ema'],
-                    'ath':['all-time highs'],'atl':['all-time lows'],
-                    'market':['market'],'limit':['limit'],'round':['round number'],'spiked':['spiked out'],
-                    'closestop':['close stop out'],'nearentry':['near perfect entry'],
-                    'nearwin':['near win'],'earlyclose':['early close'],
-                    'timeframe':['most traded timeframe'],
-                    'mostprofitabletimeframe':['most profitable timeframe'],
-                    'leastprofitabletimeframe':['least profitable timeframe'],
-                    'rmultiple':['net r multiple','r multiple'],
-                    'symbol':['symbol'],'class':['class']
-                }
-                dst_header_row = _instrument_averages_header_row(dst_ws)
-                src_start_row = _instrument_averages_data_start_row(src_ws)
-                dst_start_row = _instrument_averages_data_start_row(dst_ws)
-                src_headers = {
-                    str(header or "").strip().casefold(): col
-                    for header, col in _instrument_averages_header_map(src_ws).items()
-                }
-                dst_headers = {
-                    str(header or "").strip().casefold(): col
-                    for header, col in _instrument_averages_header_map(dst_ws).items()
-                }
-                def find_col(headers, keys):
-                    for k in keys:
-                        if k in headers:
-                            return headers[k]
-                    return None
-                pair_by_destination = {}
-                for header, dc in dst_headers.items():
-                    sc = src_headers.get(header)
-                    if sc:
-                        pair_by_destination[dc] = (sc, dc)
-                for _,keys in aliases.items():
-                    sc=find_col(src_headers, keys); dc=find_col(dst_headers, keys)
-                    if sc and dc:
-                        pair_by_destination[dc] = (sc, dc)
-                pairs = [
-                    pair_by_destination[dc]
-                    for dc in sorted(pair_by_destination)
-                ]
-                if not pairs:
-                    return
-                src_symbol_col = find_col(src_headers, aliases["symbol"])
-                dst_symbol_col = find_col(dst_headers, aliases["symbol"])
-                populated_rows = []
-                if preserve_existing_layout and src_symbol_col and dst_symbol_col:
-                    source_records = []
-                    for src_row in range(src_start_row, src_ws.max_row + 1):
-                        symbol = str(src_ws.cell(src_row, src_symbol_col).value or "").strip().upper()
-                        if symbol:
-                            source_records.append((symbol, src_row))
-
-                    destination_rows_by_symbol = defaultdict(list)
-                    existing_symbol_rows = []
-                    for dst_row in range(dst_start_row, dst_ws.max_row + 1):
-                        symbol = str(dst_ws.cell(dst_row, dst_symbol_col).value or "").strip().upper()
-                        if not symbol:
-                            continue
-                        destination_rows_by_symbol[symbol].append(dst_row)
-                        existing_symbol_rows.append(dst_row)
-
-                    matched_records = []
-                    new_records = []
-                    for symbol, src_row in source_records:
-                        candidates = destination_rows_by_symbol.get(symbol) or []
-                        if candidates:
-                            matched_records.append((src_row, candidates.pop(0)))
-                        else:
-                            new_records.append((symbol, src_row))
-
-                    used_rows = {dst_row for _src_row, dst_row in matched_records}
-                    removed_rows = [
-                        dst_row for dst_row in existing_symbol_rows
-                        if dst_row not in used_rows
-                    ]
-                    for dst_row in removed_rows:
-                        for _src_col, dst_col in pairs:
-                            cell = dst_ws.cell(dst_row, dst_col)
-                            cell.value = None
-                            cell.comment = None
-                            cell.hyperlink = None
-
-                    next_append_row = max(existing_symbol_rows, default=dst_start_row - 1) + 1
-                    for _symbol, src_row in sorted(new_records, key=lambda item: (item[0], item[1])):
-                        while any(
-                            dst_ws.cell(next_append_row, dst_col).value not in (None, "")
-                            for _src_col, dst_col in pairs
-                        ):
-                            next_append_row += 1
-                        matched_records.append((src_row, next_append_row))
-                        next_append_row += 1
-
-                    for src_row, dst_row in matched_records:
-                        for src_col, dst_col in pairs:
-                            source_cell = src_ws.cell(src_row, src_col)
-                            destination_cell = dst_ws.cell(dst_row, dst_col)
-                            destination_cell.value = source_cell.value
-                            destination_cell.number_format = source_cell.number_format
-                        populated_rows.append(dst_row)
-                    diagnostics["symbols_rows_preserved_by_identity"] = len(used_rows)
-                    diagnostics["symbols_rows_appended"] = len(new_records)
-                    diagnostics["symbols_rows_cleared"] = len(removed_rows)
-                else:
-                    max_dst_row = max(dst_ws.max_row, src_ws.max_row)
-                    for r in range(dst_start_row, max_dst_row + 1):
-                        for _,dc in pairs:
-                            dst_ws.cell(r,dc).value=None
-                    dst_row = dst_start_row
-                    for r in range(src_start_row, src_ws.max_row+1):
-                        for sc,dc in pairs:
-                            s=src_ws.cell(r,sc); d=dst_ws.cell(dst_row,dc)
-                            d.value=s.value; d.number_format=s.number_format
-                        if any(dst_ws.cell(dst_row, dc).value not in (None, "") for _sc, dc in pairs):
-                            populated_rows.append(dst_row)
-                        dst_row += 1
-                last_col = max(_instrument_averages_header_map(dst_ws).values())
-                dst_ws.auto_filter.ref=(
-                    f"A{dst_header_row}:"
-                    f"{get_column_letter(last_col)}{max([dst_header_row, *populated_rows])}"
-                )
             if SYMBOLS_SHEET in wb.sheetnames and SYMBOLS_SHEET in gen.sheetnames:
                 instrument_ws = _symbols_sheet(wb)
                 preserved_win_rates: Dict[str, List[Any]] = defaultdict(list)
@@ -19294,7 +19188,8 @@ def update_master_journal_workbook_data_only(
                                         existing_row, existing_win_rate_col
                                     ).value
                                 )
-                _copy_instrument_rows_header_aware(_symbols_sheet(gen), instrument_ws)
+                _copy_instrument_rows_header_aware(_symbols_sheet(gen), instrument_ws,
+                    preserve_existing_layout=preserve_existing_layout, diagnostics=diagnostics)
                 if not preserve_existing_layout:
                     _apply_instrument_averages_requested_style(
                         instrument_ws, preserve_layout=True
@@ -19625,6 +19520,8 @@ def update_master_journal_workbook_data_only(
             preserve_stats1_presentation=preserve_existing_layout,
         )
         _apply_report_managed_left_alignment(wb, diagnostics)
+        if source_symbols_presentation:
+            _restore_symbols_authored_presentation(_symbols_sheet(wb),source_symbols_presentation)
         if preserve_existing_layout:
             _apply_workbook_calculation_signature(
                 wb,
@@ -21946,6 +21843,658 @@ def _refresh_counter_trend_package(path,rows=None):
 
 # Existing generation/preservation/incremental operations keep their own safety
 # contracts. The same narrowly validated package step updates ONLY this metric.
+def _restore_symbols_authored_presentation(ws, presentation):
+    """Keep existing styles with identity; recompute only generated signed colours."""
+    headers=_instrument_averages_header_map(ws)
+    signed={headers.get(h) for h in ('Net R Multiple','Net P/L %','Avg P/L %')}
+    for row in range(_instrument_averages_data_start_row(ws),ws.max_row+1):
+        symbol=str(ws.cell(row,headers.get('Symbol',1)).value or '').strip().upper()
+        for col,style in presentation.get(symbol,{}).items():
+            cell=ws.cell(row,col);cell._style=copy(style)
+            if col in signed and (cell.fill.fill_type is None or _cell_fill_rgb(cell) in {PROFIT_FILL,LOSS_FILL}):
+                _apply_sign_based_full_cell_fill(cell)
+
+
+def _copy_instrument_rows_header_aware(src_ws, dst_ws, *, preserve_existing_layout, diagnostics):
+    aliases = {
+        'trades': ['trades','total trades','total_trades'],
+        'wins':['wins'],'losses':['losses'],'break-even':['break-even','break even'],
+        'longs':['longs','long trades'],'shorts':['shorts','short trades'],
+        'long wins':['long wins'],'long losses':['long losses'],'long break-even':['long break-even'],
+        'short wins':['short wins'],'short losses':['short losses'],'short break-even':['short break-even'],
+        'net p/l %':['net p/l %'],'avg p/l %':['avg p/l %'],'win rate %':['win rate %'],
+        'avg stop % (w)':['avg stop % (w)'],'avg stop % (l)':['avg stop % (l)'],'avg target % (w)':['avg target % (w)'],'avg target % (l)':['avg target % (l)'],
+        'stop recommendation':['stop loss recommendation'],
+        'target recommendation':['target recommendation'],
+        'shortest':['shortest duration (dd:hh:mm:ss)','shortest (dd:hh:mm:ss)'],
+        'avgdur':['avg duration (dd:hh:mm:ss)'],
+        'longest':['longest duration (dd:hh:mm:ss)','longest (dd:hh:mm:ss)'],
+        'movebe':['move to break even'],'moveprofit':['move to profit'],
+        'pattern':['most traded pattern','pattern'],'ema':['most traded ema','ema'],
+        'ath':['all-time highs'],'atl':['all-time lows'],
+        'market':['market'],'limit':['limit'],'round':['round number'],'spiked':['spiked out'],
+        'closestop':['close stop out'],'nearentry':['near perfect entry'],
+        'nearwin':['near win'],'earlyclose':['early close'],
+        'timeframe':['most traded timeframe'],
+        'mostprofitabletimeframe':['most profitable timeframe'],
+        'leastprofitabletimeframe':['least profitable timeframe'],
+        'rmultiple':['net r multiple','r multiple'],
+        'symbol':['symbol'],'class':['class']
+    }
+    dst_header_row = _instrument_averages_header_row(dst_ws)
+    src_start_row = _instrument_averages_data_start_row(src_ws)
+    dst_start_row = _instrument_averages_data_start_row(dst_ws)
+    src_headers = {
+        str(header or "").strip().casefold(): col
+        for header, col in _instrument_averages_header_map(src_ws).items()
+    }
+    dst_headers = {
+        str(header or "").strip().casefold(): col
+        for header, col in _instrument_averages_header_map(dst_ws).items()
+    }
+    def find_col(headers, keys):
+        for k in keys:
+            if k in headers:
+                return headers[k]
+        return None
+    pair_by_destination = {}
+    for header, dc in dst_headers.items():
+        sc = src_headers.get(header)
+        if sc:
+            pair_by_destination[dc] = (sc, dc)
+    for _,keys in aliases.items():
+        sc=find_col(src_headers, keys); dc=find_col(dst_headers, keys)
+        if sc and dc:
+            pair_by_destination[dc] = (sc, dc)
+    pairs = [
+        pair_by_destination[dc]
+        for dc in sorted(pair_by_destination)
+    ]
+    if not pairs:
+        return
+    src_symbol_col = find_col(src_headers, aliases["symbol"])
+    dst_symbol_col = find_col(dst_headers, aliases["symbol"])
+    populated_rows = []
+    existing_symbol_rows = []
+    if preserve_existing_layout and src_symbol_col and dst_symbol_col:
+        source_records = []
+        for src_row in range(src_start_row, src_ws.max_row + 1):
+            symbol = str(src_ws.cell(src_row, src_symbol_col).value or "").strip().upper()
+            if symbol:
+                source_records.append((symbol, src_row))
+
+        destination_rows_by_symbol = defaultdict(list)
+        existing_symbol_rows = []
+        for dst_row in range(dst_start_row, dst_ws.max_row + 1):
+            symbol = str(dst_ws.cell(dst_row, dst_symbol_col).value or "").strip().upper()
+            if not symbol:
+                continue
+            destination_rows_by_symbol[symbol].append(dst_row)
+            existing_symbol_rows.append(dst_row)
+
+        matched_records = []
+        new_records = []
+        if any(len(value) > 1 for value in destination_rows_by_symbol.values()):
+            raise ValueError("Ambiguous duplicate SYMBOLS identity")
+        for symbol, src_row in source_records:
+            candidates = destination_rows_by_symbol.get(symbol) or []
+            if candidates:
+                matched_records.append((src_row, candidates.pop(0)))
+            else:
+                new_records.append((symbol, src_row))
+
+        used_rows = {dst_row for _src_row, dst_row in matched_records}
+        # A partial import is not an authoritative symbol deletion.
+        # Manual and zero-trade records must remain attached to identity.
+        removed_rows = []
+        if len({symbol for symbol, _row in source_records}) != len(source_records):
+            raise ValueError("Ambiguous incoming SYMBOLS identity")
+
+        next_append_row = max(existing_symbol_rows, default=dst_start_row - 1) + 1
+        for _symbol, src_row in sorted(new_records, key=lambda item: (item[0], item[1])):
+            while any(
+                dst_ws.cell(next_append_row, dst_col).value not in (None, "")
+                for _src_col, dst_col in pairs
+            ):
+                next_append_row += 1
+            matched_records.append((src_row, next_append_row))
+            if existing_symbol_rows:
+                class_col = find_col(dst_headers, aliases['class'])
+                source_class_col = find_col(src_headers, aliases['class'])
+                wanted_class = src_ws.cell(src_row,source_class_col).value if source_class_col else None
+                template_row = next((r for r in existing_symbol_rows
+                    if class_col and dst_ws.cell(r,class_col).value==wanted_class),existing_symbol_rows[0])
+                for col in range(1, dst_ws.max_column + 1):
+                    _copy_cell_style(dst_ws.cell(template_row,col),dst_ws.cell(next_append_row,col))
+            for src_col, dst_col in pairs:
+                _copy_cell_style(src_ws.cell(src_row, src_col), dst_ws.cell(next_append_row, dst_col))
+            dst_ws.row_dimensions[next_append_row].height = (
+                dst_ws.row_dimensions[template_row].height if existing_symbol_rows
+                else src_ws.row_dimensions[src_row].height)
+            next_append_row += 1
+
+        for src_row, dst_row in matched_records:
+            for src_col, dst_col in pairs:
+                source_cell = src_ws.cell(src_row, src_col)
+                destination_cell = dst_ws.cell(dst_row, dst_col)
+                if _cell_contains_formula(destination_cell):
+                    continue
+                if dst_col==find_col(dst_headers,aliases['class']) and dst_row in used_rows and destination_cell.value not in (None,''):
+                    continue
+                if _cell_contains_formula(source_cell):
+                    from openpyxl.formula.translate import Translator
+                    destination_cell.value = Translator(source_cell.value,origin=source_cell.coordinate).translate_formula(destination_cell.coordinate)
+                else:
+                    destination_cell.value = source_cell.value
+                destination_cell.number_format = source_cell.number_format
+            populated_rows.append(dst_row)
+        diagnostics["symbols_rows_preserved_by_identity"] = len(used_rows)
+        diagnostics["symbols_rows_appended"] = len(new_records)
+        diagnostics["symbols_rows_cleared"] = len(removed_rows)
+    else:
+        max_dst_row = max(dst_ws.max_row, src_ws.max_row)
+        for r in range(dst_start_row, max_dst_row + 1):
+            for _,dc in pairs:
+                dst_ws.cell(r,dc).value=None
+        dst_row = dst_start_row
+        for r in range(src_start_row, src_ws.max_row+1):
+            for sc,dc in pairs:
+                s=src_ws.cell(r,sc); d=dst_ws.cell(dst_row,dc)
+                d.value=s.value; d.number_format=s.number_format
+            if any(dst_ws.cell(dst_row, dc).value not in (None, "") for _sc, dc in pairs):
+                populated_rows.append(dst_row)
+            dst_row += 1
+    last_col = max(_instrument_averages_header_map(dst_ws).values())
+    dst_ws.auto_filter.ref=(
+        f"A{dst_header_row}:"
+        f"{get_column_letter(last_col)}{max([dst_header_row, *populated_rows, *existing_symbol_rows])}"
+    )
+
+
+def prepare_symbols_order_package(source_path, candidate_path, *, repair_generated=False, group_order=None, repair_symbols=None):
+    """Permute complete records in OOXML, keeping cached values and other parts.
+
+    The returned old-to-new row map is the complete permission for coordinate
+    changes. Nonrectangular ranges and unrecognised drawing references fail closed.
+    This prepares only; the journal transaction owner is responsible for install.
+    """
+    source_path, candidate_path = Path(source_path), Path(candidate_path)
+    if candidate_path.exists() or source_path.resolve() == candidate_path.resolve():
+        raise ValueError('A fresh private SYMBOLS candidate is required')
+    original = source_path.read_bytes()
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    inventory=load_workbook(BytesIO(original),data_only=False,keep_links=False)
+    try:
+        instrument_ws=_symbols_sheet(inventory)
+        canonical_headers=_instrument_averages_header_map(instrument_ws)
+        first_data=_instrument_averages_data_start_row(instrument_ws)
+        generated_headers=set(INSTRUMENT_AVERAGES_HEADERS)|{'Symbol','Class',AVG_WINNING_DURATION_HEADER,AVG_LOSING_DURATION_HEADER}
+        generated_cols={col for name,col in canonical_headers.items()
+                        if name in generated_headers or _symbols_metric_key_for_column(instrument_ws,col)}
+        signed_cols={canonical_headers.get(name) for name in ('Net R Multiple','Net P/L %','Avg P/L %')}
+    finally:inventory.close()
+    with zipfile.ZipFile(BytesIO(original)) as package:
+        part = _worksheet_ooxml_part_name(package, SYMBOLS_SHEET)
+        payload = package.read(part)
+        root = ET.fromstring(payload)
+        original_root=deepcopy(root)
+        shared = []
+        if 'xl/sharedStrings.xml' in package.namelist():
+            shared = [''.join(e.itertext()) for e in ET.fromstring(package.read('xl/sharedStrings.xml'))]
+        def value(cell):
+            if cell is None: return ''
+            if cell.get('t') == 'inlineStr': return ''.join(cell.find(ns+'is').itertext())
+            v = cell.find(ns+'v')
+            text = v.text or '' if v is not None else ''
+            return shared[int(text)] if cell.get('t') == 's' else text
+        data = root.find(ns+'sheetData')
+        header = {name:get_column_letter(canonical_headers[name]) for name in ('Symbol','Class') if name in canonical_headers}
+        if 'Symbol' not in header: raise ValueError('Missing SYMBOLS identity header')
+        records = []
+        for row in data:
+            if int(row.get('r')) < first_data:continue
+            cells = {re.sub(r'\d', '', c.get('r')): c for c in row}
+            symbol = value(cells.get(header['Symbol'])).strip().upper()
+            if symbol and symbol != 'SYMBOL':
+                records.append((int(row.get('r')), symbol, value(cells.get(header.get('Class'))), row))
+        if len({r[1] for r in records}) != len(records): raise ValueError('Ambiguous duplicate SYMBOLS identity')
+        # Class grouping exists only when classes occupy distinct contiguous runs.
+        runs = []
+        for record in records:
+            if not runs or runs[-1] != record[2]: runs.append(record[2])
+        if group_order is not None:
+            runs = list(group_order)
+        grouped = len(runs) > 1 and len(runs) == len(set(runs)) and all(runs)
+        rank = {name: i for i, name in enumerate(runs)}
+        if grouped:
+            for rec in records:
+                if rec[2] not in rank: rank[rec[2]] = len(rank)
+        ordered = sorted(records, key=lambda r: ((rank[r[2]], r[1]) if grouped else (r[1],)))
+        mapping = {rec[0]: slot[0] for rec, slot in zip(ordered, records)}
+        def coordinate(text):
+            m = re.fullmatch(r'(\$?[A-Z]{1,3})(\$?)(\d+)', text)
+            if not m: raise ValueError('Unsupported SYMBOLS reference: '+text)
+            return m[1]+m[2]+str(mapping.get(int(m[3]), int(m[3])))
+        def reference(text):
+            out = []
+            for item in text.split():
+                ends = item.split(':')
+                if len(ends) == 1: out.append(coordinate(item)); continue
+                if len(ends) != 2: raise ValueError('Unsupported SYMBOLS range')
+                a, b = (re.fullmatch(r'(\$?[A-Z]{1,3})(\$?)(\d+)', x) for x in ends)
+                if not a or not b: raise ValueError('Unsupported SYMBOLS range: '+item)
+                rows = sorted(mapping.get(i,i) for i in range(int(a[3]),int(b[3])+1))
+                if rows != list(range(rows[0], rows[-1]+1)):
+                    raise ValueError('Nonrectangular SYMBOLS row reference: '+item)
+                out.append(a[1]+a[2]+str(rows[0])+':'+b[1]+b[2]+str(rows[-1]))
+            return ' '.join(out)
+        def formula(text, local):
+            from openpyxl.formula.tokenizer import Tokenizer
+            tokens = Tokenizer('='+text).items
+            if any(t.type == 'FUNC' and t.value.upper() in ('INDIRECT(', 'OFFSET(') for t in tokens):
+                raise ValueError('Dynamic SYMBOLS formula requires explicit reference review')
+            for token in tokens:
+                if token.type != 'OPERAND' or token.subtype != 'RANGE': continue
+                prefix, sep, addr = token.value.rpartition('!')
+                if sep and prefix.strip("'").upper() == SYMBOLS_SHEET:
+                    token.value = prefix+'!'+reference(addr)
+                elif not sep and local:
+                    # Named ranges are resolved by workbook defined-name entries.
+                    if re.fullmatch(r'\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?',addr):
+                        token.value = reference(addr)
+            return ''.join(t.value for t in tokens)
+        # A style-less symbol cell is the exact generated append defect signature.
+        donors = [r for r in records if next(c for c in r[3] if c.get('r') == header['Symbol']+str(r[0])).get('s')]
+        repairs = {}
+        style_root = ET.fromstring(package.read('xl/styles.xml'))
+        styles = style_root.find(ns+'cellXfs')
+        style_count = len(styles)
+        style_ids = {ET.tostring(e):i for i,e in enumerate(styles)}
+        original_font_count=len(style_root.find(ns+'fonts'))
+        original_fill_count=len(style_root.find(ns+'fills'))
+        row_attribute_repairs={};added_cells=[]
+        explicit_repairs={str(s).strip().upper() for s in repair_symbols} if repair_symbols is not None else None
+        if repair_generated:
+            if records and not donors: raise ValueError('No established SYMBOLS presentation donor')
+            for old, symbol, cls, row in records:
+                symbol_cell = next(c for c in row if c.get('r') == header['Symbol']+str(old))
+                if symbol_cell.get('s'): continue
+                numeric_generated=[c for c in row if column_index_from_string(re.sub(r'\d','',c.get('r'))) in generated_cols
+                                   and c.find(ns+'v') is not None and c.get('t') not in ('s','str','inlineStr')]
+                if explicit_repairs is not None:
+                    if symbol not in explicit_repairs:continue
+                elif len(numeric_generated)<3 or any(styles[int(c.get('s','0'))].get('borderId','0')!='0' for c in numeric_generated):
+                    # A plain manually authored/zero-trade row is not evidence
+                    # of the generated append defect.
+                    continue
+                donor = next((r for r in donors if r[2] == cls), donors[0])
+                donor_cells = {re.sub(r'\d','',c.get('r')):c for c in donor[3]}
+                existing_cols={re.sub(r'\d','',c.get('r')) for c in row}
+                for col in sorted(generated_cols):
+                    letter=get_column_letter(col)
+                    if letter not in existing_cols and letter in donor_cells:
+                        cell=ET.SubElement(row,ns+'c',r=letter+str(old))
+                        added_cells.append(cell.get('r'))
+                for cell in row:
+                    col = re.sub(r'\d','',cell.get('r'))
+                    index=column_index_from_string(col)
+                    if col not in donor_cells or index not in generated_cols: continue
+                    current = styles[int(cell.get('s','0'))]
+                    # Only the generated border-less append presentation is
+                    # repairable; authored borders remain with the record.
+                    if current.get('borderId','0') != '0': continue
+                    desired = deepcopy(styles[int(donor_cells[col].get('s','0'))])
+                    desired.set('numFmtId',current.get('numFmtId','0'))
+                    # Generated sign/semantic colours already describe THIS row.
+                    # Keep these while supplying missing row structure.
+                    for attr in ('fontId','fillId'):
+                        if current.get(attr,'0') != '0': desired.set(attr,current.get(attr))
+                    if index in signed_cols:
+                        from openpyxl.cell.cell import Cell
+                        probe=Cell(instrument_ws,row=old,column=index,value=instrument_ws.cell(old,index).value)
+                        probe._style=copy(inventory._cell_styles[int(donor_cells[col].get('s','0'))])
+                        _apply_sign_based_full_cell_fill(probe)
+                        desired.set('fontId',str(probe._style.fontId));desired.set('fillId',str(probe._style.fillId))
+                    key = ET.tostring(desired)
+                    if key not in style_ids:
+                        style_ids[key] = len(styles); styles.append(desired)
+                    style = str(style_ids[key]); cell.set('s',style); repairs[cell.get('r')] = style
+                row[:]=sorted(row,key=lambda c:column_index_from_string(re.sub(r'\d','',c.get('r'))))
+                for attr in ('ht','customHeight','thickTop','thickBot'):
+                    if attr in donor[3].attrib and row.get(attr)!=donor[3].get(attr):
+                        row_attribute_repairs.setdefault(old,{})[attr]=(row.get(attr),donor[3].get(attr))
+                        row.set(attr,donor[3].get(attr))
+        replacements = {}
+        new_tables={b'fonts':(original_font_count,[font.to_tree() for font in inventory._fonts[original_font_count:]]),
+                    b'fills':(original_fill_count,[fill.to_tree() for fill in inventory._fills[original_fill_count:]]),
+                    b'cellXfs':(style_count,list(styles)[style_count:])}
+        if any(items for count,items in new_tables.values()):
+            # Append only; all original style definitions stay byte-identical.
+            raw = package.read('xl/styles.xml')
+            for table,(old_count,items) in new_tables.items():
+                if not items:continue
+                additions=b''.join(_journal_style_xml(e) for e in items)
+                def add_styles(m):
+                    opening = re.sub(rb'count="\d+"',b'count="'+str(old_count+len(items)).encode()+b'"',m[1])
+                    return opening+m[2]+additions+m[3]
+                raw,count = re.subn(rb'(<'+table+rb'\b[^>]*>)(.*?)(</'+table+rb'>)',add_styles,raw,flags=re.S)
+                if count != 1: raise ValueError('Unsupported style table serialization')
+            replacements['xl/styles.xml'] = raw
+        for old, symbol, cls, row in records:
+            row.set('r', str(mapping[old]))
+            for cell in row: cell.set('r', coordinate(cell.get('r')))
+        data[:] = sorted(data, key=lambda e:int(e.get('r')))
+        for element in root.iter():
+            tag = element.tag.rsplit('}',1)[-1]
+            if tag in ('f','formula','formula1','formula2') and element.text:
+                if tag == 'f' and element.get('t') not in (None,'normal'):
+                    raise ValueError('Shared/array SYMBOLS formula requires explicit review')
+                element.text = formula(element.text, True)
+            if tag == 'hyperlink' and element.get('location'):
+                element.set('location',formula(element.get('location'), True))
+            if element is data or tag in ('row','c','dimension','autoFilter','pane','selection'): continue
+            for attr in ('ref','sqref'):
+                if element.get(attr): element.set(attr,reference(element.get(attr)))
+        filt = root.find(ns+'autoFilter')
+        if filt is not None and records:
+            left,right = filt.get('ref').split(':')
+            filt.set('ref',left+':'+re.sub(r'\d+$',str(max(mapping.values())),right))
+        replacements[part] = ET.tostring(root)
+        # Update incoming formula references, comment anchors and VML note rows.
+        relpart = _worksheet_relationship_part_name(part)
+        related = set()
+        if relpart in package.namelist():
+            for rel in ET.fromstring(package.read(relpart)):
+                if rel.get('TargetMode') != 'External':
+                    target = rel.get('Target')
+                    related.add(target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join(posixpath.dirname(part),target)))
+        for name in package.namelist():
+            if name == part or not name.endswith(('.xml','.vml')): continue
+            raw = package.read(name)
+            if name not in related and b'SYMBOLS' not in raw.upper(): continue
+            doc = ET.fromstring(raw); changed = False
+            for e in doc.iter():
+                tag = e.tag.rsplit('}',1)[-1]
+                if tag in ('f','definedName') and e.text and 'SYMBOLS' in e.text.upper():
+                    if tag == 'definedName' and e.get('name') == '_xlnm._FilterDatabase' and filt is not None:
+                        # Excel's hidden filter name follows the full filter
+                        # footprint, including newly appended identities. It is
+                        # not a user formula referencing a subset of records.
+                        prefix,sep,addr = e.text.rpartition('!')
+                        if not sep or prefix.strip("'").upper() != SYMBOLS_SHEET:
+                            raise ValueError('Ambiguous SYMBOLS filter defined name')
+                        left,right = addr.split(':')
+                        new = prefix+'!'+left+':'+re.sub(r'\d+$',str(max(mapping.values())),right)
+                    else:
+                        new = formula(e.text,False)
+                    if new != e.text: e.text = new; changed = True
+                if name in related and tag == 'comment' and e.get('ref'):
+                    new = reference(e.get('ref')); changed |= new != e.get('ref'); e.set('ref',new)
+                if name in related and tag == 'Row' and e.text:
+                    old = int(e.text)+1; new = mapping.get(old,old)-1
+                    changed |= new != int(e.text); e.text = str(new)
+                if name in related and tag == 'Anchor' and e.text:
+                    values = [x.strip() for x in e.text.split(',')]
+                    if len(values) != 8: raise ValueError('Unsupported note anchor')
+                    start = int(values[2])+1; delta = mapping.get(start,start)-start
+                    values[2] = str(int(values[2])+delta); values[6] = str(int(values[6])+delta)
+                    if delta: e.text = ', '.join(values); changed = True
+            if changed: replacements[name] = ET.tostring(doc)
+        _validate_symbols_row_permutation(original_root,root,mapping,repairs,row_attribute_repairs,added_cells,formula,reference)
+        with zipfile.ZipFile(candidate_path,'x') as candidate:
+            candidate.comment = package.comment
+            for info in package.infolist(): candidate.writestr(copy(info),replacements.get(info.filename,package.read(info.filename)))
+        # Validate every package payload against the explicitly constructed plan.
+        with zipfile.ZipFile(candidate_path) as candidate:
+            if candidate.namelist() != package.namelist(): raise ValueError('SYMBOLS package inventory changed')
+            for name in package.namelist():
+                if candidate.read(name) != replacements.get(name,package.read(name)):
+                    raise ValueError('Undeclared SYMBOLS package mutation: '+name)
+    return {'row_map':mapping,'grouped':grouped,'style_repairs':repairs,'row_attribute_repairs':row_attribute_repairs,
+            'added_style_cells':added_cells,'changed_parts':list(replacements),
+            'source_sha256':hashlib.sha256(original).hexdigest(),'candidate_sha256':hashlib.sha256(candidate_path.read_bytes()).hexdigest()}
+
+
+def _validate_symbols_row_permutation(before,after,mapping,styles,row_attributes,added_cells,formula,reference):
+    """Independent cell/record check of exactly the declared permutation.
+
+    Values, comments/links' relationship IDs, formula caches and every unrelated
+    cell attribute are compared. No whole-sheet preservation exemption exists.
+    """
+    ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    if set(mapping)!=set(mapping.values()):raise ValueError('SYMBOLS mapping is not a bijection')
+    old_data=before.find(ns+'sheetData');new_data=after.find(ns+'sheetData')
+    old_rows={int(e.get('r')):e for e in old_data};new_rows={int(e.get('r')):e for e in new_data}
+    if len(old_rows)!=len(old_data) or len(new_rows)!=len(new_data) or set(old_rows)!=set(new_rows):
+        raise ValueError('SYMBOLS row set/identity changed')
+    for old_row,old_element in old_rows.items():
+        target=mapping.get(old_row,old_row);expected=deepcopy(old_element)
+        expected.set('r',str(target))
+        for attr,(old,new) in row_attributes.get(old_row,{}).items():
+            if expected.get(attr)!=old or attr not in {'ht','customHeight','thickTop','thickBot'}:
+                raise ValueError('Unapproved SYMBOLS row attribute')
+            expected.set(attr,new)
+        for cell in expected:
+            old_coord=cell.get('r');letter=re.sub(r'\d','',old_coord)
+            cell.set('r',letter+str(target))
+            if old_coord in styles:cell.set('s',styles[old_coord])
+            f=cell.find(ns+'f')
+            if f is not None:
+                if f.text:f.text=formula(f.text,True)
+                if f.get('ref'):f.set('ref',reference(f.get('ref')))
+        for coord in added_cells:
+            if int(re.search(r'\d+',coord)[0])==old_row:
+                ET.SubElement(expected,ns+'c',r=re.sub(r'\d','',coord)+str(target),s=styles[coord])
+        expected[:]=sorted(expected,key=lambda c:column_index_from_string(re.sub(r'\d','',c.get('r'))))
+        actual=new_rows[target]
+        if ET.tostring(expected)!=ET.tostring(actual):
+            raise ValueError('SYMBOLS record/presentation/cache differs outside declared mapping: '+str(old_row))
+    # Outside sheetData, only mapped references and the filter endpoint may vary.
+    old_structure=deepcopy(before);old_structure.remove(old_structure.find(ns+'sheetData'))
+    new_structure=deepcopy(after);new_structure.remove(new_structure.find(ns+'sheetData'))
+    left,right=list(old_structure.iter()),list(new_structure.iter())
+    if len(left)!=len(right):raise ValueError('SYMBOLS worksheet structure changed')
+    for old,new in zip(left,right):
+        if old.tag!=new.tag:raise ValueError('SYMBOLS worksheet node order changed')
+        tag=old.tag.rsplit('}',1)[-1]
+        for key in set(old.attrib)|set(new.attrib):
+            a,b=old.get(key),new.get(key)
+            if a==b:continue
+            if tag=='autoFilter' and key=='ref':
+                expected=a.rsplit(':',1)[0]+':'+re.sub(r'\d+$',str(max(mapping.values())),a.rsplit(':',1)[1])
+            elif key in {'ref','sqref'}:expected=reference(a)
+            elif tag=='hyperlink' and key=='location':expected=formula(a,True)
+            else:raise ValueError('Unapproved SYMBOLS structural attribute: '+key)
+            if expected!=b:raise ValueError('Unapproved SYMBOLS reference translation')
+            new.set(key,a)
+        if old.text!=new.text:
+            if tag not in {'formula','formula1','formula2'} or formula(old.text,True)!=new.text:
+                raise ValueError('SYMBOLS unrelated text changed')
+            new.text=old.text
+    if ET.tostring(old_structure)!=ET.tostring(new_structure):raise ValueError('SYMBOLS non-record structures changed')
+
+
+def _symbols_update_source_contract(original, candidate=None):
+    """Keep source grouping and transplant only proven unchanged formula caches.
+
+    Before ordering, existing identities still have their original coordinates.
+    Cache reuse requires the same formula and unchanged deterministic dependencies.
+    """
+    source_wb = load_workbook(BytesIO(original),data_only=False,keep_links=False)
+    other_wb = None
+    try:
+        source_ws = _symbols_sheet(source_wb)
+        headers = _instrument_averages_header_map(source_ws)
+        sc, cc = headers.get('Symbol',1), headers.get('Class')
+        runs = []
+        for row in range(_instrument_averages_data_start_row(source_ws),source_ws.max_row+1):
+            if not source_ws.cell(row,sc).value: continue
+            cls = str(source_ws.cell(row,cc).value or '') if cc else ''
+            if not runs or runs[-1] != cls: runs.append(cls)
+        order = runs if len(runs)>1 and len(runs)==len(set(runs)) and all(runs) else []
+        if candidate is None: return order
+        with zipfile.ZipFile(BytesIO(original)) as package:
+            part = _worksheet_ooxml_part_name(package,SYMBOLS_SHEET)
+            source_root = ET.fromstring(package.read(part))
+        ns = '{'+_SPREADSHEETML_NAMESPACE+'}'
+        formulas = [c for c in source_root.iter(ns+'c') if c.find(ns+'f') is not None]
+        if not formulas: return order
+        other_wb = load_workbook(candidate,data_only=False,keep_links=False)
+        target_ws = _symbols_sheet(other_wb)
+        plan = []
+        for cell in formulas:
+            coord = cell.get('r'); f = cell.find(ns+'f')
+            old, new = source_ws[coord],target_ws[coord]
+            if old.value != new.value or f.get('t') not in (None,'normal'):
+                raise ValueError('SYMBOLS authored formula changed: '+coord)
+            before = _trade_log_formula_dependency_signature(source_ws,coord,old.value)
+            after = _trade_log_formula_dependency_signature(target_ws,coord,new.value)
+            if not before.get('safe') or not after.get('safe') or before['signature'] != after['signature']:
+                raise ValueError('SYMBOLS formula cache dependencies changed: '+coord)
+            cache = cell.find(ns+'v')
+            plan.append(dict(target_coordinate=coord,formula_ooxml_signature=_formula_ooxml_signature(f),
+                cache_present=cache is not None,cached_value=cache.text if cache is not None else None,
+                cached_type=cell.get('t')))
+        with zipfile.ZipFile(candidate) as package:
+            target_part = _worksheet_ooxml_part_name(package,SYMBOLS_SHEET)
+            payload = _patch_formula_caches_in_worksheet_payload(package.read(target_part),plan)
+            temporary = Path(candidate).with_name('.symbols-cache-'+uuid4().hex+'.xlsx')
+            with zipfile.ZipFile(temporary,'x') as out:
+                out.comment = package.comment
+                for info in package.infolist():
+                    out.writestr(copy(info),payload if info.filename==target_part else package.read(info.filename))
+        _verify_trade_log_formula_cache_transplant(temporary,SYMBOLS_SHEET,plan)
+        os.replace(temporary,candidate)
+        return order
+    finally:
+        if other_wb is not None: other_wb.close()
+        source_wb.close()
+
+
+def prepare_monthly_aud_background_package(source_path, candidate_path):
+    """Prepare a fill-only monthly repair; keep every other package byte.
+
+    Caller owns the journal transaction. Styles are reused or appended with
+    exactly fillId changed; values, formulas, cached results and fonts stay put.
+    """
+    source_path,candidate_path = Path(source_path),Path(candidate_path)
+    if candidate_path.exists() or source_path.resolve()==candidate_path.resolve():
+        raise ValueError('A fresh private monthly background candidate is required')
+    original=source_path.read_bytes();ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    wb=load_workbook(BytesIO(original),data_only=False,keep_links=False)
+    try:
+        ws=_get_trade_log_sheet(wb,allow_legacy=False);headers=_trade_log_header_map(ws)
+        targets={row for row in range(_trade_log_data_start_row(ws),ws.max_row+1)
+                 if _trade_log_monthly_aud_row(ws,row,headers)}
+        last_col=max(headers.values())
+    finally:wb.close()
+    with zipfile.ZipFile(BytesIO(original)) as source:
+        part=_worksheet_ooxml_part_name(source,TRADE_LOG_SHEET)
+        root=ET.fromstring(source.read(part));styles_root=ET.fromstring(source.read('xl/styles.xml'))
+        xfs=styles_root.find(ns+'cellXfs');fills=styles_root.find(ns+'fills')
+        original_count=len(xfs);updates={};style_map={}
+        for row in root.find(ns+'sheetData'):
+            if int(row.get('r')) not in targets:continue
+            for cell in row:
+                if column_index_from_string(re.sub(r'\d','',cell.get('r'))) > last_col:continue
+                old=int(cell.get('s','0'));xf=xfs[old];fill=fills[int(xf.get('fillId','0'))]
+                pattern=fill.find(ns+'patternFill');color=pattern.find(ns+'fgColor') if pattern is not None else None
+                rgb=str(color.get('rgb','') if color is not None else '')[-6:].upper()
+                if pattern is None or pattern.get('patternType')!='solid' or rgb not in {PROFIT_FILL,LOSS_FILL,TEST_TRADE_FILL}:continue
+                if old not in style_map:
+                    desired=deepcopy(xf);desired.set('fillId','0')
+                    key=ET.tostring(desired)
+                    found=next((i for i,e in enumerate(xfs) if ET.tostring(e)==key),None)
+                    if found is None:found=len(xfs);xfs.append(desired)
+                    style_map[old]=found
+                updates[cell.get('r')]=style_map[old]
+        payload=_trade_number_cell_styles_xml(source.read(part),updates)
+        cf_changes=[]
+        def cf_patch(match):
+            block=match[0];element=ET.fromstring(b'<root xmlns="'+_SPREADSHEETML_NAMESPACE.encode()+b'">'+block+b'</root>')[0]
+            rules=list(element.findall(ns+'cfRule'));ref=element.get('sqref','')
+            if not rules or not all(_is_generated_trade_log_value_fill_rule(type('Rule',(),{
+                'type':r.get('type'),'operator':r.get('operator'),'formula':[f.text or '' for f in r.findall(ns+'formula')]})()) for r in rules):return block
+            if not all(_range_is_trade_log_generated_value_fill_range(r) for r in ref.split()):return block
+            ranges=ref.split()
+            for row in sorted(targets):
+                cut=f'A{row}:{get_column_letter(last_col)}{row}'
+                ranges=[piece for area in ranges for piece in _subtract_range_rectangle(area,cut)]
+            desired=' '.join(ranges)
+            if desired==ref:return block
+            cf_changes.append(dict(old=ref,new=desired))
+            return re.sub(rb'\bsqref="[^"]*"',b'sqref="'+desired.encode()+b'"',block,count=1) if desired else b''
+        payload=re.sub(rb'<conditionalFormatting\b[^>]*>.*?</conditionalFormatting>',cf_patch,payload,flags=re.S)
+        style_payload=source.read('xl/styles.xml')
+        if len(xfs)>original_count:
+            additions=b''.join(_journal_style_xml(e) for e in list(xfs)[original_count:])
+            def append(m):return re.sub(rb'count="\d+"',b'count="'+str(len(xfs)).encode()+b'"',m[1])+m[2]+additions+m[3]
+            style_payload,count=re.subn(rb'(<cellXfs\b[^>]*>)(.*?)(</cellXfs>)',append,style_payload,flags=re.S)
+            if count!=1:raise ValueError('Unsupported monthly style serialization')
+        replacements={part:payload,'xl/styles.xml':style_payload}
+        with zipfile.ZipFile(candidate_path,'x') as out:
+            out.comment=source.comment
+            for info in source.infolist():out.writestr(copy(info),replacements.get(info.filename,source.read(info.filename)))
+        # Independent inverse: undo only declared cell styles, then compare
+        # values/formulas/caches and all non-CF worksheet structures exactly.
+        before=ET.fromstring(source.read(part));after=ET.fromstring(payload)
+        old_cells={c.get('r'):c for c in before.iter(ns+'c')}
+        for cell in after.iter(ns+'c'):
+            if cell.get('r') in updates:
+                old=old_cells[cell.get('r')]
+                if 's' in old.attrib:cell.set('s',old.get('s'))
+                else:cell.attrib.pop('s',None)
+        expected_cf=[]
+        changes={entry['old']:entry['new'] for entry in cf_changes}
+        for element in before.findall(ns+'conditionalFormatting'):
+            expected=deepcopy(element)
+            if expected.get('sqref') in changes:
+                desired=changes[expected.get('sqref')]
+                if not desired:continue
+                expected.set('sqref',desired)
+            expected_cf.append(_journal_xml_signature(expected))
+        if expected_cf!=[_journal_xml_signature(e) for e in after.findall(ns+'conditionalFormatting')]:
+            raise ValueError('Monthly conditional formatting differs beyond declared range exclusions')
+        for tree in (before,after):
+            for e in list(tree.findall(ns+'conditionalFormatting')):tree.remove(e)
+        if _journal_xml_signature(before)!=_journal_xml_signature(after):raise ValueError('Monthly repair changed non-fill worksheet data')
+        original_styles=ET.fromstring(source.read('xl/styles.xml')).find(ns+'cellXfs')
+        for old,new in style_map.items():
+            expected=deepcopy(original_styles[old]);expected.set('fillId','0')
+            if ET.tostring(xfs[new])!=ET.tostring(expected):raise ValueError('Monthly style changed beyond fillId')
+        with zipfile.ZipFile(candidate_path) as candidate:
+            for name in source.namelist():
+                if candidate.read(name)!=replacements.get(name,source.read(name)):raise ValueError('Undeclared monthly package mutation')
+    return dict(monthly_rows=sorted(targets),style_changes=updates,conditional_format_changes=cf_changes,
+                styles_appended=len(xfs)-original_count,source_sha256=hashlib.sha256(original).hexdigest(),
+                candidate_sha256=hashlib.sha256(candidate_path.read_bytes()).hexdigest())
+
+
+def _journal_style_xml(element):
+    """Serialize one style element in the existing default SpreadsheetML namespace."""
+    return ET.tostring(element).replace(b'ns0:',b'').replace(
+        b' xmlns:ns0="'+_SPREADSHEETML_NAMESPACE.encode()+b'"',b'')
+
+
+def _journal_xml_signature(element):
+    # XML attribute order is presentation-neutral; content, order and namespaces
+    # remain strict. In particular values/formulas/caches are never normalized.
+    return (element.tag,tuple(sorted(element.attrib.items())),element.text,element.tail,
+            tuple(_journal_xml_signature(child) for child in element))
+
+
+def _order_symbols_candidate(path, *, group_order=None):
+    path = Path(path)
+    candidate = path.with_name('.symbols-order-'+uuid4().hex+'.xlsx')
+    result = prepare_symbols_order_package(path,candidate,repair_generated=True,group_order=group_order)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != result['source_sha256']:
+        raise RuntimeError('SYMBOLS source changed during candidate preparation')
+    os.replace(candidate,path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != result['candidate_sha256']:
+        raise RuntimeError('SYMBOLS candidate installation hash differs')
+    return result
+
+
 _counter_build = build_master_journal_workbook
 def build_master_journal_workbook(snapshot,output_path,**kwargs):
     overrides=kwargs.get('manual_overrides')
@@ -21953,11 +22502,14 @@ def build_master_journal_workbook(snapshot,output_path,**kwargs):
     if overrides is None and reference.exists():overrides=read_master_journal_manual_overrides(reference)
     rows,_=_normalize_master_journal_rows(snapshot.get('items') or [],overrides)
     result=_counter_build(snapshot,output_path,**kwargs)
-    if result.get('ok'):result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(output_path,rows)
+    if result.get('ok'):
+        result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(output_path,rows)
+        result['diagnostics']['symbols_order'] = _order_symbols_candidate(output_path)
     return result
 
 _counter_update = update_master_journal_workbook_data_only
 def update_master_journal_workbook_data_only(path,snapshot,*args,**kwargs):
+    original_symbols = Path(path).read_bytes()
     result=_counter_update(path,snapshot,*args,**kwargs)
     if result and result.get('ok'):
         cache_plan = result.pop('_stats1_formula_cache_plan', [])
@@ -21966,6 +22518,8 @@ def update_master_journal_workbook_data_only(path,snapshot,*args,**kwargs):
         if cache_plan:
             _verify_trade_log_formula_cache_transplant(candidate, STATS1_SHEET, cache_plan)
         result['diagnostics']['stats1_formula_caches_post_counter_verified'] = len(cache_plan)
+        group_order = _symbols_update_source_contract(original_symbols,candidate)
+        result['diagnostics']['symbols_order'] = _order_symbols_candidate(candidate,group_order=group_order)
     return result
 
 _counter_incremental = update_master_journal_workbook_incremental

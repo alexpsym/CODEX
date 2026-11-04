@@ -31,6 +31,240 @@ from tools.master_journal_workbook import IncrementalWorkbookUpdateNotEligible, 
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 
+def _symbol_order_fixture(path, names, classes=None):
+    wb = Workbook(); ws = wb.active; ws.title = 'SYMBOLS'
+    ws.append(['Symbol','Class','Manual','Formula'])
+    for i,name in enumerate(names,2):
+        ws.append([name,(classes or {}).get(name,'CRYPTO'),'custom:'+name,f'=C{i}'])
+        for cell in ws[i]:
+            cell.font = Font(name='Arial',size=12)
+            cell.border = Border(bottom=Side(style='thin'))
+            cell.alignment = Alignment(horizontal='center')
+            cell.protection = copy(ws['A1'].protection)
+        ws.cell(i,1).fill = PatternFill('solid',fgColor='CCCCCC')
+        ws.row_dimensions[i].height = 21
+    ws.freeze_panes = 'C2'; ws.auto_filter.ref = f'A1:D{len(names)+1}'
+    wb.create_sheet('Other')['A1'] = "='SYMBOLS'!C2"
+    wb.save(path); wb.close()
+
+
+def test_symbols_order_insert_group_and_complete_style(tmp_path):
+    source=tmp_path/'source.xlsx'; candidate=tmp_path/'candidate.xlsx'
+    names=['ZUSDT','AUSDT','MUSDT','USDJPY','AUDUSD']
+    _symbol_order_fixture(source,names,{'USDJPY':'FX','AUDUSD':'FX'})
+    result=mjw.prepare_symbols_order_package(source,candidate)
+    wb=load_workbook(candidate);ws=wb['SYMBOLS']
+    assert [ws.cell(r,1).value for r in range(2,7)] == ['AUSDT','MUSDT','ZUSDT','AUDUSD','USDJPY']
+    assert result['grouped']
+    for row in range(2,7):
+        assert ws.cell(row,3).value == 'custom:'+ws.cell(row,1).value
+        assert ws.cell(row,4).value == f'=C{row}'
+        assert ws.row_dimensions[row].height == 21
+        assert all(c.font.name=='Arial' and c.border.bottom.style=='thin' and c.alignment.horizontal=='center' for c in ws[row])
+    assert wb['Other']['A1'].value == "='SYMBOLS'!C4"
+    wb.close()
+    # Exercise the canonical import copier with unsorted unseen records and a
+    # partial snapshot. Manual/zero-trade identities must not be cleared.
+    wb=load_workbook(candidate);ws=wb['SYMBOLS']
+    incoming=Workbook();src=incoming.active;src.append(['Symbol','Class','Trades'])
+    for symbol in ['ZZUSDT','0USDT','HUSDT']:
+        src.append([symbol,'CRYPTO',0])
+        for c in src[src.max_row]:
+            c.font=Font(name='Arial',size=12);c.border=Border(bottom=Side(style='thin'))
+            c.alignment=Alignment(horizontal='center')
+    mjw._copy_instrument_rows_header_aware(src,ws,preserve_existing_layout=True,diagnostics={})
+    assert {ws.cell(r,1).value for r in range(2,ws.max_row+1)}==set(names+['ZZUSDT','0USDT','HUSDT'])
+    for row in range(7,10):
+        assert all(c.font.name=='Arial' and c.border.bottom.style=='thin' for c in ws[row])
+    unordered=tmp_path/'unordered.xlsx';wb.save(unordered);wb.close();incoming.close()
+    ordered=tmp_path/'ordered.xlsx';mjw.prepare_symbols_order_package(unordered,ordered,group_order=['CRYPTO','FX'])
+    wb=load_workbook(ordered);ws=wb['SYMBOLS']
+    assert [ws.cell(r,1).value for r in range(2,10)]==['0USDT','AUSDT','HUSDT','MUSDT','ZUSDT','ZZUSDT','AUDUSD','USDJPY']
+    wb.close()
+
+
+def test_symbols_order_repair_package_annotations_and_rejection(tmp_path,monkeypatch):
+    source=tmp_path/'source.xlsx'; candidate=tmp_path/'candidate.xlsx'
+    names=['ZUSDT','LUMIAUSDT','QUSDT','TREEUSDT','WETUSDT','DOODUSDT','BTWUSDT']
+    _symbol_order_fixture(source,names)
+    wb=load_workbook(source);ws=wb['SYMBOLS']
+    ws['C3'].comment=Comment('keep','author'); ws['C3'].hyperlink='https://example.com/manual'
+    for col,header in enumerate(['Net R Multiple','Net P/L %','Avg P/L %','Trades'],5):ws.cell(1,col,header)
+    for row in range(2,9):
+        for col in range(5,9):
+            ws.cell(row,col,([1,0,-1,2,-2,0,3][row-2] if col<8 else 0))
+            ws.cell(row,col)._style=copy(ws['C2']._style)
+        for col in range(5,8):mjw._apply_sign_based_full_cell_fill(ws.cell(row,col))
+    for row in range(3,9):
+        for cell in ws[row]: cell._style=None
+        ws.row_dimensions[row].height=None
+    ws['C4'].font=Font(name='Courier New',bold=True)
+    ws['C4'].border=Border(bottom=Side(style='double'))
+    ws.auto_filter.ref='A1:H8';ws.auto_filter.add_filter_column(0,['LUMIAUSDT'])
+    wb['Other'].merge_cells('B2:C3')
+    from openpyxl.chart import BarChart,Reference
+    chart=BarChart();chart.add_data(Reference(ws,min_col=3,min_row=2,max_row=8));wb['Other'].add_chart(chart,'F2')
+    wb.save(source);wb.close()
+    # Supply an actual cached string result without a workbook recalculation.
+    with zipfile.ZipFile(source) as package:
+        payloads={i.filename:package.read(i.filename) for i in package.infolist()}
+        infos=[copy(i) for i in package.infolist()]
+    ns='{'+mjw._SPREADSHEETML_NAMESPACE+'}'
+    doc=ET.fromstring(payloads['xl/worksheets/sheet1.xml'])
+    for c in doc.iter(ns+'c'):
+        if c.find(ns+'f') is not None:
+            c.set('t','str');c.find(ns+'v').text='custom:'+names[int(re.search(r'\d+',c.get('r'))[0])-2]
+    payloads['xl/worksheets/sheet1.xml']=ET.tostring(doc)
+    with zipfile.ZipFile(source,'w') as package:
+        for info in infos:package.writestr(info,payloads[info.filename])
+    original=source.read_bytes()
+    result=mjw.prepare_symbols_order_package(source,candidate,repair_generated=True,repair_symbols=names[1:])
+    assert source.read_bytes()==original and result['style_repairs']
+    wb=load_workbook(candidate);ws=wb['SYMBOLS']; symbols=[ws.cell(r,1).value for r in range(2,9)]
+    assert symbols==sorted(names)
+    row=symbols.index('LUMIAUSDT')+2
+    assert ws.cell(row,3).comment.text=='keep'
+    assert ws.cell(row,3).hyperlink.target=='https://example.com/manual'
+    assert ws.freeze_panes=='C2' and ws.auto_filter.ref=='A1:H8'
+    assert ws.auto_filter.filterColumn[0].filters.filter==['LUMIAUSDT']
+    assert str(next(iter(wb['Other'].merged_cells.ranges)))=='B2:C3'
+    for r in range(2,9):
+        assert ws.cell(r,1).font.name=='Arial' and ws.cell(r,1).fill.fgColor.rgb=='00CCCCCC'
+        assert ws.cell(r,4).value==f'=C{r}'
+        for col in range(5,8):
+            value=ws.cell(r,col).value
+            expected=PROFIT_FILL if value>0 else LOSS_FILL if value<0 else None
+            assert (mjw._cell_fill_rgb(ws.cell(r,col)) if ws.cell(r,col).fill.fill_type else None)==expected
+    authored=symbols.index('QUSDT')+2
+    assert ws.cell(authored,3).font.name=='Courier New' and ws.cell(authored,3).border.bottom.style=='double'
+    wb.close()
+    values=load_workbook(candidate,data_only=True)
+    for r in range(2,9):assert values['SYMBOLS'].cell(r,4).value=='custom:'+values['SYMBOLS'].cell(r,1).value
+    values.close()
+    with zipfile.ZipFile(source) as a,zipfile.ZipFile(candidate) as b:
+        for name in a.namelist():
+            if name not in result['changed_parts']:assert a.read(name)==b.read(name)
+    duplicate=tmp_path/'duplicate.xlsx';_symbol_order_fixture(duplicate,['A','A'])
+    rejected=tmp_path/'rejected.xlsx'
+    with pytest.raises(ValueError,match='duplicate'):mjw.prepare_symbols_order_package(duplicate,rejected)
+    assert not rejected.exists()
+    concurrent=tmp_path/'concurrent.xlsx';concurrent.write_bytes(original)
+    prepare=mjw.prepare_symbols_order_package
+    def changed(*args,**kwargs):
+        result=prepare(*args,**kwargs);concurrent.write_bytes(original+b'concurrent');return result
+    monkeypatch.setattr(mjw,'prepare_symbols_order_package',changed)
+    with pytest.raises(RuntimeError,match='source changed'):mjw._order_symbols_candidate(concurrent)
+    assert concurrent.read_bytes()==original+b'concurrent'
+
+
+def test_monthly_aud_background_generation_incremental_and_preservation(tmp_path,monkeypatch):
+    snapshot=sample_snapshot()
+    monthly=[]
+    for month,pnl in [('2026-08',2.5),('2026-09',-3.5),('2026-10',0.0)]:
+        monthly.append(dict(id='monthly_aud_reval:bybit_live:'+month,row_type='monthly_aud_reval',
+            symbol='MONTHLY AUD P/L',account='BYBIT',account_label='BYBIT',currency='AUD',
+            net_pnl=pnl,profit=pnl,open_time=month+'-28T00:00:00Z',close_time=month+'-28T00:00:00Z',
+            source='bybit_monthly_aud_reval',is_test_trade=False))
+    snapshot['items'].extend(monthly)
+    path=tmp_path/'generated.xlsx'
+    mjw.build_master_journal_workbook(snapshot,path,publish_recommendation_assets=False)
+    def check(path):
+        wb=load_workbook(path);ws=wb['Trade Log'];headers=mjw._trade_log_header_map(ws)
+        found=[]
+        for row in range(mjw._trade_log_data_start_row(ws),ws.max_row+1):
+            if mjw._trade_log_monthly_aud_row(ws,row,headers):
+                found.append(row)
+                assert all(not ws.cell(row,c).fill.fill_type or mjw._cell_fill_rgb(ws.cell(row,c))=='FFFFFF'
+                           for c in range(1,max(headers.values())+1))
+        assert len(found)==3
+        # The generated conditional rules explicitly require trade row type.
+        generated=[r for key,rules in ws.conditional_formatting._cf_rules.items() for r in rules
+                   if mjw._is_generated_trade_log_win_loss_row_rule(r,str(key.sqref))]
+        assert len(generated)==2 and all('="trade"' in r.formula[0] for r in generated)
+        wb.close()
+    check(path)
+    # Incremental writing must clear a stale copied trade fill on the updated monthly identity.
+    wb=load_workbook(path);ws=wb['Trade Log'];headers=mjw._trade_log_header_map(ws)
+    for row in range(mjw._trade_log_data_start_row(ws),ws.max_row+1):
+        if mjw._trade_log_monthly_aud_row(ws,row,headers):
+            for c in range(1,max(headers.values())+1):ws.cell(row,c).fill=PatternFill('solid',fgColor=LOSS_FILL)
+    wb.save(path);wb.close()
+    monkeypatch.setattr(mjw,'assign_trade_numbers_and_create_folders',lambda *a,**k:{'ok':True})
+    monkeypatch.setattr(mjw,'resolve_trade_folder_link',lambda *a,**k:(None,'offline fixture'))
+    mjw.update_master_journal_workbook_incremental(path,monthly)
+    check(path)
+    result=mjw.update_master_journal_workbook_data_only(path,snapshot,preserve_existing_layout=True,publish_recommendation_assets=False)
+    assert result['ok'];check(Path(result['candidate_path']))
+    # Shared generator protects ordinary wins/losses and Test blue, and avoids loose label matches.
+    wb=load_workbook(path);ws=wb['Trade Log'];headers=mjw._trade_log_header_map(ws)
+    base=ws.max_row+1
+    for offset,(pnl,test) in enumerate([(1,'No'),(-1,'No'),(1,'Yes')]):
+        row=base+offset
+        for header,value in [('Row Type','trade'),('Row ID','ordinary:'+str(offset)),('Symbol','MONTHLY AUD P/L'),
+                             ('Account','BYBIT'),('Net P/L',pnl),('Test',test)]:ws.cell(row,headers[header],value)
+    mjw._apply_trade_log_win_loss_direct_row_fills_for_rows(ws,range(base,base+3))
+    assert [mjw._cell_fill_rgb(ws.cell(base+i,1)) for i in range(3)]==[PROFIT_FILL,LOSS_FILL,mjw.TEST_TRADE_FILL]
+    wb.close()
+
+
+def test_monthly_aud_combined_package_preserves_values_and_styles(tmp_path):
+    source=tmp_path/'source.xlsx';_symbol_order_fixture(source,['ZUSDT','BTWUSDT','DOODUSDT'])
+    wb=load_workbook(source);ws=wb.create_sheet('Trade Log')
+    for values in mjw._trade_log_three_row_header_values():ws.append(values)
+    headers=mjw._trade_log_header_map(ws)
+    for offset,pnl in enumerate([1,-1,0]):
+        row=mjw._trade_log_data_start_row(ws)+offset;month='2026-'+str(8+offset).zfill(2)
+        for h,v in [('Row ID','monthly_aud_reval:bybit_live:'+month),('Row Type','monthly_aud_reval'),
+                    ('Symbol','MONTHLY AUD P/L'),('Account','BYBIT'),('Net P/L',pnl),('Test','No')]:ws.cell(row,headers[h],v)
+        for c in range(1,max(headers.values())+1):
+            cell=ws.cell(row,c);cell.fill=PatternFill('solid',fgColor=PROFIT_FILL if pnl>=0 else LOSS_FILL)
+            cell.font=Font(name='Arial',italic=True);cell.border=Border(bottom=Side(style='double'))
+        ws.cell(row,headers['Net P/L']).number_format='0.0000'
+    mjw._apply_trade_log_win_loss_row_formatting(ws)
+    # A legacy generated value rule must be carved off monthly rows only.
+    mjw._profit_loss_rules(ws,f'O4:Q9')
+    ws['AZ4']='=1+2';ws['AZ4'].comment=Comment('retain','tester');ws.freeze_panes='G4'
+    wb.save(source);wb.close()
+    ordered=tmp_path/'ordered.xlsx';mjw.prepare_symbols_order_package(source,ordered)
+    candidate=tmp_path/'candidate.xlsx';report=mjw.prepare_monthly_aud_background_package(ordered,candidate)
+    assert len(report['monthly_rows'])==3 and report['style_changes'] and report['conditional_format_changes']
+    before=load_workbook(ordered);after=load_workbook(candidate)
+    for row in report['monthly_rows']:
+        for c in range(1,max(headers.values())+1):
+            a,b=before['Trade Log'].cell(row,c),after['Trade Log'].cell(row,c)
+            assert a.value==b.value and copy(a.font)==copy(b.font) and copy(a.border)==copy(b.border)
+            assert a.number_format==b.number_format and b.fill.fill_type is None
+    assert after['Trade Log']['AZ4'].value=='=1+2' and after['Trade Log']['AZ4'].comment.text=='retain'
+    assert after['Trade Log'].freeze_panes=='G4'
+    before.close();after.close()
+    repeated=tmp_path/'repeated.xlsx';again=mjw.prepare_monthly_aud_background_package(candidate,repeated)
+    assert not again['style_changes'] and not again['conditional_format_changes'] and again['styles_appended']==0
+    with zipfile.ZipFile(candidate) as a,zipfile.ZipFile(repeated) as b:
+        assert all(a.read(n)==b.read(n) for n in a.namelist())
+
+
+def test_symbols_order_second_update_and_final_wrapper(tmp_path,monkeypatch):
+    source=tmp_path/'source.xlsx';_symbol_order_fixture(source,['ZUSDT','AUSDT'])
+    first=tmp_path/'first.xlsx';mjw.prepare_symbols_order_package(source,first,repair_generated=True)
+    # Final exported wrapper must invoke the canonical package step on its candidate.
+    monkeypatch.setattr(mjw,'_counter_update',lambda *a,**k:{'ok':True,'candidate_path':str(first),'diagnostics':{}})
+    monkeypatch.setattr(mjw,'_refresh_counter_trend_package',lambda *a,**k:{})
+    result=mjw.update_master_journal_workbook_data_only(first,{})
+    assert result['diagnostics']['symbols_order']['row_map']=={2:2,3:3}
+    incoming=tmp_path/'incoming.xlsx';_symbol_order_fixture(incoming,['MUSDT'])
+    wb=load_workbook(first);src=load_workbook(incoming)
+    mjw._copy_instrument_rows_header_aware(src['SYMBOLS'],wb['SYMBOLS'],preserve_existing_layout=True,diagnostics={})
+    unordered=tmp_path/'unordered.xlsx';wb.save(unordered);wb.close();src.close()
+    monkeypatch.setattr(mjw,'_counter_update',lambda *a,**k:{'ok':True,'candidate_path':str(unordered),'diagnostics':{}})
+    mjw.update_master_journal_workbook_data_only(first,{})
+    second=unordered
+    third=tmp_path/'third.xlsx';mjw.prepare_symbols_order_package(second,third,repair_generated=True)
+    with zipfile.ZipFile(second) as a,zipfile.ZipFile(third) as b:
+        assert a.read('xl/styles.xml')==b.read('xl/styles.xml')
+        assert a.read('xl/worksheets/sheet1.xml')==b.read('xl/worksheets/sheet1.xml')
+    wb=load_workbook(third);assert [wb['SYMBOLS'].cell(r,1).value for r in range(2,5)]==['AUSDT','MUSDT','ZUSDT'];wb.close()
+
+
 def test_pepperstone_timestamp_package_repair_preserves_workbook_and_is_atomic(tmp_path, monkeypatch):
     wb = Workbook(); ws = wb.active; ws.title = "Trade Log"
     headers = {header:index for index,header in enumerate(TRADE_LOG_HEADERS,1)}

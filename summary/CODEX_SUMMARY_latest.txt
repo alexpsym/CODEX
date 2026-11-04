@@ -5960,3 +5960,159 @@ actual late counts/summary commit/push/equality and reconciliation in compact re
 Only this summary tracked delta; unrelated work preserved. Calculator/source/tests and
 cleanup policy untouched. Featuretests/builds/installs/realdata/apps/broker/workbook/cache/
 DB/resync/restarts/schedules/subagents0. No ACL/permission/security/helper changes.
+
+
+2026-11-04 SYMBOL ORDER / COMPLETE ROW FORMATTING - INCOMPLETE / NO DELIVERY
+New job baseline master43ace8869a4ea808fefbcb2471b569ab42728183, index empty.
+Pre-existing helper/summary/service/runtime/test changes and root brief deletions preserved.
+Read local AGENTS and relevant accepted Resync/Pepperstone checkpoints; custom instructions
+not read/modified. No subagents. CURRENT symbol ordering/style fix remains unfinished.
+NEXT separate job only after acceptance: MONTHLY AUD P/L plain white/no-fill including
+October2026; preserve ordinary trade win/loss colours and Test blue. Not executed.
+Read-only package inspection confirmed six named appended rows123-128, missing symbol
+style and structural cell formatting, autoFilter ends123. Earlier rows interleave FX and
+crypto and are also unsorted: no contiguous asset-class grouping proved. Source nested
+copy helper appends batches, copies only values/number formats and clears absent symbols.
+Final exported build/data-only wrappers traced; incremental import defers derived refresh.
+One real transaction attempt consumed: exact existing OS-lock helper failed opening
+.git/trading-journal-transaction.lock with PermissionError13. No original capture, live
+candidate, replacement, workbook mutation, Resync/import/broker/DB/cache operation or
+recalculation. No lock bypass/retry. A NEW explicit authorization is required for any
+further real-data attempt, in a session where the canonical lock is writable.
+Draft implemented complete-record package permutation/reference mapping and targeted
+style composition, plus partial-snapshot retention/new-row style copying. NOT released:
+normal updater formula/cache and custom-style preservation, exact independent validator
+coverage and concurrent-change rejection still need work. All task helper/test edits were
+restored to their exact baselines; pre-existing helper changes remain. Private drafts
+active/symbol-order-format/draft-helper.py and draft-tests.py retain proposed work.
+Focused pytest invocation1:3nodes/3executions, normal exit1/12.542499sec, all failed on
+source ZipInfo mutation during candidate writing before assertions. Corrected copy(info).
+Invocation2 only package repair nodeB:normal exit0/5.269025sec, completed JUnit body.
+TOTAL3distinct/2invocations/4executions: cap exhausted. A/C not passed; no further tests.
+B proves synthetic six-row ordering/styles/comments/links/formulas/chart-range references/
+merged headers/filter/panes and duplicate rejection; does NOT prove cached values or
+concurrent-change atomic rejection. Do not treat the original requested B coverage as done.
+Ceilings unchanged:90pernode/240invocation/300ordinary/120discovery/450verification/
+900active; schedules/build/install/MQL/subagents0. Measured test total17.811524sec;
+pre-registration active elapsed was not instrumented, no invented total. Private checkpoint
+records measured registration-to-checkpoint elapsed and actual counters. No commit, protected
+verify or push attempted: incomplete source is not eligible for delivery. Manual acceptance
+pending; canonical workbook remains unrepaired. Next: strengthen draft preservation and
+authorize narrowly capped affected tests, then one newly authorized lock/capture/candidate/
+validation/hash-guarded replacement when canonical transaction lock access is available.
+Artifacts only exact active/retained symbol-order-format roots. Retain specific unresolved
+drafts, task-only baseline and verification evidence until successful continuation; no
+acceptance-original exists. Canonical cleaner exact Audit/Apply and final reconciliation
+outcomes in retained receipt files; no broad scan or prior failed-batch retry.
+
+
+2026-11-04 SAME SYMBOL ORDER/FORMATTING - CONTINUATION / STILL INCOMPLETE
+Recovered exact local checkpoint, drafts/baselines/logs/JUnit/transaction result/manifest.
+Current master43ace8869a4ea808fefbcb2471b569ab42728183; staged filenames empty.
+Helper exactly matched original baseline before reapplication. Tests showed only line-ending
+status; reinserted exact task test block; other content preserved. Source task deltas were
+reapplied with matching context, NOT wholesale replacement of unrelated dirty work.
+Sound task changes now RETAINED in tools/master_journal_workbook.py and existing tests.
+Extracted original nested header-aware copier to module scope; actual updater invokes it.
+Partial snapshot no longer clears absent/manual/zero-trade identities; new rows copy full
+style and height; final generation/data-only wrappers invoke OOXML whole-record ordering.
+Added source class-order retention, formula-cache unchanged-dependency guard/transplant,
+explicit prefixed-cache value support, single-row header detection and necessary hidden
+filter defined-name extension. Source is NOT claimed complete/verified: last correction
+remains untested, all requested preservation/author-style/sign-fill coverage not yet proved.
+Additional invocation1 A/C normal exit1/9.202425500sec. A reached actual canonical copier
+and failed because single-row synthetic header was inferred as two-row; corrected header
+helper. C failed prefixed XML cache restoration; corrected v prefix in existing patcher.
+Additional invocation2 only affected C normal exit1/7.881306200sec. Wrapper/cache phase
+completed, then second symbol insertion rejected nonrectangular old hidden filter range.
+Added narrow _xlnm._FilterDatabase endpoint extension after run; UNVERIFIED/no rerun.
+CUMULATIVE3distinct nodes/4invocations/7executions, at cap. Prior original results preserved:
+first3 failures12.542498800sec; package retry PASS5.269025000sec. Old B PASS is historical,
+not proof of strengthened cached-result/concurrent-change assertions, which were not run.
+Additional measured pytest17.083731700sec; aggregate34.895255500sec. Added active elapsed
+recorded in private checkpoint from conservative continuation start. Original pre-registration
+active duration remains unknown; do not invent aggregate elapsed or reset its accounting.
+Read-only lock diagnosis: exact .git/trading-journal-transaction.lock exists/1byte; standard
+Excel owner marker absent. Saved evidence has exception repr only, NO saved traceback.
+Session profile explicitly makes .git read-only: access restriction, not established Excel
+ownership/held-lock conflict. No repeat acquisition/write probe, ACL/security/config/route
+change, elevation or app restart. Additional real repair attempts0, cumulative1 of2;
+additional attempt remains unspent because knowingly repeating denial is prohibited.
+Canonical journal unchanged: no original capture/candidate/install, recalc/Resync/import/
+broker/history/DB/cache action. Source delivery not attempted because verification remains
+incomplete; no protected verify/stage/commit/push, no current remote equality claim.
+Manual SYMBOLS acceptance pending. Next exact work: validate corrected A/C and strengthened
+B within newly authorized test budget, finish preservation gaps, then obtain a permitted
+canonical lock route before the authorized additional offline repair transaction.
+No subagents/schedules/build/install/MQL/MT5; custom instructions untouched. Queue remains
+NEXT separate MONTHLY AUD P/L plain white/no-fill incl October2026, preserving ordinary
+trade win/loss and Test blue; not executed. Exact task active/retained roots only.
+Private current checkpoint/manifest retain source ownership baseline, tested-source drafts
+and specific unresolved fixture/log/JUnit/replay evidence with release at verified delivery
+or explicit abandonment. Prior outputs lack full per-object at-creation process-start
+provenance; never fabricate it or claim disposal. Canonical exact-manifest Audit/Apply0
+retained plan and final bounded reconciliation receipts record actual current disposition.
+
+
+2026-11-04 BOTH JOURNAL FIXES - VERIFIED AND INSTALLED / PREDELIVERY
+Supersedes earlier incomplete SYMBOLS checkpoints/queue; both jobs now in one authorized
+workflow, no remaining feature queue. Full Access effective by platform/session plus
+existing canonical .git lock-path read/write open succeeding, no permissions/config change.
+Current master43ace8869a4ea808fefbcb2471b569ab42728183, initial/default staging empty.
+Original task baselines isolate pre-existing helper31lines and unrelated dirty summary
+history, service/tests/runtime/settings, root brief deletions and untracked files.
+Final canonical helper retains manual/zero-trade symbols/classification on partial input,
+copies complete new-row presentation, preserves authored presentation and formula caches
+when dependencies are unchanged, and sorts complete records in the final exported
+generation/data-only candidate path. Original interleaved classes establish one global
+alphabetical list; contiguous-class templates retain their class order. Explicit bijective
+row/ref mapping validator compares each complete record/caches, worksheet structures and
+unaffected ZIP payloads. Unsupported dynamic/shared/nonrectangular refs fail closed.
+Proven append-defect rows repaired by identity/signature, no symbol-only sort. Signed
+colours use each row's values; existing style definitions untouched, new styles interned.
+MONTHLY AUD P/L uses existing semantic identity plus valid canonical monthly Row ID.
+Shared direct-fill writer clears stale generated red/green/Test backgrounds for these
+rows; existing generated CF requires row_type trade. Ordinary win/loss/Test colours
+retained. Fixture package planner carves monthly cells out of legacy generated value CF,
+retaining all remaining rules/criteria/priorities. No financial logic/value changes.
+Actual tests now5distinct/8invocations/19executions cumulatively (original3/4/7 preserved).
+Added invocation1 normal exit1/8.906387400sec:3 setup errors before bodies at old
+fixtures parent; no permission forcing/unchanged root retry. Fresh sibling basetemp
+under same job fixed harness. Added invocation2 original3 nodes all PASS exit0/8.802635600.
+Strengthened package record/style/cache checks invalidated affected evidence; invocation3
+5nodes exit1/94.336061500sec:4 PASS, monthly package-only node failed XML attribute-order
+comparison. Corrected only that validator, including exact CF range comparison.
+Invocation4 only affected monthly package node PASS exit0/5.700890800. All5 final focused
+behaviours have applicable completed PASS bodies/normal process exits and JUnit.
+Monthly generation+actual incremental+preservation node85.903sec; original source copier/
+successive wrapper imports, grouped placement, all-row styles/comments/links/formula
+caches/charts/filters/panes, authored styles, repeated idempotence, duplicates and
+concurrent-source rejection covered. No unchanged applicable PASS repetitions.
+Added pytest117.745975300sec; cumulative measured pytest152.641230800sec.
+Ceilings5nodes/10invocations/25executions; pernode120/invocation300/ordinary300, added
+verification900/aggregate1800, added active1800/aggregate3300. Added active at this
+checkpoint1371.545sec; prior original pre-registration duration was not
+instrumented, retained as unknown/conservatively reserve prior1500, no invented actual.
+ONE new canonical-lock combined repair succeeded: lifetime attempt2 of3, original attempt1
+PermissionError remains history; no blind retry. Worker completed normal exit0/11.7698282sec;
+bounded subprocess exit0/14.2170245sec. Immutable original captured under canonical lock,
+source identity/hash and exclusive access rechecked, candidate atomically installed once,
+installed readback SHA256380c673cda808c364e98d5a1e07dedad95aedfcfb5547ba38500f47021d93fa2.
+Only sheet3 SYMBOLS, sheet4 Trade Log, styles.xml and workbook filter-name refs changed.
+All other package payloads/ZIP metadata unchanged. Original style definitions unchanged;
+cellXfs1345->1364, fonts56/fills28/borders134/numFmts37 unchanged. Six source defects
+repaired,126 unique symbols sorted; full filterA2:AW128. Readback positions BTW23,DOOD33,
+LUMIA71,Q89,TREE105,WET115. October monthly row5 all51 generated stale fills cleared,
+net P/L remains-3.32; all8 identified monthly rows have no fill. No workbook rebuild/save
+roundtrip, recalculation, Resync/import/broker/history/DB/cache mutation, app/MT5 restart,
+trade action, build/install/MQL/schedule/subagent or custom-instruction work.
+Protected verify succeeded5.78sec: fresh local/remote both43ace8869a4ea808fefbcb2471b569ab42728183
+and saved-credential authenticated no-op push. Single task-only commit/protected push next;
+actual commit/current remote equality and cleanup counts in private compact closeout.
+Manual visual acceptance pending user's review of SYMBOLS/monthly row; no trade or Resync
+needed. Recovery .codex-work/active/symbol-order-format/recovery/original.xlsx retained
+until explicit Pass; initial SHA256deca9b4eea235516052d202c1ae61b611aad3c2dba2fb4b5c8dde64f241e2ee8.
+Dispose consumed exact owned artifacts via canonical reviewed Audit/Apply and final
+identity-bound reconciliation. Old inaccessible .codex-work/active/symbol-order-format/
+fixtures/ must be excluded before further inspection; unknown contents retained, no force.
+Final retained manifest/receipt states exact disposition/reasons/release conditions.
