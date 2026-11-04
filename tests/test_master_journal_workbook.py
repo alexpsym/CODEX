@@ -13529,6 +13529,96 @@ def _counter_trend_fixture(path):
     wb.save(path);wb.close();return rows
 
 
+def _counter_position_fixture(path):
+    rows=_counter_trend_fixture(path)
+    wb=load_workbook(path);st=wb['STATS1'];sy=wb['SYMBOLS']
+    for r in range(3,139):
+        st.cell(r,1,'Counter Trend' if r==137 else 'Timeframe' if r==96 else 'row'+str(r))
+        st.cell(r,6,'authored'+str(r));st.row_dimensions[r].height=14+r/100
+        st.cell(r,6).font=Font(name='Arial',size=9+r%4,bold=True)
+    st['F137']='=1+2';st['F137'].comment=Comment('move row','tester');st['F137'].hyperlink='https://example.invalid/row'
+    for c in range(4,51):
+        sy.cell(2,c,'Counter Trend' if c==49 else 'column'+str(c))
+        sy.cell(3,c,c);sy.cell(3,c).font=Font(name='Courier New',italic=True)
+        sy.cell(3,c).number_format='0.000';sy.column_dimensions[get_column_letter(c)].width=10+c/10
+    sy['C1']='Trades';sy['C2']=None;sy.merge_cells('C1:C2')
+    sy['C1'].font=Font(name='Arial',bold=True);sy['C1'].fill=PatternFill('solid',fgColor='DDDDEE')
+    sy['C1'].border=Border(left=Side(style='medium'),bottom=Side(style='thin'));sy['C1'].alignment=Alignment(wrap_text=True,horizontal='center')
+    sy['AW3'].comment=Comment('move column','tester');sy['AW3'].hyperlink='https://example.invalid/column'
+    sy.auto_filter.ref='A2:AX5';sy.auto_filter.add_filter_column(48,['49'])
+    sy.freeze_panes='B3';st.freeze_panes='B4'
+    st['G137']='=F137';sy['AW4']='=AW3'
+    sy.conditional_formatting.add('AW3:AW5',FormulaRule(formula=['AW3>0']))
+    dv=DataValidation(type='whole',formula1='0',formula2='100');dv.add('AW3:AW5');sy.add_data_validation(dv)
+    other=wb.create_sheet('Unrelated');other['A1']="='STATS1'!F137+'SYMBOLS'!AW3";other['B2']='untouched';other.merge_cells('C3:D4')
+    wb.save(path);wb.close()
+    # Preserve genuine existing cached formula results through both permutations.
+    with zipfile.ZipFile(path) as z:infos=[copy(i) for i in z.infolist()];payloads={i.filename:z.read(i.filename) for i in infos}
+    for name,data in list(payloads.items()):
+        if name.endswith('.xml'):payloads[name]=re.sub(rb'(<f>1\+2</f>)<v(?:\s*/>|></v>)',rb'\1<v>3</v>',data)
+    with zipfile.ZipFile(path,'w') as z:
+        for info in infos:z.writestr(info,payloads[info.filename])
+    return rows
+
+
+def test_counter_trend_stats_positions_package_preserves_records(tmp_path):
+    path=tmp_path/'before.xlsx';_counter_position_fixture(path);out=tmp_path/'after.xlsx'
+    result=mjw._position_counter_trend_summary_package(path,out)
+    assert result['row_mapping']=={137:96,**{r:r+1 for r in range(96,137)}}
+    assert result['column_mapping']=={49:32,**{c:c+1 for c in range(32,49)}}
+    before=load_workbook(path);after=load_workbook(out)
+    for r in range(1,139):
+        dest=result['row_mapping'].get(r,r)
+        assert before['STATS1'].row_dimensions[r].height==after['STATS1'].row_dimensions[dest].height
+        for c in range(1,7):
+            a,b=before['STATS1'].cell(r,c),after['STATS1'].cell(dest,c)
+            assert a.value==b.value and a._style==b._style and a.comment==b.comment
+            if a.hyperlink:assert a.hyperlink.target==b.hyperlink.target
+    assert after['STATS1']['G96'].value=='=F96'
+    assert after['SYMBOLS']['AF4'].value=='=AF3'
+    for c in range(1,51):
+        dest=result['column_mapping'].get(c,c)
+        assert before['SYMBOLS'].column_dimensions[get_column_letter(c)].width==after['SYMBOLS'].column_dimensions[get_column_letter(dest)].width
+        assert before['SYMBOLS'].cell(3,c).value==after['SYMBOLS'].cell(3,dest).value
+        assert before['SYMBOLS'].cell(3,c)._style==after['SYMBOLS'].cell(3,dest)._style
+    sy=after['SYMBOLS'];assert sy['AF1'].value=='Counter Trend' and sy['AF2'].value is None
+    assert 'AF1:AF2' in {str(r) for r in sy.merged_cells.ranges}
+    for row in (1,2):
+        a,b=sy.cell(row,32),sy.cell(row,3)
+        assert copy(a.font)==copy(b.font) and copy(a.fill)==copy(b.fill)
+        assert copy(a.alignment)==copy(b.alignment) and copy(a.protection)==copy(b.protection) and a.number_format==b.number_format
+        for side in ('left','right','top','bottom','diagonal'):
+            x,y=getattr(a.border,side),getattr(b.border,side)
+            assert getattr(x,'style',None)==getattr(y,'style',None) and getattr(x,'color',None)==getattr(y,'color',None)
+    assert sy.auto_filter.filterColumn[0].colId==31 and sy.auto_filter.filterColumn[0].filters.filter==['49']
+    assert str(sy.data_validations.dataValidation[0].sqref)=='AF3:AF5'
+    assert any(str(k.sqref)=='AF3:AF5' and rules[0].formula==['AF3>0'] for k,rules in sy.conditional_formatting._cf_rules.items())
+    assert sy.freeze_panes=='B3' and after['STATS1'].freeze_panes=='B4'
+    assert after['Unrelated']['A1'].value=="='STATS1'!F96+'SYMBOLS'!AF3"
+    before.close();after.close()
+    cached=load_workbook(out,data_only=True);assert cached['STATS1']['F96'].value==3;cached.close()
+    with zipfile.ZipFile(path) as a,zipfile.ZipFile(out) as b:
+        assert a.read('xl/styles.xml')==b.read('xl/styles.xml')
+        assert all(a.read(n)==b.read(n) for n in a.namelist() if n not in result['changed_parts'])
+
+
+def test_counter_trend_stats_positions_refresh_idempotent(tmp_path):
+    path=tmp_path/'generation.xlsx';rows=_counter_position_fixture(path)
+    # The normal generated layout has no Counter Trend metric before the
+    # existing additive writer emits it at the edge. Its final wrapper positions it.
+    wb=load_workbook(path);wb['STATS1'].delete_rows(137,2);wb['SYMBOLS'].delete_cols(49,2)
+    for letter in ('AW','AX'):del wb['SYMBOLS'].column_dimensions[letter]
+    wb.save(path);wb.close()
+    out=tmp_path/'generated.xlsx'
+    result=mjw.prepare_counter_trend_package(path,out,expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),rows=[dict(rows[0],counter_trend='Yes')])
+    assert result['summary_positions']['inverse_audit_verified']
+    wb=load_workbook(out);assert wb['STATS1']['A96'].value=='Counter Trend';assert wb['SYMBOLS']['AF1'].value=='Counter Trend'
+    assert sum(wb['STATS1'].cell(r,1).value=='Counter Trend' for r in range(1,wb['STATS1'].max_row+1))==1
+    assert sum(wb['SYMBOLS'].cell(r,c).value=='Counter Trend' for r in (1,2) for c in range(1,wb['SYMBOLS'].max_column+1))==1
+    wb.close();frozen=out.read_bytes();mjw._refresh_counter_trend_package(out)
+    assert out.read_bytes()==frozen
+
+
 def test_counter_trend_additive_schema_roundtrip_preserves_workbook(tmp_path,monkeypatch):
     import hashlib,zipfile
     from copy import copy

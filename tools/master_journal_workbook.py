@@ -21715,20 +21715,22 @@ def _prepare_counter_trend_cells_package(path, candidate_path, *, expected_sha25
                     and not ws.row_dimensions[row].customHeight):
                 metric_heights[ws.title] = {row: 14.5}
             ref=next((r for r in range(1,ws.max_row+1) if str(ws.cell(r,1).value or '').strip().lower() in {'test','trades','total trades'}),1)
-            edits={f'A{row}':(COUNTER_TREND_HEADER,cell_style(ws,ref,1))}
-            for col,val in values_by_col.items():edits[f'{get_column_letter(col)}{row}']=(int(val),cell_style(ws,ref,col))
+            edits={f'A{row}':(COUNTER_TREND_HEADER,cell_style(ws,row if existing else ref,1))}
+            for col,val in values_by_col.items():edits[f'{get_column_letter(col)}{row}']=(int(val),cell_style(ws,row if existing else ref,col))
             plans[ws.title]=(edits,None,None,None)
         if STATS1_SHEET in wb.sheetnames:
             ws=wb[STATS1_SHEET];metric_row(ws,{col:counts[key] for key,col in _stats1_market_columns(ws).items() if key in counts})
         if SYMBOLS_SHEET in wb.sheetnames:
             ws=wb[SYMBOLS_SHEET];header_row=INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
-            found=[c for c in range(1,ws.max_column+1) if ws.cell(header_row,c).value==COUNTER_TREND_HEADER]
+            found=[c for c in range(1,ws.max_column+1) if any(ws.cell(r,c).value==COUNTER_TREND_HEADER for r in (1,header_row))]
             if len(found)>1:raise RuntimeError('Duplicate Counter Trend symbol columns')
-            col=found[0] if found else ws.max_column+1;edits={f'{get_column_letter(col)}{header_row}':(COUNTER_TREND_HEADER,cell_style(ws,header_row,3))}
+            col=found[0] if found else ws.max_column+1
+            anchor=1 if ws.cell(1,col).value==COUNTER_TREND_HEADER else header_row
+            edits={f'{get_column_letter(col)}{anchor}':(COUNTER_TREND_HEADER,cell_style(ws,anchor,col if found else 3))}
             for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW,ws.max_row+1):
                 symbol=str(ws.cell(row,1).value or '').strip()
                 if symbol and str(ws.cell(row,2).value or '').upper() in {'FX','FOREX','CRYPTO'}:
-                    edits[f'{get_column_letter(col)}{row}']=(counter_trend_count([r for r in source_rows if str(r.get('symbol') or '').upper()==symbol.upper()]),cell_style(ws,row,3))
+                    edits[f'{get_column_letter(col)}{row}']=(counter_trend_count([r for r in source_rows if str(r.get('symbol') or '').upper()==symbol.upper()]),cell_style(ws,row,col if found else 3))
             plans[ws.title]=(edits,(col,16) if not found else None,None,None)
         for ws in wb:
             if ws.title==REPORT_YEARLY_SHEET:
@@ -22567,7 +22569,7 @@ def _counter_ref(text, mapping, *, multiple=False):
     return result
 
 
-def _counter_formula(text,mapping,*,local=False):
+def _counter_formula(text,mapping,*,local=False,sheet_name='Trade Log'):
     if not text:return text
     from openpyxl.formula.tokenizer import Tokenizer
     prefix='' if str(text).startswith('=') else '='
@@ -22577,7 +22579,7 @@ def _counter_formula(text,mapping,*,local=False):
         value=token.value
         if '!' in value:
             sheet,ref=value.rsplit('!',1)
-            if sheet.strip("'").replace("''", "'").casefold()!='trade log':continue
+            if sheet.strip("'").replace("''", "'").casefold()!=sheet_name.casefold():continue
             token.value=sheet+'!'+_counter_ref(ref,mapping)
         elif local:token.value=_counter_ref(value,mapping)
     rendered=''.join(token.value for token in tokens)
@@ -22601,16 +22603,16 @@ def _counter_xml_dump(root,source):
     return output
 
 
-def _counter_permute_xml(payload,mapping,*,local=False,metadata=False,workbook=False,table=False):
+def _counter_permute_xml(payload,mapping,*,local=False,metadata=False,workbook=False,table=False,sheet_name='Trade Log',sheet_index=None):
     # Use the existing standard-library XML stack; retain source namespace bindings.
     X=ET
     root=X.fromstring(payload);ns='{'+_SPREADSHEETML_NAMESPACE+'}'
     for element in root.iter():
         tag=element.tag.rsplit('}',1)[-1] if isinstance(element.tag,str) else ''
-        context=local or (workbook and tag=='definedName' and element.get('localSheetId')==str(getattr(_counter_permute_xml,'trade_index',-1)))
+        context=local or (workbook and tag=='definedName' and element.get('localSheetId')==str(sheet_index if sheet_index is not None else getattr(_counter_permute_xml,'trade_index',-1)))
         filter_name=(workbook and tag=='definedName' and element.get('name')=='_xlnm._FilterDatabase' and context)
         if tag in {'f','formula','formula1','formula2','definedName','calculatedColumnFormula','totalsRowFormula'} and element.text and not filter_name:
-            element.text=_counter_formula(element.text,mapping,local=context)
+            element.text=_counter_formula(element.text,mapping,local=context,sheet_name=sheet_name)
         if local or metadata:
             for attr in ('r','ref','sqref','activeCell','topLeftCell','location'):
                 value=element.get(attr)
@@ -22708,16 +22710,159 @@ def _relocate_counter_trend_package(source,candidate):
     return {'column_mapping':mapping,'parts':list(changed),'inverse_audit_verified':True,'structural_changes':structural,'table_filter_ref':table_ref}
 
 
+def _counter_stats1_ref(text,mapping,*,multiple=False):
+    """The exact STATS1 row permutation; reject nonrectangular references."""
+    if not text:return text
+    output=[]
+    for part in text.split():
+        m=re.fullmatch(r'(\$?[A-Z]{1,3})(\$?)(\d+)(?::(\$?[A-Z]{1,3})(\$?)(\d+))?',part)
+        if not m:
+            if re.search(r'\d',part):raise ValueError('Unsupported STATS1 position reference: '+part)
+            output.append(part);continue
+        first,last=int(m[3]),int(m[6] or m[3]);numbers=sorted(mapping.get(r,r) for r in range(first,last+1));groups=[]
+        for row in numbers:
+            if groups and row==groups[-1][-1]+1:groups[-1].append(row)
+            else:groups.append([row])
+        if len(groups)>1 and not multiple:raise ValueError('Nonrectangular STATS1 reference: '+part)
+        for group in groups:
+            left=m[1]+m[2]+str(group[0]);right=(m[4] or m[1])+(m[5] or m[2])+str(group[-1])
+            output.append(left+(':'+right if m[4] else ''))
+    return ' '.join(output)
+
+
+def _counter_stats1_rows_xml(payload,mapping,*,local=False,metadata=False,workbook_index=None):
+    root=ET.fromstring(payload);ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    for e in root.iter():
+        tag=e.tag.rsplit('}',1)[-1]
+        context=local or (tag=='definedName' and e.get('localSheetId')==str(workbook_index))
+        if tag in {'f','formula','formula1','formula2','definedName','calculatedColumnFormula','totalsRowFormula'} and e.text:
+            tokens=Tokenizer(('' if e.text.startswith('=') else '=')+e.text).items
+            for token in tokens:
+                if token.type!='OPERAND' or token.subtype!='RANGE':continue
+                prefix,sep,ref=token.value.rpartition('!')
+                if sep and prefix.strip("'").replace("''", "'").casefold()=='stats1':token.value=prefix+'!'+_counter_stats1_ref(ref,mapping)
+                elif not sep and context and re.fullmatch(r'\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?',ref):token.value=_counter_stats1_ref(ref,mapping)
+            e.text=('=' if e.text.startswith('=') else '')+''.join(t.value for t in tokens)
+        if local or metadata:
+            for attr in ('r','ref','sqref','activeCell','topLeftCell','location'):
+                value=e.get(attr)
+                if not value:continue
+                if tag=='row' and attr=='r':e.set(attr,str(mapping.get(int(value),int(value))))
+                else:e.set(attr,_counter_stats1_ref(value,mapping,multiple=attr=='sqref'))
+            if tag=='pane' and e.get('ySplit'):
+                boundary=int(float(e.get('ySplit')))+1;e.set('ySplit',str(mapping.get(boundary,boundary)-1))
+            if tag in {'Row','row'} and metadata and e.text and e.text.isdigit():
+                row=int(e.text)+1;e.text=str(mapping.get(row,row)-1)
+            if tag=='Anchor' and e.text:
+                values=e.text.split(',')
+                if len(values)==8:
+                    for i in (2,6):values[i]=str(mapping.get(int(values[i])+1,int(values[i])+1)-1)
+                    e.text=','.join(values)
+    if local:
+        data=root.find(ns+'sheetData')
+        if data is not None:data[:]=sorted(data,key=lambda row:int(row.get('r')))
+    return _counter_xml_dump(root,payload)
+
+
+def _position_counter_trend_summary_package(source,candidate):
+    """Only STATS1 137->96 and SYMBOLS AW->AF, plus its count header."""
+    wb=load_workbook(source,data_only=False,keep_links=False)
+    try:
+        stats=wb[STATS1_SHEET];symbols=_symbols_sheet(wb)
+        rows=[r for r in range(1,stats.max_row+1) if stats.cell(r,1).value==COUNTER_TREND_HEADER]
+        cols=[c for c in range(1,symbols.max_column+1) if any(symbols.cell(r,c).value==COUNTER_TREND_HEADER for r in (1,2))]
+        if len(rows)!=1 or rows[0] not in (96,137):raise ValueError('Expected unique STATS1 Counter Trend at137 or96')
+        if len(cols)!=1 or cols[0] not in (32,49):raise ValueError('Expected unique SYMBOLS Counter Trend atAW orAF')
+        rowmap={137:96,**{r:r+1 for r in range(96,137)}} if rows[0]==137 else {}
+        colmap={49:32,**{c:c+1 for c in range(32,49)}} if cols[0]==49 else {}
+        stats_index=wb.sheetnames.index(STATS1_SHEET);symbols_index=wb.sheetnames.index(SYMBOLS_SHEET)
+        # C is the established vertically merged count header. Data styles are
+        # moved untouched; no data-column styling is copied from C.
+        if 'C1:C2' not in {str(r) for r in symbols.merged_cells.ranges}:raise ValueError('Missing equivalent SYMBOLS count header structure')
+        if symbols.cell(1,cols[0]).value not in (None,COUNTER_TREND_HEADER):raise ValueError('Authored Counter Trend upper-header content requires review')
+    finally:wb.close()
+    ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    with zipfile.ZipFile(source) as before:
+        stats_part=_worksheet_ooxml_part_name(before,STATS1_SHEET);symbols_part=_worksheet_ooxml_part_name(before,SYMBOLS_SHEET)
+        def related(part):
+            relpart=_worksheet_relationship_part_name(part)
+            if relpart not in before.namelist():return set()
+            return {e.get('Target').lstrip('/') if e.get('Target').startswith('/') else posixpath.normpath(posixpath.join(posixpath.dirname(part),e.get('Target')))
+                    for e in ET.fromstring(before.read(relpart)) if e.get('TargetMode')!='External'}
+        smeta,ymeta=related(stats_part),related(symbols_part);changed={}
+        def transform(payload,name,rm,cm):
+            value=_counter_permute_xml(payload,cm,local=name==symbols_part,metadata=name in ymeta,
+                workbook=name=='xl/workbook.xml',table=name.startswith('xl/tables/') and name in ymeta,
+                sheet_name=SYMBOLS_SHEET,sheet_index=symbols_index)
+            return _counter_stats1_rows_xml(value,rm,local=name==stats_part,metadata=name in smeta,
+                workbook_index=stats_index if name=='xl/workbook.xml' else None)
+        for name in before.namelist():
+            if not name.endswith(('.xml','.vml')):continue
+            old=before.read(name)
+            if name not in {stats_part,symbols_part}|smeta|ymeta and b'STATS1' not in old.upper() and b'SYMBOLS' not in old.upper():continue
+            new=transform(old,name,rowmap,colmap)
+            restored=transform(new,name,{v:k for k,v in rowmap.items()},{v:k for k,v in colmap.items()})
+            normalized=transform(old,name,{},{})
+            if ET.canonicalize(restored,rewrite_prefixes=True)!=ET.canonicalize(normalized,rewrite_prefixes=True):
+                raise ValueError('Exact Counter Trend permutation inverse audit failed: '+name)
+            if ET.canonicalize(new,rewrite_prefixes=True)!=ET.canonicalize(normalized,rewrite_prefixes=True):changed[name]=new
+        payload=changed.get(symbols_part,before.read(symbols_part));root=ET.fromstring(payload);prior=deepcopy(root)
+        data=root.find(ns+'sheetData');row_by_id={int(e.get('r')):e for e in data}
+        for number in (1,2):
+            if number not in row_by_id:raise ValueError('Missing SYMBOLS header row')
+            row=row_by_id[number];cells={c.get('r'):c for c in row};donor=cells.get(f'C{number}')
+            if donor is None:
+                # An implicit blank lower merged cell has the default style.
+                # Preserve that same representation rather than invent a style.
+                if number!=2:raise ValueError('Missing complete count header style')
+                donor=ET.Element(ns+'c',r='C2')
+            coord=f'AF{number}';old=cells.get(coord);new=deepcopy(donor);new.set('r',coord)
+            for child in list(new):new.remove(child)
+            new.attrib.pop('t',None)
+            if number==1:
+                new.set('t','inlineStr');ET.SubElement(ET.SubElement(new,ns+'is'),ns+'t').text=COUNTER_TREND_HEADER
+            if old is not None:row.remove(old)
+            row.append(new);row[:]=sorted(row,key=lambda c:coordinate_to_column(c.get('r')))
+        merges=root.find(ns+'mergeCells')
+        if merges is None:raise ValueError('Missing count header merges')
+        if not any(e.get('ref')=='AF1:AF2' for e in merges):ET.SubElement(merges,ns+'mergeCell',ref='AF1:AF2')
+        merges.set('count',str(len(merges)))
+        # Invert only the two explicit header cells and this one merge. No
+        # validator exemption: all remaining worksheet XML must be identical.
+        audit=deepcopy(root);audit_data=audit.find(ns+'sheetData')
+        for number in (1,2):
+            row=next(e for e in audit_data if e.get('r')==str(number));original_row=next(e for e in prior.find(ns+'sheetData') if e.get('r')==str(number))
+            for c in list(row):
+                if c.get('r')==f'AF{number}':row.remove(c)
+            for c in original_row:
+                if c.get('r')==f'AF{number}':row.append(deepcopy(c))
+            row[:]=sorted(row,key=lambda c:coordinate_to_column(c.get('r')))
+        audit_merges=audit.find(ns+'mergeCells');old_merges=prior.find(ns+'mergeCells')
+        audit_merges[:]=[deepcopy(e) for e in old_merges];audit_merges.attrib.clear();audit_merges.attrib.update(old_merges.attrib)
+        if _journal_xml_signature(audit)!=_journal_xml_signature(prior):raise ValueError('Counter Trend header changed unrelated presentation')
+        if _journal_xml_signature(root)!=_journal_xml_signature(prior):changed[symbols_part]=_counter_xml_dump(root,payload)
+        with zipfile.ZipFile(candidate,'x') as out:
+            out.comment=before.comment
+            for info in before.infolist():out.writestr(copy(info),changed.get(info.filename,before.read(info.filename)))
+        with zipfile.ZipFile(candidate) as after:
+            for name in before.namelist():
+                if after.read(name)!=changed.get(name,before.read(name)):raise ValueError('Unapproved Counter Trend package payload')
+    return dict(row_mapping=rowmap,column_mapping=colmap,changed_parts=list(changed),inverse_audit_verified=True,header='AF1:AF2 from C1:C2')
+
+
 def prepare_counter_trend_package(path,candidate_path,*,expected_sha256,rows=None):
     import hashlib
     from uuid import uuid4
     stage=Path(candidate_path).with_name('.counter-cells-'+uuid4().hex+'.xlsx')
+    positioned=Path(candidate_path).with_name('.counter-summary-'+uuid4().hex+'.xlsx')
     try:
         result=_prepare_counter_trend_cells_package(path,stage,expected_sha256=expected_sha256,rows=rows)
-        result['relocation']=_relocate_counter_trend_package(stage,candidate_path)
+        result['relocation']=_relocate_counter_trend_package(stage,positioned)
+        result['summary_positions']=_position_counter_trend_summary_package(positioned,candidate_path)
         result['candidate_sha256']=hashlib.sha256(Path(candidate_path).read_bytes()).hexdigest()
         return result
-    finally:stage.unlink(missing_ok=True)
+    finally:
+        stage.unlink(missing_ok=True);positioned.unlink(missing_ok=True)
 
 
 def _group_counter_trend_in_memory(ws):

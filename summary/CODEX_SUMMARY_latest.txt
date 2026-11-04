@@ -6116,3 +6116,48 @@ Dispose consumed exact owned artifacts via canonical reviewed Audit/Apply and fi
 identity-bound reconciliation. Old inaccessible .codex-work/active/symbol-order-format/
 fixtures/ must be excluded before further inspection; unknown contents retained, no force.
 Final retained manifest/receipt states exact disposition/reasons/release conditions.
+
+
+2026-11-04 COUNTER TREND POSITIONS / HEADER - VERIFIED INSTALLED / PREDELIVERY
+New small job; baseline masterd65a68c744839fcca2a46c4189ecfad80d486523/indexempty.
+Preserved prior accepted symbol-order/monthly-fill delivery4ab0d42 and later journal state
+commitd65a68c. Pre-existing31-line helper edits, dirty summary/history and all unrelated
+service/tests/settings/runtime/untracked/deleted files preserved; no historical cleanup.
+Confirmed unique STATS1 A137 and SYMBOLS AW2. Applied exactly row137->96, old96:136->97:137;
+columnAW49->AF32, oldAF32:AV48->AG33:AW49. Complete records/styles/widths/heights/links/
+comments/formulas/cache values move together. Counts/labels preserved. SYMBOLS header
+nowAF1:AF2 vertically merged, copying full equivalent existing C1:C2 count-header style;
+data-column presentation carried unchanged. Other sheet positions/Trade Log relocation
+unchanged. Existing package helper now accepts a scoped sheet-name argument with its
+Trade Log default unchanged; narrow STATS1 row adapter/inverse audit, no general layout
+framework. Existing additive writer recognizes merged top-row Counter header, retains
+existing metric/data styles, and final exported Counter generation/refresh positions both
+metrics. Repeat refresh is byte-stable with no duplicate metric/header. No real Resync.
+Exact focused tests2distinct/3invocations/5executions (caps2/4/6); no prior accepted-job
+tests repeated. Invocation1 exit1/12.950192300sec, both failed: implicit blank lower merge
+cell and synthetic removed columns retaining dimensions. Corrected implicit-cell handling
+and fixture widths. Invocation2 exit1/11.669154900sec: refresh/idempotence PASS; package
+node reached header assertion, failed comparing StyleArray border IDs after openpyxl
+materialized equivalent empty merge sides. Corrected assertion to full font/fill/alignment/
+protection/format plus every visible border side/style/color; strict DATA style IDs stay
+compared. Invocation3 ONLY failed package node PASS exit0/5.920559800sec. Both final
+applicable completed bodies/normal OS outcomes and JUnit PASS. Source unchanged since
+passed bodies. Per-node90/outer180/ordinary300/discovery60/verification450/active900;
+realdata1, schedules/builds/installations/MQL/subagents0. Actual measured tests30.539907sec.
+One canonical-lock repair attempt1 succeeded: worker exit0/11.900666sec, bounded parent
+subprocess exit0/14.463453sec. Immutable original captured privately under lock; source
+identity/hash/access rechecked before one atomic replace and installed-hash readback.
+Only STATS1 sheet1.xml and SYMBOLS sheet3.xml changed in actual package; inverse mapping
+compares exact records/references/caches, header inverse restores only two header cells/
+one merge, all unrelated payloads and styles.xml byte-preserved. Installed SHA256
+b0e5b6f910f7110462504b4d55083e579eb556f15477fa4be1008e5dcb13c016.
+Original .codex-work/active/counter-trend-position/recovery/original.xlsx retained until
+explicit manual Pass; SHA256e95121fc56c54377f93dc4380cf5898ae5e88ea7da9fb9a3c54d6f34ac050cfa.
+No broker/trade/DB/cache operation, recalculation, rebuild or app restart/kill, security/
+permission/helper change or custom-instruction work. No new feature queue. Manual visual
+acceptance pending user's review of STATS1 row96 / SYMBOLS AF matching header.
+Protected verify passed9.18sec, fresh local/remote bothd65a68c744839fcca2a46c4189ecfad80d486523.
+Task-only commit/protected push next; actual SHA/current equality/cleanup final outcomes
+in compact current job receipt. Exact current-job roots only, canonical reviewed Audit/
+Apply and final identity-bound reconciliation; remove consumed artifacts after delivery.
+Active at precommit checkpoint769.220sec.
