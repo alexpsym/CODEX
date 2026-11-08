@@ -692,6 +692,30 @@ class TrendlinePlanStore:
         self._write(registry)
         return copy.deepcopy(canonical)
 
+    def resume_and_arm(self, plan_id: str, *, expected_revision: int, confirm_live: bool, now_ms: int) -> Dict[str, object]:
+        """Reauthorize exactly one unclaimed revision, preserving its execution identity."""
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None:
+                raise TrendlinePlanError("Unknown trendline plan.")
+            if plan["revision"] != expected_revision or plan["status"] not in {"draft", "armed"} or plan["trigger_claim"] is not None:
+                raise TrendlinePlanError("Plan changed or is no longer eligible for Arm.")
+            now = _transition_time(plan, now_ms)
+            if plan["expiry_at_ms"] is not None and now >= int(plan["expiry_at_ms"]):
+                raise TrendlinePlanError("Expired plans cannot be armed.")
+            live = plan["account"] == "live" and not plan["test_trade"]
+            if live and confirm_live is not True:
+                raise TrendlinePlanError("Current live confirmation required.")
+            updated = copy.deepcopy(plan)
+            updated.update(status="armed", revision=int(plan["revision"]) + 1, updated_at_ms=now,
+                           lifecycle={"last_transition": "live_authorized_armed" if live else "armed", "last_transition_at_ms": now})
+            updated["live_authorization"] = {"execution_key": plan["execution_key"], "plan_revision": updated["revision"], "authorized_at_ms": now} if live else None
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
+
     def arm(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         with self._locked():

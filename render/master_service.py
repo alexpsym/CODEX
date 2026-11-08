@@ -29508,13 +29508,13 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <table class="calc-table">
               <caption id="trendline-plans-title">Local trendline plans</caption>
               <tbody>
-                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Armed Bybit and OANDA plans are monitored locally only after you start monitoring. Keep Local Trading Tools running and the computer awake. Test plans simulate without sending broker orders; eligible non-test plans can submit once after fresh validation, and live plans require explicit live confirmation. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below for automatic preview; Apply fills both anchor fields; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Preview shows its optional extension flag; Apply sets it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and import/Apply/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
+                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Save draft, then click Arm on the selected plan. Arm starts watching that plan while Local Trading Tools is running and the computer is awake. Stop monitoring pauses all plans; click Arm on each specific card to resume after Stop or an LTT restart. Test plans simulate without sending broker orders; eligible non-test plans can submit once after fresh validation, and live plans require explicit live confirmation. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below for automatic preview; Apply fills both anchor fields; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Preview shows its optional extension flag; Apply sets it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and import/Apply/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
                 <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste one LTT_ANCHORS_V1 export or its JSON"></textarea><div class="group"><div class="muted">Paste -> automatic preview -> Apply anchors -> Save/Update draft.</div><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
                 <tr><th><label for="trendline-anchor-1-time">Anchor 1</label></th><td><div class="grid"><input id="trendline-anchor-1-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-1-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-1-utc" class="muted"></div></td></tr>
                 <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
                 <tr><th>Trigger</th><td><div class="grid"><label>Mode <select id="trendline-trigger-mode"><option value="touch">Touch</option><option value="confirmed_cross">Confirmed cross</option></select></label><label>Direction <select id="trendline-cross-direction"><option value="either">Either</option><option value="upward">Upward</option><option value="downward">Downward</option></select></label><label>Price basis <select id="trendline-price-basis"><option value="executable">Executable price</option><option value="bid">Bid</option><option value="ask">Ask</option><option value="midpoint">Midpoint</option></select></label><label>Tolerance ticks <input id="trendline-tolerance-ticks" type="number" min="0" step="1" value="0"/></label></div></td></tr>
                 <tr><th>Extension / expiry</th><td><div class="group"><label><input id="trendline-right-extension" type="checkbox" checked/> Right extension (ray beyond anchor 2)</label><label for="trendline-expiry">Expiry <select id="trendline-expiry"><option value="lifetime">Lifetime</option><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="1d">1 day</option><option value="1w">1 week</option><option value="1mo">1 month</option></select></label></div></td></tr>
-                <tr><th>Actions</th><td><div class="group"><button id="trendline-save" type="button">Save draft</button><button id="trendline-reset" type="button">Reset</button><button id="trendline-refresh" type="button">Refresh plans</button><button id="trendline-monitor-start" type="button">Start monitoring</button><button id="trendline-monitor-stop" type="button" disabled>Stop monitoring</button></div><div id="trendline-plan-status" class="muted"></div><div id="trendline-monitor-status" class="muted">Monitoring stopped.</div></td></tr>
+                <tr><th>Actions</th><td><div class="group"><button id="trendline-save" type="button">Save draft</button><button id="trendline-reset" type="button">Reset</button><button id="trendline-refresh" type="button">Refresh plans</button><button id="trendline-monitor-stop" type="button" disabled>Stop monitoring</button></div><div id="trendline-plan-status" class="muted"></div><div id="trendline-monitor-status" class="muted">Monitoring stopped.</div></td></tr>
                 <tr><th>Saved plans</th><td><div id="trendline-plan-list" class="grid" aria-live="polite"></div></td></tr>
               </tbody>
             </table>
@@ -30850,7 +30850,8 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
 
 
 def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]:
-    return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan))
+    return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan), monitor_generation=TRENDLINE_EXECUTOR.generation,
+                monitoring_eligible=TRENDLINE_EXECUTOR.eligible(str(plan["plan_id"])) and bool(TRENDLINE_EXECUTOR.status()["running"]))
 
 
 def _trendline_response_state() -> Dict[str, object]:
@@ -30917,13 +30918,9 @@ async def trendline_plan_update(plan_id: str, payload: Dict[str, object] = Body(
 async def trendline_plan_arm(plan_id: str, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
     _trendline_plans_require_local()
     try:
-        existing = TRENDLINE_PLAN_STORE.get(plan_id)
-        if existing["account"] == "live" and not existing["test_trade"]:
-            if (payload or {}).get("confirm_live_execution") is not True:
-                raise TrendlinePlanError("Live non-test plans require explicit local execution confirmation.")
-            plan = TRENDLINE_PLAN_STORE.authorize_live_and_arm(plan_id)
-        else:
-            plan = TRENDLINE_PLAN_STORE.arm(plan_id)
+        plan = await TRENDLINE_EXECUTOR.arm(plan_id, revision=(payload or {}).get("revision"),
+                                            generation=(payload or {}).get("monitor_generation"),
+                                            confirm_live=(payload or {}).get("confirm_live_execution") is True)
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)

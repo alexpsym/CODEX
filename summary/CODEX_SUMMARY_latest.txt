@@ -6161,3 +6161,192 @@ Task-only commit/protected push next; actual SHA/current equality/cleanup final 
 in compact current job receipt. Exact current-job roots only, canonical reviewed Audit/
 Apply and final identity-bound reconciliation; remove consumed artifacts after delivery.
 Active at precommit checkpoint769.220sec.
+
+
+2026-11-05 JOB 1 ARM STARTS MONITORING - LOCAL / INCOMPLETE / NO DELIVERY
+Baseline master0e9a73fda1e7ecb02533d17316d68f2147119104, staged paths empty.
+Read AGENTS and accepted Trendline10/11, anchor/import/deletion checkpoints. Custom
+instructions not read/modified. Preserve unrelated dirty service/summary/journal/tests/
+settings/runtime files and root deletions; private baseline-service/summary captures
+isolate this task delta. No staging, commit, helper verify or push attempted.
+Local implementation: existing Arm route delegates to one executor control lock shared
+with Start/Stop. Arm starts/joins worker and grants only selected plan in-memory
+eligibility after durable revision-checked arm; joining retains other active observations.
+Store resume preserves settings/plan/execution identity, increments revision, refreshes
+Live non-test authorization bound to that revision. Stop invalidates generation and
+eligibility before waiting for worker; restart eligibility empty. Gate before evaluation
+and immediately before durable claim. Internal Start cannot resume paused plans.
+Existing durable claim/begin_submission/uncertain reconciliation behavior retained.
+Template removes Start monitoring; Save draft then Arm copy explains running/awake
+requirement. Cards show Paused or server-confirmed Armed and monitoring. JS sends
+selected revision/generation and literal Live confirmation, refreshes after Stop and
+ambiguous Arm. No separate start request from UI. Source is NOT delivered/fully verified.
+One permitted exact render/data/trendline_plans.json read: no Demo ELSAUSDT match.
+No second incident read, real mutation, broker request, app/MT5/monitor restart,
+schedule/build/MQL/install/subagent. Fixture/mock workers only.
+Focused invocation1 actual OS exit1/23.858449100sec; JUnit3 completed bodies:
+API test_arm_route_selected_revision_and_monitoring_view PASS;
+executor test_arm_selected_monitor_session_and_submission_guards PASS;
+JS test_trendline_monitor_ui_failures_live_arm_and_limit_round_trip FAIL before Save,
+old instrument fixture missing asset/broker. Corrected mock and normalized metadata.
+Invocation2 ONLY failed JS node exit1/1.754934200sec; failed before draft POST because
+required timeframe was not selected. Added explicit 1m click and diagnostic Save
+assertion after this run; UNVERIFIED. No further run within authorized invocation cap.
+Backend PASS covers selected eligibility, concurrent duplicate Arm, shared worker identity,
+Live confirmation rejection, other observations preserved, Stop/session retry rejection,
+internal Start inertness, fresh resume, one mocked submission and Test simulation,
+reconstruction inertness, mocked startup failure, and Stop-during-calculation claim gate.
+It does NOT fully verify real _run startup failure or durable arm-write rollback.
+JS Arm/Stop/ambiguous-response assertions have not completed under PASS. Existing older
+executor fixture setups also need explicit eligibility updates for intentionally changed
+startup behavior; not run or silently counted passing. Do not treat Job1 as complete.
+Actual counters3distinct/2invocations/4scheduled executions; invocations exhausted.
+Measured pytest25.613383300sec; per-node90/invocation180/ordinary300/discovery120/
+verification450/active900 ceilings. Original initial-reading overhead not instrumented;
+private manifest registration-to-closeout duration recorded, no invented total.
+NEXT requires NEW authorization for corrected JS node and any narrowly scoped additional
+coverage/fixture adaptations, preserving these two unchanged backend passes. After fully
+verified: review task-only delta using baselines, append summary, protected helper verify,
+one scoped commit/push, fresh remote equality. No delivery without complete evidence.
+Exact active/retained .codex-work roots ltt-trendline-arm-monitor contain current manifest,
+baselines, failed JS evidence/JUnit/results, isolated fixture and checkpoint. Redundant
+logs reviewed by canonical exact Audit then one Apply; actual counts in apply.json.
+Fixture lock outputs lack full independent per-object at-creation owner-start provenance;
+retained, never fabricated or force-released. Exact bounded reconciliation records final
+retained paths/reasons/release conditions. No claim all artifacts disposed.
+Manual acceptance pending; running LTT unchanged. Do not restart to rely on this unfinished
+local implementation. Jobs2 dashboard row,3 armed SL/R edit,4 Excel manual preservation
+remain separate briefs after verified Job1 and explicit acceptance; none executed.
+
+
+2026-11-08 JOB 1 ARM STARTS MONITORING - VERIFIED / PREDELIVERY
+Resumed the saved Job1 checkpoint by explicit instruction to finish; initial master
+0e9a73fda1e7ecb02533d17316d68f2147119104, index empty. Re-read AGENTS and Job1 checkpoint;
+original counts/results retained. No custom-instruction work or subagents. Jobs2 dashboard
+row,3 armed SL/R,4 Excel manual preservation remain separate/untouched until acceptance.
+Final existing Arm route serializes with Stop on executor control lock; client binds
+selected plan/revision/current process monitoring generation and literal Live confirmation.
+Only selected unclaimed draft/paused armed plan becomes eligible. Store reauthorization
+preserves identity/settings, increments revision, renews revision-bound Live authority.
+Arm starts/joins one worker; joining preserves other plans' observations. Repeated Arm
+of an eligible plan is rejected without resetting observations. Scheduling/startup failure
+and interrupted startup leave no new worker/eligibility; a failed durable arm write stops
+only a newly started worker and preserves the prior inactive plan. Stop invalidates
+session generation and eligibility before waiting; late requests cannot undo Stop.
+Process reconstruction starts with empty eligibility, including other accounts. Internal
+Start never resumes plans. Eligibility checks precede evaluation and durable claim;
+resuming clears selected observations. Existing expiry/Touch/Cross/fresh-quote/claim/
+begin_submission/at-most-once and uncertain manual reconciliation retained.
+Actual calculator template removes Start monitoring. Save draft stays inactive; explicit
+Arm is the activation action. Cards show server-confirmed Armed and monitoring or Paused.
+Stop refreshes cards; ambiguous Arm recovers via fresh read without replay. Duplicate
+clicks suppressed. Help explains running/awake and specific-card resume after Stop/restart.
+Accepted stop-tick/import/anchor/extension/restoration/deletion/preview code preserved.
+Continuation invocation3: exit1/22.890927700sec: JS PASS; both backend nodes setup ERROR
+before bodies because missing parent for new basetemp. Created exact parent in child.
+Invocation4: inconclusive Windows socketpair stall before first backend body's logic,
+outer subprocess.run timeout180.066788400sec; no PASS/JUnit body claimed and no actual
+child exit value retained. This exceeded intended90sec per-node ceiling; do not hide it.
+Pre-import85sec traceback proved known OS fallback_socketpair accept startup stall.
+No app kill/restart or permission change; subprocess timeout handled only its test child.
+Final invocation5 ONLY affected backend nodes used existing repository single-thread
+fixture SelectorEventLoop harness: real tasks/locks/timers, no socket self-pipe/external IO.
+Normal child OS exit0/14.555031500sec, JUnit2 completed PASS bodies. No synchronous coroutine
+shortcut. Existing trigger fixtures explicitly opt into selected eligibility; older route
+fixtures now bind current revision/generation and use isolated executor instead of global
+real adapters. Unrelated tests/full files/suites not run or claimed passing.
+Final applicable checks exactly:
+ tests/test_calculator_js_behavior.py::test_trendline_monitor_ui_failures_live_arm_and_limit_round_trip
+ tests/test_master_service_calculator_api.py::test_arm_route_selected_revision_and_monitoring_view
+ tests/test_trendline_executor.py::test_arm_selected_monitor_session_and_submission_guards
+JS covers actual production script draft Save/Edit, Live confirm, one Arm/no Start,
+duplicate-click suppression, Stop Paused cards, lost-response fresh-state recovery.
+Backend covers current plan/revision/generation, Live rejection/stale confirmation/local
+profile gating, real worker startup/scheduling errors, arm-write rollback, duplicate
+concurrent Arm, shared worker identity/observations, Stop/restart/account isolation,
+fresh cross samples after resume, eligible one mocked submission and Test simulation,
+Stop-during-calculation claim gate. Real broker/manual UI acceptance is not claimed.
+Lifetime3distinct nodes/5invocations/11scheduled executions; measured test processes
+243.126130900sec including preserved earlier25.613383300sec and180sec timeout. Added
+verification includes protected verify9.06sec, remaining delivery/checks recorded privately.
+Latest resume authorized continuation; added plan3invocations with7scheduled executions
+(after explicit pre-execution reservation of second unexecuted backend body),90/node,
+180/invocation,300/ordinary,120discovery,450verification,900active. Original active overhead
+not independently timed; private receipt retains measured continuation duration, no reset.
+One original incident read remains consumed; no repeated live registry read, runtime
+mutation, broker request, app/MT5 restart, schedule/build/MQL/install or journal operation.
+Protected verify succeeded: fresh local/remote both0e9a73f, authenticated no-op transport.
+Task-only candidates derived from saved dirty baselines preserve all unrelated service/
+summary changes and index; final eight-file task delta reviewed before scoped commit.
+Commit/push/equality and exact cleanup dispositions recorded in compact private closeout.
+New fixture outputs registered before creation via audit hook, with actual owner PID/start,
+normal exit, identity/hash and immutable registration proof for eligible synthetic release.
+Old baseline fixtures lacking independent creation-owner proof stay explicitly retained;
+no invented provenance/blanket lock exemption or old failed cleanup batch retry.
+Manual acceptance: after delivered commit, USER next safely restarts with
+run_local_master_control.bat and refreshes calculator. Review Save draft -> Arm, confirmed
+Armed and monitoring, Stop -> Paused and Arm only the intended card. Any actual plan/trade
+activation remains user-controlled; Codex did not arm a real plan. No build/install needed.
+
+
+2026-11-08 JOB 1 DELIVERY BLOCKER / VERIFIED SOURCE PRESERVED
+Protected verify succeeded9.06sec with fresh matching local/remote0e9a73f. First ordinary
+sandboxed git hash-object -w for the task-only service candidate failed:
+insufficient permission for adding an object to repository database .git/objects.
+No update-index/staging/commit/push occurred; no production delivery retry or workaround.
+This matches session's explicit read-only .git boundary. No helper/account/permissions/
+configuration change or external object-directory bypass. Delivery needs a permitted
+session with writable repository metadata; then stage only reviewed eight-file task delta,
+fresh protected verify, one commit and protected push once. Real running LTT unchanged.
+Task-only service/summary candidates and original dirty baselines remain exact pending
+handoff; other work is preserved. Final applicable3 focused PASS bodies remain valid;
+no source changed after those passes. Manual acceptance still pending after delivery
+and user-controlled safe LTT restart. Compact private closeout records hashes, actual
+counters, cleanup removals and exact retained release conditions. Do not claim delivery.
+
+Job1 exact cleanup closeout: new canonical reviewed Audit/Apply removed26files/85509
+logicalbytes,0failed/0skipped. Including original cleanup:29files/106312logicalbytes.
+One intervening Audit rejected obsolete already-absent original log targets before any
+mutation; that target batch was not retried. Base1 access denied during bounded owned-root
+inventory, then excluded before further inspection. Base1/base2/fixtures retained with
+unknown/uninspected contents and provenance limitations; no force or all-clean claim.
+Final retained closeout.json and manifest record exact pending delivery baseline/candidate
+hashes, completed PASS evidence, failed/inconclusive history and release conditions.
+Index remains empty, master/HEAD unchanged; .git write boundary still blocks commit/push.
+
+
+2026-11-08 JOB 1 GIT DELIVERY / EARLY PERMISSION RULE - PRECOMMIT
+Recovered exact Job1 manifest/closeout, dirty ownership baselines and reviewed candidates.
+Initial master0e9a73fda1e7ecb02533d17316d68f2147119104; staged paths empty. All unrelated
+service/summary/journal/test/runtime/settings work and root deletions preserved.
+Effective workspace-write sandbox protects .git; auto-review/on-request escalation route
+is exposed. Explicitly requested require_escalated for unchanged saved-user helper;
+approved execution succeeded as desktop-1b14eq6\user, protected verify exit0/7.93sec,
+fresh local/remote master both0e9a73f and authenticated no-op transport. No helper,
+credentials, OS permissions/security or managed-policy changes. This corrects prior
+premature stop at sandbox object-write denial: scoped Git approval is the permitted route.
+Added exactly requested paragraph under Safe automatic Git delivery in AGENTS.md:
+establish metadata-write/saved-identity readiness before substantial work, obtain/reuse
+scoped approval early, escalate protected Git operations, report disabled/rejected approval
+precisely, record readiness and require fresh commit/push equality for delivery completion.
+No feature source/test change or new test invocation. Existing3focused PASS bodies reused.
+Actual lifetime3distinct/5invocations/11scheduled,243.126130900sec retained unchanged:
+invocation1 exit1/23.858449100; invocation2 exit1/1.754934200; invocation3 exit1/22.890927700
+with JS completed PASS and backend setup errors; invocation4 timeout180.066788400, no
+child exit/body PASS claim, exceeded intended90sec node ceiling; invocation5 normal
+child exit0/14.555031500 with both backend completed PASS. Final JS body and its Node
+child success are recorded, but surrounding invocation3 pytest exit1 is NOT described
+as a fully passing invocation. No tests repeated; earlier failures not overwritten.
+Existing implementation: Arm activates selected current revision and starts/joins one
+worker; Stop invalidates eligibility/session; resume only selected card with fresh samples;
+duplicate submissions/live confirmation/Test simulation/durable claims preserved.
+Existing cleanup29files/106312logicalbytes; inaccessible/provenance-limited fixture roots
+remain excluded/uninspected, no forced release. This continuation adds300active/120verify/
+30discovery/60ordinary seconds; featuretests/apps/brokers/data/restarts/builds/installs/
+schedules/subagents0. Stage exactly nine authorized task paths using dirty-baseline-derived
+service/summary candidates plus AGENTS and six clean-baseline task paths. One task-only
+commit and unchanged protected push follow through approved saved-user route; actual
+SHA/push/fresh local-remote equality/last-use cleanup in compact delivery receipt.
+Manual acceptance remains separate: user next safe run_local_master_control.bat restart
+and calculator refresh, then review Save draft/Arm/Stop/selected-card resume. No real plan
+armed or broker call here. Jobs2-4 remain queued until verified Job1 user acceptance.

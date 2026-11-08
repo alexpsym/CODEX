@@ -79,6 +79,8 @@ There is no optional compile-if-available escape and no handing normal authorize
 
 ## Safe automatic Git delivery
 
+Before substantial implementation of every authorized job, establish the permitted route for Git metadata writes and saved-identity delivery. Check the effective sandbox/approval policy, repository identity and branch, and availability of the unchanged protected delivery helper. Obtain the required scoped approval early and reuse valid grants. For protected .git metadata, request the approved execution route rather than ending the task at the first sandbox write failure. Perform exact task staging/commit and the protected verify/push through that approved route. If requests are disabled, give the precise same-session resume command immediately. If approval is rejected, report the actual rejection and reason. Record permission readiness in the checkpoint and require completed commit/push with fresh local/remote equality before reporting Git delivery complete.
+
 For an authorized task, the normal completion workflow is one task-scoped commit and one protected normal push unless the user prohibits delivery. This workflow remains bounded by actual session authorization, scope, task budgets and higher-priority instructions; it does not authorize unrelated production work.
 
 1. Review the final task delta once against requirements and authorized paths; record actual verification and remaining manual/build/install limitations. Write the final task summary to summary/CODEX_SUMMARY_latest.txt BEFORE delivery, preserving relevant history/checkpoints.

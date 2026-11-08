@@ -866,9 +866,9 @@
   async function trendlineMonitor(action) {
     if(!state.trendlinePlansAvailable||state.trendlineMonitorPending) return;
     state.trendlineMonitorPending=true; renderTrendlineMonitor(state.trendlineMonitorStatus);
-    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); state.trendlineMonitorPending=false; renderTrendlineMonitor(response); }
+    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); state.trendlineMonitorPending=false; renderTrendlineMonitor(response); await refreshTrendlinePlans(); }
     catch(err) {
-      try { state.trendlineMonitorStatus=await request('/api/trendline-plans/monitor/status',{cache:'no-store'}); } catch(_statusError) { /* Retain last confirmed state. */ }
+      try { state.trendlineMonitorStatus=await request('/api/trendline-plans/monitor/status',{cache:'no-store'}); await refreshTrendlinePlans(); } catch(_statusError) { /* Retain last confirmed state. */ }
       trendlineStatus('Monitoring request failed. Refresh status before trying again.');
     } finally { state.trendlineMonitorPending=false; renderTrendlineMonitor(state.trendlineMonitorStatus); }
   }
@@ -1028,18 +1028,19 @@
     if (!state.trendlinePlans.length) { list.innerHTML='<div class="muted">No local trendline plans saved.</div>'; return; }
     list.innerHTML=state.trendlinePlans.map((plan) => {
       let actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
+      if(plan.status==='armed' && plan.monitoring_eligible!==true) actions=`<button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button>`+actions;
       if(plan.can_delete===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Permanently delete this unused plan">Delete</button>`;
-      return `<div class="card"><strong>${escapeHtml(plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
+      return `<div class="card"><strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
     }).join('');
     list.querySelectorAll('[data-tl-action]').forEach((btn) => btn.addEventListener('click', () => trendlineAction(btn.dataset.tlAction, btn.dataset.tlId)));
   }
   async function refreshTrendlinePlans() {
     if (!state.trendlinePlansAvailable) return;
     const seq=++state.trendlineListRequestSeq;
-    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; renderTrendlinePlans(); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
+    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; if(typeof response.monitoring_active==='boolean') renderTrendlineMonitor({...state.trendlineMonitorStatus,running:response.monitoring_active}); renderTrendlinePlans(); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
   }
   async function saveTrendlinePlan() {
-    if (!state.trendlinePlansAvailable || state.trendlineMutationPending) return;
+    if (!state.trendlinePlansAvailable || state.trendlineMutationPending || state.trendlineMonitorPending) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true; const save=$('trendline-save'); if(save) save.disabled=true;
     try { const payload=trendlinePayload(); const response=state.trendlineEditId ? await request(`/api/trendline-plans/${encodeURIComponent(state.trendlineEditId)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}) : await post('/api/trendline-plans',payload); trendlineStatus(state.trendlineEditId ? 'Draft updated.' : 'Draft saved.'); resetTrendlineForm(); state.trendlinePlans=response.plan ? [response.plan,...state.trendlinePlans.filter((p)=>p.plan_id!==response.plan.plan_id)] : state.trendlinePlans; state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; if(save) save.disabled=false; }
   }
@@ -1104,7 +1105,8 @@
     syncTrendlineTriggerControls(); trendlineStatus(`Editing draft ${String(plan.plan_id).slice(0,8)}. All saved settings restored; Update draft explicitly.`);
   }
   async function trendlineAction(action, planId) {
-    if (state.trendlineMutationPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
+    if (state.trendlineMutationPending || state.trendlineMonitorPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
+    if (!plan) { trendlineStatus('Plan changed; refresh the list.'); return; }
     if(action==='edit') return editTrendlinePlan(plan);
     if(action==='delete') {
       if(!plan || plan.can_delete!==true) { trendlineStatus('This plan is protected from deletion. Refresh the list.');return; }
@@ -1129,7 +1131,7 @@
     const liveArm=action==='arm' && plan?.account==='live' && !plan?.test_trade;
     if(liveArm && (typeof confirm!=='function' || !confirm('Authorize and arm this live plan for local monitoring and execution?'))) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
-    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,liveArm?{confirm_live_execution:true}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; }
+    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,action==='arm'?{revision:plan.revision,monitor_generation:plan.monitor_generation,...(liveArm?{confirm_live_execution:true}:{})}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); await refreshTrendlinePlans(); } finally { state.trendlineMutationPending=false; }
   }
   function initializeTrendlinePlans() {
     const panel=trendlinePanel(); if(!panel) return;
@@ -1141,7 +1143,7 @@
     }));
     $('trendline-import-text')?.addEventListener('input',previewAnchorImport);
     $('trendline-import-apply')?.addEventListener('click',applyAnchorImport);
-    $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-start')?.addEventListener('click',()=>trendlineMonitor('start')); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
+    $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }
   function configureTrendlinePlans(bootstrap) {
     const panel=trendlinePanel(); if(!panel) return;

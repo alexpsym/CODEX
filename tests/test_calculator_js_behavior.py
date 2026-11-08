@@ -1024,20 +1024,20 @@ async function run(profile){
  const fetch=async(url,opts={})=>{
   const method=opts.method||'GET';calls.push({url,method,body:opts.body?JSON.parse(opts.body):null});
   if(url==='/api/calculator/bootstrap')return response({app_profile:profile,trendline_plans_available:profile==='local',trendline_monitoring:{running:false},webhook:{available:true}});
-  if(url.startsWith('/api/calculator/instrument?'))return response({symbol:'BTCUSDT'});
+  if(url.startsWith('/api/calculator/instrument?'))return response({symbol:'BTCUSDT',asset:'crypto',broker:'bybit'});
   if(url==='/api/trendline-plans/monitor/status')return response({ok:true,running});
   if(url.startsWith('/api/trendline-plans/monitor/')){
    if(fail){if(changeOnFailure)running=!running;return response({detail:'mock failure'},503);}
-   running=url.endsWith('/start');return response({ok:true,running});
+   running=url.endsWith('/start');plans.forEach(p=>p.monitoring_eligible=false);return response({ok:true,running});
   }
-  if(url==='/api/trendline-plans' && method==='GET')return response({ok:true,plans});
+  if(url==='/api/trendline-plans' && method==='GET')return response({ok:true,plans,monitoring_active:running});
   if(url==='/api/trendline-plans' && method==='POST'){
-   const p=JSON.parse(opts.body);plans=[{...p,plan_id:'plan-1',status:'draft',order_intent:p.order_type,action:p.side}];return response({ok:true,plan:plans[0]});
+   const p=JSON.parse(opts.body);plans=[{...p,plan_id:'plan-1',revision:1,monitor_generation:'session-1',status:'draft',order_intent:p.order_type,action:p.side,order_metadata:Object.fromEntries(['setup','pattern','ema','vwap','aths_atls','round_number'].map(k=>[k,p[k]||null]))}];return response({ok:true,plan:plans[0]});
   }
   if(url==='/api/trendline-plans/plan-1' && method==='PATCH'){
    plans[0]={...plans[0],...JSON.parse(opts.body)};return response({ok:true,plan:plans[0]});
   }
-  if(url==='/api/trendline-plans/plan-1/arm'){plans[0].status='armed';return response({ok:true,plan:plans[0]});}
+  if(url==='/api/trendline-plans/plan-1/arm'){plans[0].status='armed';plans[0].monitoring_eligible=true;running=true;if(fail)return response({detail:'lost arm response'},503);return response({ok:true,plan:plans[0],monitoring_active:true});}
   throw new Error('Unexpected request '+url);
  };
  // A VM does not inherit browser/Node web globals. Symbol resolution uses
@@ -1048,29 +1048,29 @@ async function run(profile){
  assert.equal(el['trendline-plans-panel'].style.display,'');
  el['calc-symbol'].listeners.input();await flush();
  assert(el['calc-canonical-symbol'].textContent.includes('BTCUSDT'),'Canonical resolution must complete before saving');
+ el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();
  el['order-toggle'].buttons.find(b=>b.dataset.v==='limit').click();
  el['calc-limit'].value='99.25';el['trendline-anchor-1-time'].value='2025-01-01T01:00';el['trendline-anchor-2-time'].value='2025-01-01T02:00';el['trendline-anchor-1-price'].value='100';el['trendline-anchor-2-price'].value='101';
  el['trendline-price-basis'].value='executable';
  const save=el['trendline-save'].click();el['trendline-save'].click();await save;
- assert.equal(calls.filter(c=>c.method==='POST' && c.url==='/api/trendline-plans').length,1);
+ assert.equal(calls.filter(c=>c.method==='POST' && c.url==='/api/trendline-plans').length,1,el['trendline-plan-status'].textContent);
  assert.equal(plans[0].limit_entry_price,'99.25');assert.equal(plans[0].order_intent,'limit');
  const action=name=>{const b=el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction===name);assert(b,'Missing action '+name);return b;};
  el['order-toggle'].buttons.find(b=>b.dataset.v==='market').click();el['calc-limit'].value='123';
  await action('edit').click();assert.equal(el['calc-limit'].value,'99.25');await el['trendline-save'].click();
  const patch=calls.find(c=>c.method==='PATCH');assert.equal(patch.body.limit_entry_price,'99.25');assert.equal(patch.body.order_type,'limit');
  await action('arm').click();assert(!calls.some(c=>c.url.endsWith('/arm')));
- confirmed=true;await action('arm').click();assert.deepEqual(calls.find(c=>c.url.endsWith('/arm')).body,{confirm_live_execution:true});
+ confirmed=true;await action('arm').click();assert.deepEqual(calls.find(c=>c.url.endsWith('/arm')).body,{confirm_live_execution:true,revision:1,monitor_generation:'session-1'});
+ assert(el['trendline-plan-list'].innerHTML.includes('Armed and monitoring'));
+ assert.equal(el['trendline-monitor-start'].listeners.click,undefined);
  assert(!calls.some(c=>c.url.includes('/monitor/') && c.method==='POST'));
- const controls=(startDisabled,stopDisabled)=>{assert.equal(el['trendline-monitor-start'].disabled,startDisabled);assert.equal(el['trendline-monitor-stop'].disabled,stopDisabled);};
- controls(false,true);
- const start=el['trendline-monitor-start'].click();el['trendline-monitor-start'].click();await start;controls(true,false);
- assert.equal(calls.filter(c=>c.url.endsWith('/monitor/start')).length,1);
- await el['trendline-monitor-stop'].click();controls(false,true);
- fail=true;await el['trendline-monitor-start'].click();controls(false,true);assert(el['trendline-plan-status'].textContent.includes('failed'));
- fail=false;await el['trendline-monitor-start'].click();controls(true,false);
- fail=true;await el['trendline-monitor-stop'].click();controls(true,false);
- changeOnFailure=true;await el['trendline-monitor-stop'].click();controls(false,true);
- assert(calls.filter(c=>c.url.endsWith('/monitor/status')).length===3);
+ await el['trendline-monitor-stop'].click();
+ assert(el['trendline-plan-list'].innerHTML.includes('Paused'));
+ fail=true;const pending=action('arm').click();action('arm').click();await pending;
+ assert(el['trendline-plan-list'].innerHTML.includes('Armed and monitoring'));
+ // Arm is the sole activation request. Stop refreshes the saved cards.
+ assert.equal(calls.filter(c=>c.url.endsWith('/arm')).length,2);
+ assert.equal(calls.filter(c=>c.url.endsWith('/monitor/start')).length,0);
  assert(!calls.some(c=>c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
 }
 (async()=>{await run('render');await run('local');console.log('ok');})().catch(e=>{console.error(e);process.exitCode=1;});

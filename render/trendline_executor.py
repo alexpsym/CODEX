@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+from uuid import uuid4
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
@@ -64,6 +65,35 @@ class TrendlinePlanExecutor:
     _cycle_guard: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     last_cycle: Optional[Dict[str, object]] = field(default=None, init=False)
     last_error: Optional[str] = field(default=None, init=False)
+    _control_guard: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _eligible: set[str] = field(default_factory=set, init=False)
+    generation: str = field(default_factory=lambda: uuid4().hex, init=False)
+
+    def eligible(self, plan_id: str) -> bool:
+        return plan_id in self._eligible
+
+    async def arm(self, plan_id: str, *, revision: int, generation: str, confirm_live: bool = False) -> Dict[str, object]:
+        async with self._control_guard:
+            if generation != self.generation:
+                raise TrendlinePlanError("Monitoring changed; refresh plans before Arm.")
+            existing = self.store.get(plan_id)
+            if type(revision) is not int or existing["revision"] != revision:
+                raise TrendlinePlanError("Plan changed; refresh plans before Arm.")
+            if existing["status"] not in {"draft", "armed"} or existing["trigger_claim"] is not None or self.eligible(plan_id):
+                raise TrendlinePlanError("Plan is already monitoring or cannot be armed.")
+            live = existing["account"] == "live" and not existing["test_trade"]
+            if live and confirm_live is not True:
+                raise TrendlinePlanError("Live non-test plans require explicit local execution confirmation.")
+            started = await self._start()
+            try:
+                plan = self.store.resume_and_arm(plan_id, expected_revision=revision, confirm_live=confirm_live, now_ms=self.now_ms())
+            except BaseException:
+                if started:
+                    await self._stop_worker()
+                raise
+            self._previous.pop(plan_id, None)
+            self._eligible.add(plan_id)
+            return plan
 
     def _reconciliation_status(self) -> Dict[str, object]:
         try:
@@ -76,18 +106,49 @@ class TrendlinePlanExecutor:
                 "reconciliation_message": "Unresolved claims require manual broker reconciliation; automatic retry is disabled." if count else None}
 
     def status(self) -> Dict[str, object]:
-        return {"running": self._task is not None and not self._task.done(), "last_cycle": self.last_cycle, "last_error": self.last_error,
+        return {"running": self._task is not None and not self._task.done(), "generation": self.generation, "last_cycle": self.last_cycle, "last_error": self.last_error,
                 **self._reconciliation_status()}
 
     async def start(self) -> bool:
+        async with self._control_guard:
+            return await self._start()
+
+    async def _start(self) -> bool:
         if self.status()["running"]:
             return False
         self._previous.clear()
         self._stop = asyncio.Event()
-        self._task = asyncio.create_task(self._run(), name="local-trendline-plan-executor")
+        worker = self._run()
+        try:
+            self._task = asyncio.create_task(worker, name="local-trendline-plan-executor")
+        except BaseException:
+            worker.close()
+            raise
+        try:
+            await asyncio.sleep(0)
+            if self._task.done():
+                self._task.result()
+                raise TrendlinePlanError("Monitoring worker did not start; plan remains inactive.")
+        except BaseException:
+            self._stop.set()
+            if not self._task.done():
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+            self._previous.clear()
+            self._eligible.clear()
+            raise
         return True
 
     async def stop(self) -> bool:
+        async with self._control_guard:
+            self.generation = uuid4().hex
+            self._eligible.clear()
+            return await self._stop_worker()
+
+    async def _stop_worker(self) -> bool:
         task = self._task
         if task is None or task.done():
             self._previous.clear()
@@ -109,6 +170,7 @@ class TrendlinePlanExecutor:
                     pass
         finally:
             self._previous.clear()
+            self._eligible.clear()
 
     async def cycle(self) -> Dict[str, object]:
         async with self._cycle_guard:
@@ -121,7 +183,7 @@ class TrendlinePlanExecutor:
         try:
             registry = self.store.load()
             for plan in registry["plans"].values():
-                if plan["status"] != "armed" or plan["trigger_claim"] is not None:
+                if not self.eligible(str(plan["plan_id"])) or plan["status"] != "armed" or plan["trigger_claim"] is not None:
                     continue
                 try:
                     plan_now = self.now_ms()
@@ -145,6 +207,8 @@ class TrendlinePlanExecutor:
 
     async def _evaluate_one(self, plan: Mapping[str, object]) -> None:
         plan_id = str(plan["plan_id"])
+        if not self.eligible(plan_id):
+            return
         if not plan["test_trade"] and not self.live_confirmed(plan):
             return
         if plan["order_intent"] == "limit" and not plan.get("limit_entry_price"):
@@ -187,6 +251,8 @@ class TrendlinePlanExecutor:
         if not fresh["test_trade"] and not self.live_confirmed(fresh):
             return
         claim_now = self.now_ms()
+        if not self.eligible(plan_id):
+            return
         validate_quote(final_quote, str(plan["instrument"]), claim_now, int(plan["max_quote_age_ms"]))
         if fresh["expiry_at_ms"] is not None and claim_now >= int(fresh["expiry_at_ms"]):
             return

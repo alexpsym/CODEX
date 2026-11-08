@@ -7,6 +7,38 @@ from render.trendline_executor import TrendlinePlanExecutor
 from render.trendline_plans import TrendlinePlanStore
 
 
+def _run_fixture_loop(coroutine):
+    """Existing single-thread fixture harness: real tasks/locks, no socket self-pipe."""
+    import selectors
+    import time
+    class FixtureSelector(selectors.SelectSelector):
+        def select(self, timeout=None):
+            if not self.get_map():
+                if timeout:
+                    time.sleep(timeout)
+                return []
+            return super().select(timeout)
+    class FixtureLoop(asyncio.SelectorEventLoop):
+        def _make_self_pipe(self):
+            self._ssock = self._csock = None
+        def _close_self_pipe(self):
+            pass
+        def _write_to_self(self):
+            pass
+    loop = FixtureLoop(FixtureSelector())
+    try:
+        return loop.run_until_complete(coroutine)
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+def _selected_fixture_executor(*args, **kwargs):
+    executor = TrendlinePlanExecutor(*args, **kwargs)
+    executor._eligible.update(p["plan_id"] for p in executor.store.load()["plans"].values() if p["status"] == "armed")
+    return executor
+
+
 def _payload(broker: str, *, test_trade: bool = False) -> dict:
     return {
         "broker": broker, "account": "demo", "instrument": "BTCUSDT" if broker == "bybit" else "USD_JPY",
@@ -28,7 +60,7 @@ def test_trendline_executor_fresh_claim_recalculation_and_one_submission(tmp_pat
     async def quote(_plan): return {"instrument": plan["instrument"], "timestamp_ms": 2500, "bid": "99.9", "ask": "100", "tick_size": "0.1"}
     async def calculate(_plan, fresh_quote): calls["calculate"] += 1; assert fresh_quote["timestamp_ms"] == 2500; return {"entry_price": "100", "stop_loss_price": "99", "take_profit_price": "102", "quantity": "1", "trigger_quote": fresh_quote}
     async def submit(_plan, calc, key): calls["submit"] += 1; assert calc["take_profit_price"] == "102" and key; return {"accepted": True, "order_id": "one"}
-    executor = TrendlinePlanExecutor(store, quote, calculate, submit, lambda _p: True, now_ms=lambda: 2500)
+    executor = _selected_fixture_executor(store, quote, calculate, submit, lambda _p: True, now_ms=lambda: 2500)
     asyncio.run(executor.cycle())
     final = store.get(plan["plan_id"])
     assert final["status"] == "submitted" and final["execution_result"]["outcome"] == "executed"
@@ -45,7 +77,7 @@ def test_trendline_executor_rejects_stale_and_simulates_test_without_submission(
     async def quote(plan): return {"instrument": plan["instrument"], "timestamp_ms": 1 if plan["plan_id"] == stale["plan_id"] else 2500, "bid": "99.9", "ask": "100", "tick_size": "0.1"}
     async def calculate(_plan, quote): return {"quantity": "1", "trigger_quote": quote}
     async def submit(*_args): submitted.append(True); return {}
-    executor = TrendlinePlanExecutor(store, quote, calculate, submit, lambda _p: False, now_ms=lambda: 2500)
+    executor = _selected_fixture_executor(store, quote, calculate, submit, lambda _p: False, now_ms=lambda: 2500)
     asyncio.run(executor.cycle())
     assert store.get(stale["plan_id"])["status"] == "armed"
     assert store.get(test["plan_id"])["status"] == "submitted"
@@ -86,7 +118,7 @@ def test_executor_final_snapshot_outcomes_and_authorization(tmp_path: Path, monk
             counters["submit"] += 1
             if error: raise error
             return result if result is not None else {"accepted": True, "order_id": "oanda-101"}
-        executor = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda: now[0])
+        executor = _selected_fixture_executor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda: now[0])
         await executor.cycle()  # Establish the actual pre-candidate observation.
         assert counters == {"quote": 1, "calculate": 0, "submit": 0}
         await executor.cycle()
@@ -137,7 +169,7 @@ def test_executor_final_snapshot_outcomes_and_authorization(tmp_path: Path, monk
             return snapshot()
         async def calculate(p, q): return {"trigger_quote":q}
         async def forbidden(*args): raise AssertionError("No POST")
-        executor = TrendlinePlanExecutor(store, quote, calculate, forbidden, live_execution_authorized, now_ms=lambda:3000)
+        executor = _selected_fixture_executor(store, quote, calculate, forbidden, live_execution_authorized, now_ms=lambda:3000)
         await executor.cycle()
         assert store.get(good["plan_id"])["status"] == "submitted"
         assert executor.last_error == "EXECUTOR_ERROR: Local validation or broker operation failed."
@@ -178,7 +210,7 @@ def test_executor_restart_reconnect_submission_cancellation_and_duplicates(tmp_p
             self.calls = {"quote":0, "calculate":0, "submit":0}
             self.executor = self.build()
         def build(self):
-            return TrendlinePlanExecutor(self.store, self.quote, self.calculate, self.submit, live_execution_authorized, now_ms=lambda:self.now)
+            return _selected_fixture_executor(self.store, self.quote, self.calculate, self.submit, live_execution_authorized, now_ms=lambda:self.now)
         def snapshot(self):
             return {"instrument":"USD_JPY", "bid":str(Decimal(self.price)-Decimal("0.1")), "ask":self.price, "tick_size":"0.1", "timestamp_ms":self.now}
         async def quote(self, plan):
@@ -238,6 +270,7 @@ def test_executor_restart_reconnect_submission_cancellation_and_duplicates(tmp_p
             f.executor._previous["stub"] = {}
             assert await f.executor.stop() and not f.executor._previous
             assert not await f.executor.stop()
+            f.executor._eligible.add(f.plan["plan_id"])  # Explicitly resume this trigger fixture only.
             await f.step(3200, "99")
             assert f.calls["submit"] == 0
             await f.step(3300, "101")
@@ -374,7 +407,7 @@ def test_phase11_terminal_timestamps_and_durable_reconciliation_status(tmp_path,
                 if registry["plans"][pid]["status"] == "submitting": raise TrendlinePlanPersistenceError("private disk failure")
                 original_write(registry)
             monkeypatch.setattr(store, "_write", fail_submitting)
-        executor = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda:now[0])
+        executor = _selected_fixture_executor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda:now[0])
         if mode in {"simulation", "persistence"}:
             await executor.cycle()
             assert not calls
@@ -417,7 +450,7 @@ def test_phase11_terminal_timestamps_and_durable_reconciliation_status(tmp_path,
                 final = store.resolve_claim(pid, status=state, outcome={"outcome":"executed" if state=="submitted" else state}, now_ms=0)
                 assert_time(final, 4000, terminal=True)
         async def forbidden(*a): raise AssertionError("No adapter may be invoked")
-        executor = TrendlinePlanExecutor(TrendlinePlanStore(store.path), forbidden, forbidden, forbidden, live_execution_authorized)
+        executor = _selected_fixture_executor(TrendlinePlanStore(store.path), forbidden, forbidden, forbidden, live_execution_authorized)
         assert executor.last_cycle is None
         status = executor.status()
         assert not status["running"] and status["reconciliation_required"] == 3
@@ -448,3 +481,128 @@ def test_phase11_terminal_timestamps_and_durable_reconciliation_status(tmp_path,
                 store.update(pid, {"rr_target":"3"}, now_ms=3000)
                 assert_time(getattr(store, transition)(pid, now_ms=0), 3000)
     asyncio.run(run())
+
+
+def test_arm_selected_monitor_session_and_submission_guards(tmp_path, monkeypatch):
+    from render.trendline_plans import TrendlinePlanError, live_execution_authorized
+
+    async def run():
+        store = TrendlinePlanStore(tmp_path / "selected.json")
+        drafts = [store.create({**_payload("bybit", test_trade=i == 2), "account": "live" if i == 1 else "demo"}, now_ms=1000) for i in range(3)]
+        calls = []
+        async def quote(p):
+            calls.append(("quote", p["plan_id"]))
+            return {"instrument": p["instrument"], "timestamp_ms": 2500, "bid": "99.9", "ask": "100", "tick_size": "0.1"}
+        async def calculate(p, q): return {"trigger_quote": q}
+        async def submit(p, c, key):
+            calls.append(("submit", p["plan_id"]))
+            return {"accepted": True, "order_id": "only-one"}
+        e = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda: 2500)
+        async def idle(): await e._stop.wait()
+        monkeypatch.setattr(e, "_run", idle)
+        await e.cycle()
+        assert calls == []  # Drafts remain inert.
+        d = drafts[0]; generation = e.generation
+        async def arm(d, confirm=False, gen=None):
+            return await e.arm(d["plan_id"], revision=d["revision"], generation=gen or e.generation, confirm_live=confirm)
+        results = await asyncio.gather(arm(d), arm(d), return_exceptions=True)
+        assert sum(isinstance(x, dict) for x in results) == 1
+        assert sum(isinstance(x, TrendlinePlanError) for x in results) == 1
+        task = e._task
+        e._previous[d["plan_id"]] = {"sentinel": True}
+        with pytest.raises(TrendlinePlanError): await arm(drafts[1])
+        assert store.get(drafts[1]["plan_id"]) == drafts[1]
+        await arm(drafts[1], True)
+        assert e._task is task and e._previous[d["plan_id"]] == {"sentinel": True}
+        await e.stop()
+        paused = store.get(d["plan_id"])
+        with pytest.raises(TrendlinePlanError): await arm(paused, gen=generation)
+        assert not e.status()["running"] and not e._eligible
+        await e.start()  # Internal compatibility never resumes plans.
+        await e.cycle()
+        assert calls == []
+        await arm(paused)
+        assert not e._previous and not e.eligible(drafts[1]["plan_id"])
+        await e.cycle(); await e.cycle()
+        assert calls.count(("submit", d["plan_id"])) == 1
+        assert store.get(d["plan_id"])["execution_key"] == d["execution_key"]
+        await arm(drafts[2]); await e.cycle()
+        assert store.get(drafts[2]["plan_id"])["execution_result"]["outcome"] == "simulated"
+        assert not any(k == "submit" and v == drafts[2]["plan_id"] for k,v in calls)
+        await e.stop()
+        reconstructed = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda:2500)
+        before = list(calls); await reconstructed.cycle(); assert calls == before
+        # Startup failure and durable write failure preserve the inactive revision.
+        fresh = store.create(_payload("bybit"), now_ms=1000)
+        async def fail(): raise RuntimeError("startup failed")
+        monkeypatch.setattr(e, "_start", fail)
+        with pytest.raises(RuntimeError): await arm(fresh)
+        assert store.get(fresh["plan_id"]) == fresh and not e.eligible(fresh["plan_id"])
+        # A Stop during final calculation invalidates the candidate before claim.
+        monkeypatch.undo()
+        e2 = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda:2500)
+        async def idle2(): await e2._stop.wait()
+        monkeypatch.setattr(e2, "_run", idle2)
+        await e2.arm(fresh["plan_id"], revision=fresh["revision"], generation=e2.generation)
+        async def stopping(p,q):
+            await e2.stop()
+            return {"trigger_quote":q}
+        e2.calculate=stopping
+        await e2.cycle()
+        assert store.get(fresh["plan_id"])["trigger_claim"] is None
+        # Actual worker startup and write rollback, with no adapter or live store.
+        real_store = TrendlinePlanStore(tmp_path / "worker.json")
+        inactive = real_store.create(_payload("bybit", test_trade=True), now_ms=1000)
+        real_calls = []
+        async def real_quote(p):
+            real_calls.append(p["plan_id"])
+            return {"instrument": p["instrument"], "timestamp_ms":3000,"bid":"98.9","ask":"99","tick_size":"0.1"}
+        real = TrendlinePlanExecutor(real_store, real_quote, calculate, submit, live_execution_authorized, now_ms=lambda:3000, interval_seconds=0.01)
+        async def dead_worker(): raise RuntimeError("startup failed")
+        with monkeypatch.context() as patch:
+            patch.setattr(real, "_run", dead_worker)
+            with pytest.raises(RuntimeError):
+                await real.arm(inactive["plan_id"], revision=inactive["revision"], generation=real.generation)
+        assert not real.status()["running"] and real_store.get(inactive["plan_id"]) == inactive
+        with monkeypatch.context() as patch:
+            def cannot_schedule(*args, **kwargs): raise RuntimeError("cannot schedule")
+            patch.setattr(asyncio, "create_task", cannot_schedule)
+            with pytest.raises(RuntimeError):
+                await real.arm(inactive["plan_id"], revision=inactive["revision"], generation=real.generation)
+        assert not real.status()["running"] and real_store.get(inactive["plan_id"]) == inactive
+        original_bytes = real_store.path.read_bytes()
+        with monkeypatch.context() as patch:
+            patch.setattr(real_store, "_write", lambda *a: (_ for _ in ()).throw(RuntimeError("disk")))
+            with pytest.raises(RuntimeError):
+                await real.arm(inactive["plan_id"], revision=inactive["revision"], generation=real.generation)
+        assert real_store.path.read_bytes() == original_bytes and not real.status()["running"] and real_calls == []
+        armed = await real.arm(inactive["plan_id"], revision=inactive["revision"], generation=real.generation)
+        worker = real._task
+        await real.cycle()
+        assert real_calls == [inactive["plan_id"]]
+        await real.stop()
+        assert worker.done() and not real._previous and not real._eligible
+        # Cross needs new ordered observations after Stop, even on the same worker object.
+        cross = real_store.create({**_payload("bybit", test_trade=True),"trigger_mode":"confirmed_cross"}, now_ms=1000)
+        prices = iter([(3100,"99"),(3200,"101"),(3300,"99")]); clock=[3100]
+        async def cross_quote(p):
+            from decimal import Decimal
+            stamp, price = next(prices); clock[0]=stamp
+            return {"instrument":p["instrument"],"timestamp_ms":stamp,"bid":str(Decimal(price)-Decimal("0.1")),"ask":price,"tick_size":"0.1"}
+        real.quote=cross_quote;real.now_ms=lambda:clock[0]
+        # A controlled loop prevents background ticks consuming this ordered fixture.
+        async def idle_real(): await real._stop.wait()
+        with monkeypatch.context() as patch:
+            patch.setattr(real, "_run", idle_real)
+            active=await real.arm(cross["plan_id"],revision=cross["revision"],generation=real.generation)
+            await real.cycle()
+            assert cross["plan_id"] in real._previous
+            await real.stop()
+            await real.arm(cross["plan_id"],revision=active["revision"],generation=real.generation)
+            await real.cycle()  # First price above line must seed, not cross old below-line sample.
+            assert real_store.get(cross["plan_id"])["trigger_claim"] is None
+            await real.cycle()
+            assert real_store.get(cross["plan_id"])["execution_result"]["outcome"] == "simulated"
+            assert not real.eligible(inactive["plan_id"])
+            await real.stop()
+    _run_fixture_loop(run())

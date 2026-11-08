@@ -3151,9 +3151,18 @@ def test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation
     assert posts == []
 
 
+def _trendline_route_fixture_executor(store):
+    executor = master_service.TrendlinePlanExecutor(store, lambda *a: {}, lambda *a: {}, lambda *a: {}, master_service.live_execution_authorized)
+    async def idle(): await executor._stop.wait()
+    executor._run = idle
+    return executor
+
+
 def test_local_trendline_plan_crud_is_profile_gated_and_preserves_calculator_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = master_service.TrendlinePlanStore(tmp_path / "trendline_plans.json")
     monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+    executor = _trendline_route_fixture_executor(store)
+    monkeypatch.setattr(master_service, "TRENDLINE_EXECUTOR", executor)
 
     async def forbidden_external(*_args, **_kwargs):
         raise AssertionError("Trendline CRUD must not call external services")
@@ -3189,7 +3198,7 @@ def test_local_trendline_plan_crud_is_profile_gated_and_preserves_calculator_fie
 
     updated = json.loads(asyncio.run(master_service.trendline_plan_update(created["plan_id"], {"tolerance_ticks": 3, "risk_value": "1.5"})).body.decode("utf-8"))["plan"]
     assert updated["tolerance_ticks"] == 3 and updated["risk_value"] == "1.5" and updated["instrument"] == "USD_JPY"
-    armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"])).body.decode("utf-8"))["plan"]
+    armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"], {"revision":updated["revision"],"monitor_generation":executor.generation})).body.decode("utf-8"))["plan"]
     assert armed["status"] == "armed"
     with pytest.raises(master_service.HTTPException) as exc:
         asyncio.run(master_service.trendline_plan_update(created["plan_id"], {"tolerance_ticks": 4}))
@@ -3197,7 +3206,7 @@ def test_local_trendline_plan_crud_is_profile_gated_and_preserves_calculator_fie
     cancelled = json.loads(asyncio.run(master_service.trendline_plan_cancel(created["plan_id"])).body.decode("utf-8"))["plan"]
     assert cancelled["status"] == "cancelled"
     with pytest.raises(master_service.HTTPException) as exc:
-        asyncio.run(master_service.trendline_plan_arm(created["plan_id"]))
+        asyncio.run(master_service.trendline_plan_arm(created["plan_id"], {"revision":updated["revision"],"monitor_generation":executor.generation}))
     assert exc.value.status_code == 409
 
     bad_pair = dict(payload, asset="crypto", broker="oanda", instrument="BTCUSDT")
@@ -3320,6 +3329,8 @@ def test_local_trendline_executor_start_stop_status_is_profile_gated(monkeypatch
 def test_trendline_final_calculator_snapshot_and_literal_live_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = master_service.TrendlinePlanStore(tmp_path / "plans.json")
     monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+    executor = _trendline_route_fixture_executor(store)
+    monkeypatch.setattr(master_service, "TRENDLINE_EXECUTOR", executor)
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     calls = []
     async def fake_quote(payload):
@@ -3333,7 +3344,7 @@ def test_trendline_final_calculator_snapshot_and_literal_live_arm(tmp_path: Path
     created = json.loads(asyncio.run(master_service.trendline_plan_create(payload)).body)["plan"]
     for invalid in ({}, {"confirm_live_execution": False}, {"confirm_live_execution": "true"}):
         with pytest.raises(master_service.HTTPException): asyncio.run(master_service.trendline_plan_arm(created["plan_id"], invalid))
-    armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"], {"confirm_live_execution": True})).body)["plan"]
+    armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"], {"confirm_live_execution": True,"revision":created["revision"],"monitor_generation":executor.generation})).body)["plan"]
     assert armed["live_authorization"]["execution_key"] == armed["execution_key"] and armed["live_authorization"]["plan_revision"] == armed["revision"]
 
 
@@ -4382,3 +4393,49 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
                     assert D(preset["TP_PriceDistance"]) == tick
     contexts = master_service._load_trade_contexts()
     assert any(row.get("planned_quantity_estimate") and row.get("original_target_distance") for row in contexts)
+
+
+def test_arm_route_selected_revision_and_monitoring_view(tmp_path, monkeypatch):
+    from render.trendline_executor import TrendlinePlanExecutor
+    from render.trendline_plans import live_execution_authorized
+    from test_trendline_executor import _payload, _run_fixture_loop
+    store = master_service.TrendlinePlanStore(tmp_path / "route.json")
+    e = TrendlinePlanExecutor(store, lambda p: {}, lambda p,q: {}, lambda *a: {}, live_execution_authorized, now_ms=lambda:2500)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+    monkeypatch.setattr(master_service, "TRENDLINE_EXECUTOR", e)
+    async def idle(): await e._stop.wait()
+    monkeypatch.setattr(e, "_run", idle)
+    assert 'id="trendline-monitor-start"' not in master_service.CALCULATOR_TEMPLATE
+    assert 'Arm starts watching' in master_service.CALCULATOR_TEMPLATE
+    async def run():
+        d=store.create({**_payload("bybit"), "account":"live"}, now_ms=1000)
+        args={"revision":d["revision"], "monitor_generation":e.generation}
+        with pytest.raises(master_service.HTTPException): await master_service.trendline_plan_arm(d["plan_id"], args)
+        assert store.get(d["plan_id"]) == d
+        response=json.loads((await master_service.trendline_plan_arm(d["plan_id"], {**args,"confirm_live_execution":True})).body)
+        assert response["monitoring_active"] and response["plan"]["monitoring_eligible"]
+        with pytest.raises(master_service.HTTPException): await master_service.trendline_plan_arm(d["plan_id"], {**args,"confirm_live_execution":True})
+        await master_service.trendline_monitor_stop()
+        response=json.loads((await master_service.trendline_plan_list()).body)
+        assert not response["plans"][0]["monitoring_eligible"]
+        assert response["plans"][0]["monitor_generation"] != args["monitor_generation"]
+        # The same confirmed payload cannot be rebound to a changed revision.
+        fresh=store.create({**_payload("bybit"),"account":"live"},now_ms=1000)
+        stale={"revision":fresh["revision"],"monitor_generation":e.generation,"confirm_live_execution":True}
+        changed=store.update(fresh["plan_id"],{"rr_target":"3"},now_ms=2000)
+        with pytest.raises(master_service.HTTPException): await master_service.trendline_plan_arm(fresh["plan_id"],stale)
+        assert store.get(fresh["plan_id"]) == changed
+        with monkeypatch.context() as patch:
+            patch.setattr(master_service,"APP_PROFILE","render")
+            with pytest.raises(master_service.HTTPException) as denied:
+                await master_service.trendline_plan_arm(fresh["plan_id"],stale)
+            assert denied.value.status_code == 410
+        async def fail_worker(): raise RuntimeError("watcher failed")
+        with monkeypatch.context() as patch:
+            patch.setattr(e,"_run",fail_worker)
+            with pytest.raises(master_service.HTTPException) as failed:
+                await master_service.trendline_plan_arm(fresh["plan_id"],{**stale,"revision":changed["revision"]})
+            assert failed.value.status_code == 409
+        assert store.get(fresh["plan_id"]) == changed and not e.status()["running"]
+    _run_fixture_loop(run())
