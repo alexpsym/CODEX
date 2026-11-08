@@ -23299,6 +23299,9 @@ def _price_reason(row, raw):
 
 
 def _enrich_price_edit(row):
+    if row.get("trendline_local"):
+        row["price_edit"] = {"fields": [], "reason": "No confirmed broker object"}
+        return row
     raw = row.get("_price_broker") or {}
     if row.get("broker") != "Bybit" or not raw:
         # Unrelated brokers/old cache rows keep their original displayed prices.
@@ -30797,6 +30800,8 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
+    if {"display_snapshot", "submission_refs"}.intersection(payload):
+        raise TrendlinePlanError("Display and submission records are server-owned.")
     forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
     if attempted:
@@ -30880,6 +30885,44 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
     }
 
 
+def _trendline_saved_display(payload, plan):
+    """Copy an exact existing server calculation; never calculate for display."""
+    identity = str(payload.get("calculation_context_id") or "")
+    if not identity:
+        return None
+    candidates = list(_load_calculator_trade_contexts())
+    if plan["broker"] == "bybit" and plan["account"] == "demo" and _calc_context_uses_repo_local():
+        candidates += _load_json_file(BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH, {}).get("items", [])
+    for ctx in candidates:
+        if str(ctx.get("calculation_context_id") or "") != identity:
+            continue
+        pairs = {"broker": "broker", "account": "account", "instrument": "instrument", "side": "action",
+                 "order_type": "order_intent", "risk_mode": "risk_mode"}
+        if any(str(ctx.get(a) or "").lower() != str(plan.get(b) or "").lower() for a, b in pairs.items()):
+            continue
+        if str(ctx.get("category") or "").lower() != ("linear" if plan["broker"] == "bybit" else "forex"):
+            continue
+        if ctx.get("is_test_trade") is not plan["test_trade"]:
+            continue
+        if _normalize_journal_timeframe(ctx.get("timeframe")) != _normalize_journal_timeframe(plan.get("timeframe")):
+            continue
+        try:
+            if any(Decimal(str(ctx.get(a))) != Decimal(str(plan[b])) for a, b in
+                   (("risk_value", "risk_value"), ("stop_loss_ticks", "stop_loss_ticks"), ("risk_reward", "rr_target"))):
+                continue
+            result = ctx.get("quote_result") or {}
+            values = {key: result.get(key, result.get({"stop_price": "stop_loss_price", "target_price": "take_profit_price"}.get(key, key), ctx.get("planned_" + key if key != "quantity" else "quantity")))
+                      for key in ("quantity", "entry_price", "stop_price", "target_price")}
+            if plan["order_intent"] == "limit" and Decimal(str(values["entry_price"])) != Decimal(str(plan["limit_entry_price"])):
+                continue
+            values = {key: str(value) for key, value in values.items() if value is not None
+                      and Decimal(str(value)).is_finite() and Decimal(str(value)) > 0}
+            return dict(values, calculation_context_id=identity)
+        except (ArithmeticError, ValueError, TypeError):
+            continue
+    return None
+
+
 def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]:
     return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan), latest_evaluation=TRENDLINE_EXECUTOR.latest_evaluations.get(str(plan["plan_id"])), monitor_generation=TRENDLINE_EXECUTOR.generation,
                 monitoring_eligible=TRENDLINE_EXECUTOR.eligible(str(plan["plan_id"])) and bool(TRENDLINE_EXECUTOR.status()["running"]))
@@ -30905,7 +30948,8 @@ async def trendline_plan_list() -> JSONResponse:
 async def trendline_plan_create(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
     _trendline_plans_require_local()
     try:
-        plan = TRENDLINE_PLAN_STORE.create(_trendline_plan_payload(payload))
+        settings = _trendline_plan_payload(payload)
+        plan = TRENDLINE_PLAN_STORE.create(settings, display_snapshot=_trendline_saved_display(payload, settings))
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc)
@@ -30939,7 +30983,10 @@ async def trendline_plan_update(plan_id: str, payload: Dict[str, object] = Body(
             "rr_target": existing["rr_target"], "timeframe": existing["timeframe"], **existing["order_metadata"],
         }
         client_base.update(payload)
-        plan = TRENDLINE_PLAN_STORE.update(plan_id, _trendline_plan_payload(client_base))
+        settings = _trendline_plan_payload(client_base)
+        pointer = dict(client_base)
+        pointer.setdefault("calculation_context_id", (existing.get("display_snapshot") or {}).get("calculation_context_id"))
+        plan = TRENDLINE_PLAN_STORE.update(plan_id, settings, display_snapshot=_trendline_saved_display(pointer, settings))
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
@@ -37739,6 +37786,8 @@ async def open_orders_version() -> JSONResponse:
 
 
 def _open_orders_row_identity(row):
+    if row.get("display_id") and row.get("trendline_plan_id"):
+        return ("trendline", str(row["display_id"]))
     return tuple(str(row.get(key) or "") for key in (
         "broker", "account", "account_id", "category", "instrument", "type", "id", "position_idx", "order_link_id"))
 
@@ -38543,7 +38592,7 @@ class _OpenOrdersJob:
             return
         payload.update({"sources": coverage, "pending": self.pending, "core_complete": core_complete,
                         "reference_price_sources": reference_diagnostics,
-                        "empty_confirmed": core_complete and not items, "stale": not core_complete or bool(errors),
+                        "empty_confirmed": core_complete and not payload["items"], "stale": not core_complete or bool(errors),
                         "collection_version": self.version})
         # Revisions describe publications, never invalidate the broker generation.
         comparable = {key: value for key, value in payload.items() if key not in {"updated_at", "last_success_at"}}
@@ -38647,12 +38696,112 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
     return JSONResponse(await service.snapshot(deliberate=force is True))
 
 
+def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None):
+    """Overlay durable plan identities only on uniquely proven broker objects."""
+    if plans is None:
+        if APP_PROFILE != "local":
+            return items
+        plans = TRENDLINE_PLAN_STORE.load()["plans"].values()
+    executor = executor or TRENDLINE_EXECUTOR
+    contexts = _load_calculator_trade_contexts() if contexts is None else contexts
+    projected, matches = [], {}
+    for plan in plans:
+        state = plan["status"]
+        if state in {"draft", "cancelled", "expired"}:
+            continue
+        result = plan.get("execution_result") or {}
+        snapshot = plan.get("display_snapshot") or result.get("calculated") or {}
+        refs = dict(plan.get("submission_refs") or {})
+        refs.update(result.get("references") or {})
+        refs["order_id"] = result.get("order_id") or refs.get("order_id")
+        refs["order_link_id"] = refs.get("order_link_id") or plan["execution_key"]
+        scope = {"broker": plan["broker"], "account": plan["account"], "instrument": plan["instrument"],
+                 "side": plan["action"], "category": "linear" if plan["broker"] == "bybit" else "forex"}
+        linked = [ctx for ctx in contexts if refs.get("calculation_context_id")
+                  and ctx.get("calculation_context_id") == refs["calculation_context_id"]
+                  and _context_scope_compatible(scope, ctx)
+                  and all(str(ctx.get(k) or "").lower() == str(scope[k]).lower() for k in ("broker", "account", "instrument", "category"))
+                  and (not refs.get("order_id") or str(ctx.get("order_id") or "") == str(refs["order_id"]))]
+        if len(linked) == 1:
+            if str(linked[0].get("status") or "").lower() in {"closed", "cancelled", "canceled"}:
+                continue
+            for key in ("trade_id", "account_id", "position_idx"):
+                if linked[0].get(key) is not None:
+                    refs.setdefault(key, linked[0][key])
+        label = state.capitalize()
+        if state in {"armed", "disabled"}:
+            label = "Armed" if state == "armed" and executor.status()["running"] and executor.eligible(plan["plan_id"]) else "Paused"
+        if result.get("outcome") == "simulated":
+            label = "Simulated"
+        elif state == "submitted":
+            label = "Submitted; awaiting broker visibility"
+        elif state == "uncertain":
+            label = "Uncertain; manual reconciliation required"
+        row = dict(scope, broker=plan["broker"].title(), venue=plan["broker"].title(),
+                   display_id=f"trendline:{plan['broker']}:{plan['account']}:{plan['plan_id']}",
+                   trendline_plan_id=plan["plan_id"], execution_key=plan["execution_key"],
+                   trendline_local=True, type="Trendline plan", status=label, id=None,
+                   asset="crypto" if plan["broker"] == "bybit" else "fx", order_type=plan["order_intent"],
+                   timeframe=plan["timeframe"], is_test_trade="Yes" if plan["test_trade"] else "No",
+                   risk_mode_display=plan["risk_mode"], risk_value_display=plan["risk_value"],
+                   stop_loss_ticks=plan["stop_loss_ticks"], risk_reward=plan["rr_target"], target_mode_display="R",
+                   size=snapshot.get("quantity"), quantity_is_estimate=True,
+                   planned_entry_price=snapshot.get("entry_price"), planned_stop_price=snapshot.get("stop_price"),
+                   planned_target_price=snapshot.get("target_price"), classification_target=None,
+                   classification_unavailable="No confirmed broker object", **plan["order_metadata"])
+        candidates = []
+        if not plan["test_trade"] and state in {"submitting", "submitted", "uncertain"}:
+            for index, native in enumerate(items):
+                if not _context_scope_compatible(dict(scope, **{k: refs[k] for k in ("account_id", "position_idx") if k in refs}), native):
+                    continue
+                if any(str(native.get(k) or "").lower() != str(scope[k]).lower() for k in ("broker", "account", "category", "instrument")) or _normalize_side_for_comparison(native.get("side")) != plan["action"]:
+                    continue
+                kind = str(native.get("type") or "").lower()
+                proven = False
+                if kind == "order":
+                    proven = bool(refs.get("order_id") and str(native.get("id")) == str(refs["order_id"])) or bool(native.get("order_link_id") and native["order_link_id"] == refs["order_link_id"])
+                    if refs.get("order_id") and str(native.get("id")) != str(refs["order_id"]):
+                        proven = False
+                    if refs.get("order_id") and native.get("order_link_id") and native["order_link_id"] != refs["order_link_id"]:
+                        proven = False
+                elif kind in {"position", "trade"}:
+                    if plan["broker"] == "bybit":
+                        raw = native.get("raw_refs") or {}
+                        proven = bool(refs.get("order_id")) and raw.get("order_ids_complete") is True and set(map(str, raw.get("order_ids") or [])) == {str(refs["order_id"])}
+                    else:
+                        proven = bool(refs.get("trade_id")) and str(native.get("trade_id") or native.get("id")) == str(refs["trade_id"])
+                if proven:
+                    candidates.append(index)
+        projected.append((row, candidates))
+        for index in candidates:
+            matches[index] = matches.get(index, 0) + 1
+    consumed, rows = set(), []
+    for row, candidates in projected:
+        if len(candidates) == 1 and matches[candidates[0]] == 1:
+            index = candidates[0]
+            native = items[index]
+            merged = dict(row, **native)
+            merged.update(display_id=row["display_id"], trendline_plan_id=row["trendline_plan_id"], trendline_local=False,
+                          quantity_is_estimate=False)
+            rows.append(merged)
+            consumed.add(index)
+        else:
+            if candidates:
+                row["status"] += "; reconciliation unresolved"
+            rows.append(row)
+    return [item for index, item in enumerate(items) if index not in consumed] + rows
+
+
 def _open_orders_payload(items, errors, warnings, collection_version, coverage_complete=False):
+    live_broker_items = [row for row in items if not row.get("local_tracking")]
+    try:
+        items = _trendline_dashboard_rows(items)
+    except (TrendlinePlanError, OSError):
+        warnings = list(warnings) + [{"broker": "Trendline", "message": "Saved plan display unavailable; broker rows retained."}]
     for row in items:
         _enrich_price_edit(row)
     items.sort(key=lambda row: (0 if str(row.get("broker")).lower() == "oanda" else 1,
                                 0 if row.get("account") == "live" else 1))
-    live_broker_items = [row for row in items if not row.get("local_tracking")]
     pending_diagnostics: Dict[str, int] = {}
     pending = _load_pending_webhooks()
     coverage_complete = coverage_complete and not errors and not warnings and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version

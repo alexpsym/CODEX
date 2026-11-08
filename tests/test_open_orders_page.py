@@ -6482,3 +6482,183 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
 """
     result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers), json.dumps(fixture)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# Job 2: isolated durable plan/dashboard contracts; no market or account IO.
+def _dashboard_plan_fixture(tmp_path, *, broker="bybit", test=False):
+    from render.trendline_plans import TrendlinePlanStore
+    from test_trendline_executor import _payload
+    store = TrendlinePlanStore(tmp_path / (broker + "-plans.json"))
+    settings = _payload(broker, test_trade=test)
+    plan = store.create(settings, display_snapshot={"calculation_context_id": "saved", "quantity": "2", "entry_price": "100", "stop_price": "99", "target_price": "102"}, now_ms=1000)
+    executor = type("Monitor", (), {"running": True, "selected": set(), "status": lambda self: {"running": self.running}, "eligible": lambda self, key: key in self.selected})()
+    def rows(items=(), contexts=()):
+        return master_service._trendline_dashboard_rows(list(items), plans=store.load()["plans"].values(), executor=executor, contexts=contexts)
+    return store, plan, executor, rows
+
+
+def test_trendline_dashboard_durable_lifecycle_and_server_snapshot(tmp_path, monkeypatch):
+    from render.trendline_plans import TrendlinePlanError, TrendlinePlanStore
+    store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path, test=True)
+    assert rows() == []
+    plan = store.arm(plan["plan_id"], now_ms=1500); monitor.selected.add(plan["plan_id"])
+    row = rows()[0]; key = row["display_id"]
+    assert row["status"] == "Armed" and row["planned_entry_price"] == "100" and row["size"] == "2"
+    assert row["trendline_local"] and row["id"] is None and row["is_test_trade"] == "Yes"
+    monitor.running = False
+    assert rows()[0]["status"] == "Paused" and rows()[0]["display_id"] == key
+    monitor.running = True
+    store.claim_trigger(plan["plan_id"], {"trigger_timestamp_ms": 2000, "trigger_price": "100", "trigger_kind": "touch"}, now_ms=2000)
+    assert rows()[0]["status"] == "Claimed"
+    store.resolve_claim(plan["plan_id"], status="submitted", outcome={"outcome": "simulated", "calculated": {"quantity": "3", "stop_loss_price": "98", "take_profit_price": "104"}}, now_ms=2001)
+    final = rows()[0]
+    assert final["display_id"] == key and final["status"] == "Simulated" and final["trendline_local"]
+    restored = TrendlinePlanStore(store.path).get(plan["plan_id"])
+    assert restored["execution_result"]["calculated"]["stop_price"] == "98"
+    ctx = dict(broker="bybit", account="demo", category="linear", instrument="BTCUSDT", side="buy", order_type="market", risk_mode="fixed_aud", risk_value="10", stop_loss_ticks=10, risk_reward="2", timeframe="1h", is_test_trade=True, calculation_context_id="saved", quote_result={"quantity":"2","entry_price":"100","stop_loss_price":"99","take_profit_price":"102"})
+    monkeypatch.setattr(master_service, "_load_calculator_trade_contexts", lambda: [ctx])
+    monkeypatch.setattr(master_service, "_calc_context_uses_repo_local", lambda: False)
+    assert master_service._trendline_saved_display({"calculation_context_id":"saved", "quantity":"999"}, restored)["quantity"] == "2"
+    ctx["risk_value"] = "11"
+    assert master_service._trendline_saved_display({"calculation_context_id":"saved"}, restored) is None
+    with pytest.raises(TrendlinePlanError):
+        master_service._trendline_plan_payload({"display_snapshot": {"quantity":"999"}})
+
+
+def test_trendline_dashboard_exact_broker_correlation_and_aggregation(tmp_path):
+    import copy
+    for broker in ("bybit", "oanda"):
+        store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path, broker=broker)
+        assert rows() == []
+        plan = store.arm(plan["plan_id"], now_ms=1500)
+        monitor.selected.add(plan["plan_id"])
+        armed = rows()[0]; assert armed["status"] == "Armed" and armed["size"] == "2"
+        monitor.running = False
+        paused = rows()[0]; assert paused["status"] == "Paused" and paused["display_id"] == armed["display_id"]
+        monitor.running = True
+        store.claim_trigger(plan["plan_id"], {"trigger_timestamp_ms":2000,"trigger_price":"100","trigger_kind":"touch"}, now_ms=2000)
+        store.begin_submission(plan["plan_id"], execution_key=plan["execution_key"], submission_refs={"calculation_context_id":"fresh", "order_link_id":plan["execution_key"], "account_id":"acct", "position_idx":0}, now_ms=2001)
+        store.resolve_claim(plan["plan_id"], status="submitted", outcome={"outcome":"executed","order_id":"order-1"}, now_ms=2002)
+        native = dict(broker=broker.title(), account="demo", account_id="acct", category="linear" if broker=="bybit" else "forex", instrument=plan["instrument"], side="Buy", type="Order", id="order-1", order_link_id=plan["execution_key"], position_idx=0, size="2", status="Pending", entry_price="100")
+        linked = dict(native, broker=broker, side="buy", calculation_context_id="fresh", order_id="order-1", trade_id="trade-1")
+        first = rows([native], [linked]); assert len(first)==1 and not first[0]["trendline_local"]
+        key=first[0]["display_id"]
+        position=dict(native, type="Position", id="position-1" if broker=="bybit" else "trade-1", status="Open", raw_refs={"order_ids_complete":True,"order_ids":["order-1"]}, funding_paid="4")
+        second=rows([position], [linked]); assert len(second)==1 and second[0]["display_id"]==key and second[0]["id"]==position["id"]
+        assert master_service._open_orders_row_identity(first[0])==master_service._open_orders_row_identity(second[0])
+        for changed in ({"account":"live"},{"side":"Sell"},{"account_id":"other"},{"position_idx":1},{"id":"unrelated", "raw_refs":{}}):
+            assert len(rows([dict(position,**changed)], [linked]))==2
+        if broker=="bybit":
+            aggregate=dict(position,raw_refs={"order_ids_complete":True,"order_ids":["order-1","other"]})
+            assert len(rows([aggregate],[linked]))==2
+            incomplete=dict(position,raw_refs={"order_ids_complete":False,"order_ids":["order-1"]})
+            assert len(rows([incomplete],[linked]))==2
+        assert len(rows([native,position],[linked]))==3  # ambiguous partial exposure remains explicit
+        closed=dict(linked,status="closed")
+        assert rows([], [closed])==[]
+        # Two plans claiming one object must not suppress/allocate the raw object twice.
+        duplicate=copy.deepcopy(store.get(plan["plan_id"]));duplicate["plan_id"]="another"
+        result=master_service._trendline_dashboard_rows([position],plans=[store.get(plan["plan_id"]),duplicate],executor=monitor,contexts=[linked])
+        assert len(result)==3 and sum(not r.get("trendline_local") for r in result)==1
+
+
+def test_trendline_dashboard_publication_without_collection_churn(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path)
+    service=master_service
+    monkeypatch.setattr(service,"APP_PROFILE","local")
+    monkeypatch.setattr(service,"TRENDLINE_PLAN_STORE",store);monkeypatch.setattr(service,"TRENDLINE_EXECUTOR",monitor)
+    monkeypatch.setattr(service,"_load_calculator_trade_contexts",lambda:[])
+    monkeypatch.setattr(service,"_load_pending_webhooks",lambda:[])
+    monkeypatch.setattr(service,"_pepperstone_local_tracker_rows",lambda:[])
+    monkeypatch.setattr(service.script_manager,"get",lambda _:SimpleNamespace(is_running=False))
+    monkeypatch.setattr(service,"_OPEN_ORDERS_CACHE",{"version":7,"payload":None})
+    owner=SimpleNamespace(loop=None,revision=0,job=None,reference_cache={},closed=False)
+    job=service._OpenOrdersJob(owner,[],"fixture",7);owner.job=job
+    job.publish(); original=owner.revision
+    plan=store.arm(plan["plan_id"],now_ms=1500);monitor.selected.add(plan["plan_id"])
+    job.publish(); armed=job.payload
+    assert owner.revision>original and armed["items"][0]["status"]=="Armed"
+    assert armed["collection_version"]==7 and owner.job is job and not job.tasks
+    assert armed["source_counts"]["live_broker_positions"]==0 and armed["source_counts"]["live_broker_orders"]==0
+    revision=owner.revision;job.publish();assert owner.revision==revision
+    monitor.running=False;job.publish()
+    assert job.payload["items"][0]["status"]=="Paused" and owner.revision>revision
+    assert job.payload["items"][0]["display_id"]==armed["items"][0]["display_id"] and owner.job is job
+
+
+def test_trendline_dashboard_browser_preserves_row_and_draft():
+    headers = re.findall(r"<th>(.*?)</th>", master_service.OPEN_ORDERS_TEMPLATE)
+    harness = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.handlers={};this.dataset={};this.disabled=false;this.value='';this.hidden=false;}
+  set textContent(value){this.innerHTML='';this._text=String(value);}
+  get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
+  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];this._text=String(value);}
+  appendChild(child){this.insertBefore(child,null);return child;}
+  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;assert(i>=0);this.children.splice(i,0,child);child.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(event,fn){this.handlers[event]=fn;}
+  setAttribute(k,v){this[k]=v;}
+  querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();}
+  focus(){document.activeElement=this;}
+}
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+const headers=JSON.parse(process.argv[2]);
+const walk=node=>[node,...node.children.flatMap(walk)];const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const select=cell=>walk(cell).find(e=>e.tag==='select');const idle=cell=>walk(cell).find(e=>e.className==='classification-value');
+const cell=(tr,label)=>tr.children[headers.indexOf(label)];
+const change=(el,value)=>{assert(!el.disabled);assert(el.children.some(option=>option.value===value));el.value=value;el.handlers.change();};
+const escape=cell=>cell.handlers.keydown({key:'Escape',preventDefault(){}});
+const inside=(child,parent)=>walk(parent).includes(child);
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const calls=[];let mode='success',release;
+const labels={'1m':'1MIN','5m':'5MIN','15m':'15MIN','30m':'30MIN','1h':'1H','4h':'4H','1d':'1D','1w':'1W','1mo':'1MO'};
+let row={broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',side:'Buy',type:'Order',id:'accepted',classification_target:'exact-accepted-target',classification_version:0,
+  classification_values:{timeframe:'1MIN',setup:'Pullback',pattern:'Channel',ema:'9',vwap:'No',aths_atls:'All-Time Low',round_number:'No',is_test_trade:true,webhook_classification:'Yes'},
+  timeframe:'1MIN',setup:'Pullback',pattern:'Channel',is_test_trade:'Yes',webhook_mode:'Yes',webhook_status:'Triggered',planned_entry_price:'100',status:'Pending'};
+let snapshot={version:1,progress_revision:1,items:[row],errors:[],warnings:[],core_complete:true,empty_confirmed:false};
+const publish=changes=>{row={...row,...changes};snapshot={...snapshot,items:[row],progress_revision:snapshot.progress_revision+1};};
+const reply=(data,status=200)=>({ok:status===200,status,statusText:'fixture',text:async()=>JSON.stringify(data),json:async()=>data});
+global.fetch=async(url,opts={})=>{
+  if(opts.method==='POST'){
+    assert.strictEqual(url,'/api/open-orders/classification');const body=JSON.parse(opts.body);calls.push({url,body});
+    assert.deepStrictEqual(Object.keys(body).sort(),['changes','target','version']);assert.strictEqual(Object.keys(body.changes).length,1);assert.strictEqual(body.target,'exact-accepted-target');
+    if(mode==='hold')await new Promise(resolve=>release=resolve);
+    if(mode==='fail')return reply({detail:'Save failed; retry explicitly'},500);
+    if(mode==='conflict'){
+      publish({classification_values:{...row.classification_values,timeframe:'15m'},timeframe:'15MIN',classification_version:row.classification_version+1});
+      return reply({detail:'Classification changed. Reload this cell; draft retained.'},409);
+    }
+    assert.strictEqual(body.version,row.classification_version,'each serialized save must use the latest acknowledged version');
+    const values={...row.classification_values,...body.changes};
+    publish({classification_values:values,classification_version:row.classification_version+1,timeframe:labels[values.timeframe]||'',pattern:values.pattern?values.pattern[0].toUpperCase()+values.pattern.slice(1):'None',setup:values.setup,is_test_trade:values.is_test_trade===true?'Yes':values.is_test_trade===false?'No':''});
+    return reply({ok:true,values,version:row.classification_version,item:row});
+  }
+  return reply(url.includes('/version')?{version:1,progress_revision:snapshot.progress_revision}:snapshot);
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+(async()=>{
+ await flush();const hooks=window.__openOrdersTestHooks;
+ const base={...row,display_id:'trendline:bybit:demo:one',trendline_plan_id:'one',type:'Trendline plan',id:null,status:'Armed',trendline_local:true,classification_target:null};
+ hooks.render([base]);const tr=tbody.children[0];assert.strictEqual(tr.children[39].children.length,0);
+ hooks.render([{...base,status:'Paused'}]);assert.strictEqual(tbody.children[0],tr);
+ hooks.render([{...base,status:'Simulated'}]);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(tr.children[39].children.length,0);
+ const order={...base,type:'Order',id:'real-order',status:'Pending',trendline_local:false,classification_target:'exact-accepted-target',classification_version:0};
+ hooks.render([order]);assert.strictEqual(tbody.children[0],tr);assert(find(tr.children[39],'Cancel'));
+ const timeframe=cell(tr,'Timeframe');idle(timeframe).click();const draft=select(timeframe);change(draft,'5m');draft.focus();
+ const position={...order,type:'Position',id:'real-position',status:'Open',classification_target:'position-target'};
+ hooks.render([position]);assert.strictEqual(tbody.children.length,1);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(select(timeframe),draft);assert.strictEqual(document.activeElement,draft);assert(find(timeframe,'Save').disabled);assert(find(tr.children[39],'Close'));
+ assert.notStrictEqual(hooks.brokerObjectKey(order),hooks.brokerObjectKey(position));assert.strictEqual(hooks.rowKey(order),hooks.rowKey(position));
+ console.log('trendline stable mounted row assertions passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    result = subprocess.run([shutil.which("node") or r"C:\Program Files\nodejs\node.exe", "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "trendline stable mounted row assertions passed" in result.stdout

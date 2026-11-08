@@ -27,7 +27,8 @@
   stateChannel?.unref?.();
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
   const setBadge = (message) => { if (statusBadge&&statusBadge.textContent!==message) statusBadge.textContent = message; };
-  const rowKey = (row) => [row?.broker,row?.account,row?.account_id,row?.category,row?.instrument,row?.type,row?.id,row?.position_idx,row?.order_link_id].map((v)=>String(v ?? '').trim().toLowerCase()).join('|');
+  const brokerObjectKey = (row) => [row?.broker,row?.account,row?.account_id,row?.category,row?.instrument,row?.type,row?.id,row?.position_idx,row?.order_link_id].map((v)=>String(v ?? '').trim().toLowerCase()).join('|');
+  const rowKey = row => row?.display_id && row?.trendline_plan_id ? row.display_id : brokerObjectKey(row);
   const parseApiError = (data, response) => {
     const detail = data?.detail;
     const fallback = `HTTP ${response.status} ${sanitizeSourceText(response.statusText) || 'request failed'}`;
@@ -103,7 +104,7 @@
     }finally{clearTimeout(timer);}
   };
   const resolveAccountLabel=(row)=>{const parts=[]; const account=String(row?.account||'').trim(); const accountId=String(row?.account_id||'').trim(); const suffix=String(row?.account_label_suffix||'').trim(); if(account) parts.push(account); if(accountId) parts.push(accountId); if(suffix) parts.push(suffix); return parts.join(' · ')||'—';};
-  const isActionableRow=(row)=>{if(!row||typeof row!=='object'||row.local_tracking||String(row.broker||'').toLowerCase()==='pepperstone') return false; if(row.parent_id||row.parent_order_id) return false; const status=String(row.status||'').toLowerCase(); if(status.includes('bounce waiting')) return false; const type=String(row.type||'').toLowerCase(); return type==='order'||type==='position'||type==='trade'||type==='webhook';};
+  const isActionableRow=(row)=>{if(!row||typeof row!=='object'||row.local_tracking||row.trendline_local||String(row.broker||'').toLowerCase()==='pepperstone') return false; if(row.parent_id||row.parent_order_id) return false; const status=String(row.status||'').toLowerCase(); if(status.includes('bounce waiting')) return false; const type=String(row.type||'').toLowerCase(); return type==='order'||type==='position'||type==='trade'||type==='webhook';};
   const actionLabelFor=(row)=>{const type=String(row?.type||'').toLowerCase(); if(type==='order'||type==='webhook') return 'Cancel'; if(type==='position'||type==='trade') return 'Close'; return null;};
   const broadcastStateChange=(event)=>{
     const safeEvent={...event,type:'state-changed',eventId:String(event?.eventId||`${Date.now()}-${Math.random().toString(16).slice(2)}`),submittedAt:Number(event?.submittedAt||Date.now())};
@@ -129,7 +130,7 @@
 
   const postClose = async (row, btn) => {
     btn.disabled = true; const prev = btn.textContent; btn.textContent = 'Submitting...';
-    const key = rowKey(row); const action = actionLabelFor(row)?.toLowerCase() === 'cancel' ? 'cancel' : 'close';
+    const key = brokerObjectKey(row); const action = actionLabelFor(row)?.toLowerCase() === 'cancel' ? 'cancel' : 'close';
     pendingManualActions.set(key, { action, submittedAt: Date.now(), broker: row.broker, account: row.account, category: row.category, instrument: row.instrument, id: row.id, verifyStatus: 'submitting', message: 'Submitting...', response: null });
     try {
       const response = await fetch('/api/open-orders/close', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(row) });
@@ -138,7 +139,7 @@
       const state = pendingManualActions.get(key); if (state) { state.verifyStatus = 'accepted_verifying'; state.message = `${action === 'close' ? 'Close' : 'Cancel'} submitted. Verifying...`; state.response = data; }
       setBadge(`${action === 'close' ? 'Close' : 'Cancel'} submitted. Verifying...`);
       broadcastStateChange({action,broker:row.broker,account:row.account,category:row.category,symbol:row.instrument,order_id:row.id});
-      render((window.__openOrdersItems || []).filter((it)=>rowKey(it)!==key), window.__openOrdersErrors || [], window.__openOrdersWarnings || []);
+      render((window.__openOrdersItems || []).filter((it)=>brokerObjectKey(it)!==key), window.__openOrdersErrors || [], window.__openOrdersWarnings || []);
       verifyManualAction(row, key);
     } catch (err) {
       pendingManualActions.delete(key); btn.disabled = false; btn.textContent = prev; setBadge(safeDiagnostic(err?.message||err,'Action failed'));
@@ -177,7 +178,7 @@
       if(state?.error){const error=document.createElement('span');error.setAttribute('role','alert');error.textContent=state.error;cell.appendChild(error);}
       return;
     }
-    const label=actionLabelFor(row); if(!allowAction||!label||!isActionableRow(row)){cell.textContent='—';return;} const required=['broker','account','category','instrument','id','type']; const missing=required.some((k)=>!String(row[k]??'').trim()); if(missing){cell.textContent='—';return;} const key=rowKey(row); const state=pendingManualActions.get(key); if(state&&['submitting','accepted_verifying'].includes(state.verifyStatus)){cell.textContent='Verifying...'; return;} const btn=document.createElement('button'); btn.type='button'; btn.className='action-btn'; btn.textContent=label; btn.addEventListener('click',()=>postClose(row,btn)); cell.appendChild(btn);
+    const label=actionLabelFor(row); if(!allowAction||!label||!isActionableRow(row)){cell.textContent='—';return;} const required=['broker','account','category','instrument','id','type']; const missing=required.some((k)=>!String(row[k]??'').trim()); if(missing){cell.textContent='—';return;} const key=brokerObjectKey(row); const state=pendingManualActions.get(key); if(state&&['submitting','accepted_verifying'].includes(state.verifyStatus)){cell.textContent='Verifying...'; return;} const btn=document.createElement('button'); btn.type='button'; btn.className='action-btn'; btn.textContent=label; btn.addEventListener('click',()=>postClose(row,btn)); cell.appendChild(btn);
   };
   const classificationOptions = {
     timeframe: ['','1m','5m','15m','30m','1h','4h','1d','1w','1mo'],
@@ -192,7 +193,7 @@
   const classificationColumns = {13:'timeframe',14:'is_test_trade',15:'setup',16:'pattern',17:'ema',18:'vwap',19:'aths_atls',20:'round_number',23:'webhook_classification'};
   const timeframeLabels = {'1m':'1MIN','5m':'5MIN','15m':'15MIN','30m':'30MIN','1h':'1H','4h':'4H','1d':'1D','1w':'1W','1mo':'1MO'};
   const classificationRows = new Map();
-  const classificationKey = item => rowKey(item)+'|'+(item.price_edit?.target||'')+'|'+(item.classification_target||'unlinked');
+  const classificationKey = item => item.display_id && item.trendline_plan_id ? rowKey(item) : rowKey(item)+'|'+(item.price_edit?.target||'')+'|'+(item.classification_target||'unlinked');
   const priceColumns={29:'entry',31:'stop_loss',32:'take_profit'};
   const priceLabels={entry:'Entry / Order',stop_loss:'Stop Loss',take_profit:'Take Profit'};
   const priceStorage='ltt-open-order-amendments-v1';
@@ -201,7 +202,7 @@
   const persistPriceOperations=()=>{if(window.localStorage)window.localStorage.setItem(priceStorage,JSON.stringify(priceOperations));};
   const priceBusy=entry=>[...entry.prices.values()].some(state=>state.draft?.operation);
   const priceApply=(entry,item)=>{
-    if(!item||Number(item._price_read_started||0)<Number(entry.item._price_read_started||0))return;
+    if(!item||brokerObjectKey(item)!==brokerObjectKey(entry.item)||Number(item._price_read_started||0)<Number(entry.item._price_read_started||0))return;
     for(const key of ['price_edit','_price_read_started','_price_broker','entry_price','order_price','stop_loss','take_profit']){
       if(Object.prototype.hasOwnProperty.call(item,key))entry.item[key]=item[key];
     }
@@ -413,6 +414,7 @@
   const updateCellAvailability = (entry,state) => {
     const draft=state.draft;if(!draft)return;
     const available=entry.present&&Boolean(entry.item.classification_target);
+    if(draft.target!==entry.item.classification_target){draft.conflict=true;draft.message="Broker object changed. Draft retained; Reload before saving.";}
     if(!available)draft.message='Entry is no longer available. Draft retained; Cancel to discard.';
     state.select.disabled=!available||entry.saving===state.field;
     state.save.disabled=Boolean(entry.saving)||!available||draft.conflict||!draft.dirty;
@@ -456,10 +458,12 @@
     const selected=state.select.value;
     const value=state.field==='is_test_trade'?(selected===''?null:selected==='Yes'):selected;
     entry.saving=state.field;draft.message='Saving...';synchronizeDrafts(entry);
+    const requestedTarget=entry.item.classification_target,requestedObject=brokerObjectKey(entry.item);
     try{
       const response=await fetch('/api/open-orders/classification',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({target:entry.item.classification_target,version:draft.version,changes:{[state.field]:value}})});
       const data=await response.json();if(!response.ok){if(response.status===409)draft.conflict=true;throw new Error(parseApiError(data,response));}
+      if(entry.item.classification_target!==requestedTarget||brokerObjectKey(entry.item)!==requestedObject){draft.conflict=true;throw new Error('Broker object changed. Draft retained; Reload before saving.');}
       // A delayed earlier publication/acknowledgment cannot replace newer metadata.
       if(Number(data.version)>=Number(entry.item.classification_version||0))entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};
       state.draft=null;state.valueButton=null;state.savedUntil=Date.now()+2500;
@@ -471,7 +475,7 @@
   const openClassificationCell = (entry,state) => {
     if(state.draft||!entry.present||!entry.item.classification_target)return;
     const base=fieldValue(entry.item,state.field);
-    state.draft={base,version:Number(entry.item.classification_version||0),conflict:false,dirty:false,message:''};state.savedUntil=0;
+    state.draft={base,target:entry.item.classification_target,version:Number(entry.item.classification_version||0),conflict:false,dirty:false,message:''};state.savedUntil=0;
     state.td.innerHTML='';state.valueButton=null;
     const select=document.createElement('select');state.select=select;select.dataset.field=state.field;
     select.setAttribute('aria-label',classificationLabels[state.field]);
@@ -500,7 +504,7 @@
     for(const entry of classificationRows.values())entry.present=false;
     const desired=[];
     for(let item of items){
-      if(pendingManualActions.has(rowKey(item)))continue;
+      if(pendingManualActions.has(brokerObjectKey(item)))continue;
       const key=classificationKey(item);let entry=classificationRows.get(key);
       if(!entry){const tr=document.createElement('tr');entry={key,tr,item,present:true,cells:new Map(),prices:new Map(),saving:null};classificationRows.set(key,entry);
         rowValues(item).forEach((_,i)=>{const td=document.createElement('td');tr.appendChild(td);const field=classificationColumns[i];if(field){
@@ -509,8 +513,8 @@
         }else if(priceColumns[i]){const priceField=priceColumns[i];td.className='classification-cell price-cell';const state={field:priceField,td,draft:null};entry.prices.set(priceField,state);}});
         entry.action=document.createElement('td');tr.appendChild(entry.action);
       }
-      if(Number(item.classification_version||0)<Number(entry.item.classification_version||0))item={...item,classification_values:entry.item.classification_values,classification_version:entry.item.classification_version};
-      if(Number(item._price_read_started||0)<Number(entry.item._price_read_started||0)){
+      if(item.classification_target===entry.item.classification_target&&Number(item.classification_version||0)<Number(entry.item.classification_version||0))item={...item,classification_values:entry.item.classification_values,classification_version:entry.item.classification_version};
+      if(brokerObjectKey(item)===brokerObjectKey(entry.item)&&Number(item._price_read_started||0)<Number(entry.item._price_read_started||0)){
         for(const k of ['price_edit','_price_read_started','_price_broker','entry_price','order_price','stop_loss','take_profit'])item[k]=entry.item[k];
       }
       entry.item=item;entry.present=true;
@@ -642,7 +646,7 @@
   };
   const startVersionPolling=()=>{if(versionPollTimer) return; versionPollTimer=setInterval(pollVersion,POLL_MS);};
   const stopVersionPolling=()=>{if(!versionPollTimer) return; clearInterval(versionPollTimer); versionPollTimer=null;};
-  if(typeof window!=='undefined'&&window.__OPEN_ORDERS_TESTING__){window.__openOrdersTestHooks={refresh,pollVersion,handleStateChange,runVisibilityCheck,itemMatchesSubmission,getState:()=>({knownVersion,refreshQueued,refreshInFlight:Boolean(refreshInFlight),pendingVisibilityChecks:pendingVisibilityChecks.size,hasData})};}
+  if(typeof window!=='undefined'&&window.__OPEN_ORDERS_TESTING__){window.__openOrdersTestHooks={render,rowKey,brokerObjectKey,classificationRows,refresh,pollVersion,handleStateChange,runVisibilityCheck,itemMatchesSubmission,getState:()=>({knownVersion,refreshQueued,refreshInFlight:Boolean(refreshInFlight),pendingVisibilityChecks:pendingVisibilityChecks.size,hasData})};}
   stateChannel?.addEventListener('message',(event)=>handleStateChange(event?.data));
   if(typeof window?.addEventListener==='function')window.addEventListener('storage',(event)=>{if(event.key!==STORAGE_EVENT_KEY||!event.newValue)return;try{handleStateChange(JSON.parse(event.newValue));}catch(_){}});
   document.addEventListener('visibilitychange',()=>{if(document.hidden){stopVersionPolling();return;}startVersionPolling();pollVersion();for(const key of pendingVisibilityChecks.keys())runVisibilityCheck(key).catch(()=>{});if(refreshQueued&&!refreshInFlight){refreshQueued=false;refresh('visible').catch(()=>{});}});

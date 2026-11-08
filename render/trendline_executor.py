@@ -386,12 +386,14 @@ class TrendlinePlanExecutor:
             return
         claimed = claim["plan"]
         if claimed["test_trade"]:
-            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=self.now_ms())
+            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent.", "calculated": calculated}, now_ms=self.now_ms())
             self._record(plan, "complete", "simulated", quote=final_quote, evaluation=final_eval)
             return
         # A failed durable transition leaves the claim unresolved and MUST NOT
         # call the adapter. Reconstruction only processes armed plans.
-        submitting = self.store.begin_submission(plan_id, execution_key=str(claim["execution_key"]), now_ms=self.now_ms())
+        submitting = self.store.begin_submission(plan_id, execution_key=str(claim["execution_key"]), now_ms=self.now_ms(),
+            submission_refs={"calculation_context_id": calculated.get("calculation_context_id"), "order_link_id": str(claim["execution_key"]),
+                             "category": "linear" if plan["broker"] == "bybit" else "forex"})
         self._record(plan, "submission", "submission_started", quote=final_quote, evaluation=final_eval)
         try:
             result = await _await(self.submit(submitting, calculated, str(claim["execution_key"])))
@@ -412,7 +414,8 @@ class TrendlinePlanExecutor:
             if not isinstance(result, Mapping) or result.get("accepted") is not True or not valid_order_reference(order_id):
                 self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": "Broker acceptance reference was missing."}, now_ms=self.now_ms())
                 return
-            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id}, now_ms=self.now_ms())
+            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id,
+                "references": result.get("references"), "calculated": calculated}, now_ms=self.now_ms())
 
 
 def _safe_error(exc: Exception) -> str:

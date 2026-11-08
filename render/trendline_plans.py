@@ -43,6 +43,7 @@ _CLAIMED_STATUSES = {"claimed", "submitting", "submitted", "failed", "uncertain"
 _IMMUTABLE_FIELDS = {
     "schema_version", "plan_id", "execution_key", "revision", "created_at_ms",
     "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result", "live_authorization",
+    "display_snapshot", "submission_refs",
 }
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
@@ -170,6 +171,38 @@ def _normalise_claim(value: object, execution_key: str) -> Optional[Dict[str, ob
     return claim
 
 
+def _display_numbers(value: object) -> Optional[Dict[str, object]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TrendlinePlanError("Display snapshot must be an object.")
+    result = {}
+    for field in ("quantity", "entry_price", "stop_price", "target_price"):
+        raw = value.get(field, value.get({"stop_price": "stop_loss_price", "target_price": "take_profit_price"}.get(field, field)))
+        if raw not in (None, ""):
+            result[field] = _decimal_string(raw, field, positive=True)
+    if value.get("calculation_context_id"):
+        result["calculation_context_id"] = _text(value["calculation_context_id"], "calculation_context_id")[:128]
+    return result
+
+
+def _submission_references(value: object) -> Optional[Dict[str, object]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TrendlinePlanError("Submission references must be an object.")
+    result = {}
+    for field in ("calculation_context_id", "order_id", "order_link_id", "trade_id", "account_id", "category"):
+        if value.get(field) not in (None, ""):
+            result[field] = _text(str(value[field]), field)[:128]
+    if value.get("position_idx") is not None:
+        idx = value["position_idx"]
+        if type(idx) is not int or idx not in (0, 1, 2):
+            raise TrendlinePlanError("Invalid submission position index.")
+        result["position_idx"] = idx
+    return result
+
+
 def _normalise_execution_result(value: object) -> Optional[Dict[str, object]]:
     """Keep only a small, credential-free durable terminal outcome."""
     if value is None:
@@ -182,6 +215,9 @@ def _normalise_execution_result(value: object) -> Optional[Dict[str, object]]:
         raw = value.get(field)
         if raw is not None:
             result[field] = _text(raw, f"execution_result.{field}")[:500]
+    for field, normalise in (("calculated", _display_numbers), ("references", _submission_references)):
+        if value.get(field) is not None:
+            result[field] = normalise(value[field])
     return result
 
 
@@ -240,6 +276,12 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     }
     claim = _normalise_claim(record.get("trigger_claim"), execution_key)
     execution_result = _normalise_execution_result(record.get("execution_result"))
+    display_snapshot = _display_numbers(record.get("display_snapshot"))
+    if display_snapshot is not None:
+        source = record["display_snapshot"]
+        if source.get("plan_id") != plan_id or type(source.get("plan_revision")) is not int or not 1 <= source["plan_revision"] <= revision:
+            raise TrendlinePlanError("Display snapshot does not belong to this saved plan revision.")
+        display_snapshot.update(plan_id=plan_id, plan_revision=source["plan_revision"])
     if claim is not None and status not in _CLAIMED_STATUSES:
         raise TrendlinePlanError("Only claimed/submitting/submitted/failed/uncertain plans may have a trigger_claim.")
     if claim is None and status in _CLAIMED_STATUSES:
@@ -283,6 +325,8 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "trigger_claim": claim,
         "execution_result": execution_result,
         "live_authorization": live_authorization,
+        "display_snapshot": display_snapshot,
+        "submission_refs": _submission_references(record.get("submission_refs")),
     }
 
 
@@ -569,7 +613,7 @@ class TrendlinePlanStore:
                 pass
             raise TrendlinePlanPersistenceError(f"Unable to atomically save trendline plan registry: {exc}") from exc
 
-    def create(self, payload: Mapping[str, object], *, now_ms: Optional[int] = None) -> Dict[str, object]:
+    def create(self, payload: Mapping[str, object], *, now_ms: Optional[int] = None, display_snapshot: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         if not isinstance(payload, Mapping):
             raise TrendlinePlanError("Plan payload must be an object.")
@@ -589,7 +633,9 @@ class TrendlinePlanStore:
             "trigger_claim": None,
             "execution_result": None,
             "live_authorization": None,
+            "submission_refs": None,
         })
+        record["display_snapshot"] = dict(display_snapshot, plan_id=record["plan_id"], plan_revision=1) if display_snapshot is not None else None
         plan = validate_plan(record)
         with self._locked():
             registry = self._read()
@@ -605,7 +651,7 @@ class TrendlinePlanStore:
             except KeyError as exc:
                 raise TrendlinePlanError("Unknown trendline plan.") from exc
 
-    def update(self, plan_id: str, changes: Mapping[str, object], *, now_ms: Optional[int] = None) -> Dict[str, object]:
+    def update(self, plan_id: str, changes: Mapping[str, object], *, now_ms: Optional[int] = None, display_snapshot: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         if not isinstance(changes, Mapping):
             raise TrendlinePlanError("Plan changes must be an object.")
@@ -626,6 +672,7 @@ class TrendlinePlanStore:
             updated["updated_at_ms"] = now
             updated["lifecycle"] = {"last_transition": "updated", "last_transition_at_ms": now}
             updated["live_authorization"] = None
+            updated["display_snapshot"] = dict(display_snapshot, plan_id=plan_id, plan_revision=updated["revision"]) if display_snapshot is not None else None
             canonical = validate_plan(updated)
             registry["plans"][canonical["plan_id"]] = canonical
             self._write(registry)
@@ -784,7 +831,7 @@ class TrendlinePlanStore:
             self._write(registry)
             return {"claimed": True, "duplicate": False, "execution_key": canonical["execution_key"], "plan": copy.deepcopy(canonical)}
 
-    def begin_submission(self, plan_id: str, *, execution_key: str, now_ms: Optional[int] = None) -> Dict[str, object]:
+    def begin_submission(self, plan_id: str, *, execution_key: str, now_ms: Optional[int] = None, submission_refs: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
         """Persist the non-retryable boundary before any possible broker request."""
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         with self._locked():
@@ -797,6 +844,7 @@ class TrendlinePlanStore:
             now = _transition_time(plan, now)
             updated = copy.deepcopy(plan)
             updated["status"] = "submitting"
+            updated["submission_refs"] = _submission_references(submission_refs)
             updated["revision"] += 1
             updated["updated_at_ms"] = now
             updated["lifecycle"] = {"last_transition": "submission_started", "last_transition_at_ms": now}

@@ -866,7 +866,7 @@
   async function trendlineMonitor(action) {
     if(!state.trendlinePlansAvailable||state.trendlineMonitorPending) return;
     state.trendlineMonitorPending=true; renderTrendlineMonitor(state.trendlineMonitorStatus);
-    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); state.trendlineMonitorPending=false; renderTrendlineMonitor(response); await refreshTrendlinePlans(); }
+    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); state.trendlineMonitorPending=false; renderTrendlineMonitor(response); notifyOpenOrdersStateChanged({action:"trendline"}); await refreshTrendlinePlans(); }
     catch(err) {
       try { state.trendlineMonitorStatus=await request('/api/trendline-plans/monitor/status',{cache:'no-store'}); await refreshTrendlinePlans(); } catch(_statusError) { /* Retain last confirmed state. */ }
       trendlineStatus('Monitoring request failed. Refresh status before trying again.');
@@ -980,6 +980,7 @@
     syncTrendlineTriggerControls();
     const expiry = trendlineExpiryAtMs();
     const payload = {
+      calculation_context_id: state.quote?.calculation_context_id,
       asset: state.asset, broker: state.asset === 'crypto' ? 'bybit' : state.broker, account: state.account,
       instrument: state.resolvedSymbol, side: state.side, order_type: state.order_type, test_trade: state.test_mode === 'yes',
       limit_entry_price: state.order_type === 'limit' ? $('calc-limit').value : null,
@@ -1128,7 +1129,7 @@
           $('trendline-save').textContent='Save draft';
           trendlineStatus('Plan permanently deleted. Entered settings retained; the next explicit Save draft creates a new draft.');
         } else trendlineStatus('Unused plan permanently deleted.');
-        renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans();
+        renderTrendlinePlans(); notifyOpenOrdersStateChanged({action:"trendline"}); state.trendlineMutationPending=false; await refreshTrendlinePlans();
       } catch(err) { trendlineStatus('Delete failed: '+String(err.message||err)); }
       finally { state.trendlineMutationPending=false; }
       return;
@@ -1136,7 +1137,7 @@
     const liveArm=action==='arm' && plan?.account==='live' && !plan?.test_trade;
     if(liveArm && (typeof confirm!=='function' || !confirm('Authorize and arm this live plan for local monitoring and execution?'))) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
-    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,action==='arm'?{revision:plan.revision,monitor_generation:plan.monitor_generation,...(liveArm?{confirm_live_execution:true}:{})}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); await refreshTrendlinePlans(); } finally { state.trendlineMutationPending=false; }
+    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,action==='arm'?{revision:plan.revision,monitor_generation:plan.monitor_generation,...(liveArm?{confirm_live_execution:true}:{})}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); notifyOpenOrdersStateChanged({action:"trendline"}); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); await refreshTrendlinePlans(); } finally { state.trendlineMutationPending=false; }
   }
   function initializeTrendlinePlans() {
     const panel=trendlinePanel(); if(!panel) return;
@@ -1160,7 +1161,7 @@
   function notifyOpenOrdersStateChanged(details = {}) {
     const message = {
       type: 'state-changed',
-      action: 'submit',
+      action: details.action || 'submit',
       submittedAt: Date.now(),
       broker: String(details.broker || ''),
       account: String(details.account || ''),
