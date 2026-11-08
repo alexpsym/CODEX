@@ -30850,7 +30850,7 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
 
 
 def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]:
-    return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan), monitor_generation=TRENDLINE_EXECUTOR.generation,
+    return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan), latest_evaluation=TRENDLINE_EXECUTOR.latest_evaluations.get(str(plan["plan_id"])), monitor_generation=TRENDLINE_EXECUTOR.generation,
                 monitoring_eligible=TRENDLINE_EXECUTOR.eligible(str(plan["plan_id"])) and bool(TRENDLINE_EXECUTOR.status()["running"]))
 
 

@@ -4439,3 +4439,36 @@ def test_arm_route_selected_revision_and_monitoring_view(tmp_path, monkeypatch):
             assert failed.value.status_code == 409
         assert store.get(fresh["plan_id"]) == changed and not e.status()["running"]
     _run_fixture_loop(run())
+
+
+def test_missed_touch_quote_rejection_is_safe_and_plan_specific(tmp_path, monkeypatch):
+    from test_trendline_executor import _payload, _run_fixture_loop
+    from render.trendline_executor import InvalidQuote, TrendlinePlanExecutor
+    service=master_service;now=1794111207000
+    monkeypatch.setattr(service.time,"time_ns",lambda:now*1000000)
+    monkeypatch.setattr(service,"resolve_bybit_credentials_for",lambda a:("demo","private-key","private-secret","https://mock.invalid","mock"))
+    quote={"symbol":"XRPUSDT","bid1Price":"1.15","ask1Price":"1.1501","lastPrice":"1.15"};stamp=[now]
+    async def ticker(base,category,symbol,**kw):
+        assert kw["max_age_s"]==0 and kw["allow_stale_s"]==0
+        return {"payload":{"time":stamp[0],"result":{"list":[quote]}}}
+    async def meta(*args):return {"status":"Trading","priceFilter":{"tickSize":"0.0001"}}
+    monkeypatch.setattr(service,"_fetch_bybit_ticker_cached",ticker);monkeypatch.setattr(service,"_bybit_get_instrument_info_cached",meta)
+    store=service.TrendlinePlanStore(tmp_path/'quote.json');plan=store.arm(store.create({**_payload("bybit",test_trade=True),"instrument":"XRPUSDT"},now_ms=1000)["plan_id"],now_ms=2000)
+    e=TrendlinePlanExecutor(store,service._trendline_executor_quote,lambda *a:{},lambda *a:{},lambda p:True,now_ms=lambda:now);e._eligible.add(plan["plan_id"])
+    monkeypatch.setattr(service,"TRENDLINE_PLAN_STORE",store);monkeypatch.setattr(service,"TRENDLINE_EXECUTOR",e);monkeypatch.setattr(service,"APP_PROFILE","local")
+    async def run():
+        for value,reason in [(None,"quote_timestamp_invalid"),(str(now),"quote_timestamp_invalid"),(now+1,"quote_future"),(now-60001,"quote_stale")]:
+            stamp[0]=value;await e.cycle();latest=e.latest_evaluations[plan["plan_id"]]
+            assert latest["stage"]=="candidate_quote" and latest["reason"]==reason
+            assert e.last_error=="QUOTE_INVALID: Fresh valid broker quote required."
+            listed=json.loads((await service.trendline_plan_list()).body)["plans"][0]
+            assert listed["latest_evaluation"]==latest
+        stamp[0]=now;quote["ask1Price"]="1.15";await e.cycle()
+        assert e.latest_evaluations[plan["plan_id"]]["reason"]=="quote_spread_invalid"
+        # Unknown broker errors are sanitized, not exposed by status or cards.
+        async def bad(p):raise RuntimeError("private-key https://private.invalid")
+        e.quote=bad;await e.cycle();assert e.latest_evaluations[plan["plan_id"]]["reason"]=="executor_error"
+        assert "private" not in json.dumps(e.status())
+        quote["ask1Price"]="1.1501";fresh=await service._trendline_executor_quote(plan)
+        assert fresh=={"instrument":"XRPUSDT","timestamp_ms":now,"bid":"1.15","ask":"1.1501","tick_size":"0.0001"}
+    _run_fixture_loop(run())

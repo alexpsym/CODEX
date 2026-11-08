@@ -1023,6 +1023,11 @@
     for(const key of ['setup','pattern','ema','vwap','aths_atls','round_number']) entries.push([key,text(plan.order_metadata?.[key])]);
     return '<details open><summary>Saved settings (server record)</summary><div class="muted">'+entries.map(([label,value])=>`${escapeHtml(label)}: ${escapeHtml(value)}`).join('<br>')+'</div></details>';
   }
+  function trendlineEvaluationDetails(plan) {
+    const item=plan.latest_evaluation;
+    if(!item) return '';
+    return `<div class="muted" role="status">Latest evaluation (revision ${escapeHtml(String(item.revision))}): ${escapeHtml(String(item.stage))} / ${escapeHtml(String(item.reason))}<br>${escapeHtml(JSON.stringify(item.inputs||{}))}${item.evaluation ? `<br>${escapeHtml(JSON.stringify(item.evaluation))}` : ''}</div>`;
+  }
   function renderTrendlinePlans() {
     const list=$('trendline-plan-list'); if(!list) return;
     if (!state.trendlinePlans.length) { list.innerHTML='<div class="muted">No local trendline plans saved.</div>'; return; }
@@ -1030,7 +1035,7 @@
       let actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
       if(plan.status==='armed' && plan.monitoring_eligible!==true) actions=`<button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button>`+actions;
       if(plan.can_delete===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Permanently delete this unused plan">Delete</button>`;
-      return `<div class="card"><strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
+      return `<div class="card"><strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}${trendlineEvaluationDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
     }).join('');
     list.querySelectorAll('[data-tl-action]').forEach((btn) => btn.addEventListener('click', () => trendlineAction(btn.dataset.tlAction, btn.dataset.tlId)));
   }

@@ -606,3 +606,55 @@ def test_arm_selected_monitor_session_and_submission_guards(tmp_path, monkeypatc
             assert not real.eligible(inactive["plan_id"])
             await real.stop()
     _run_fixture_loop(run())
+
+
+def test_missed_touch_latest_rejection_and_valid_trigger_paths(tmp_path):
+    from decimal import Decimal
+    from render.trendline_plans import projected_price, live_execution_authorized
+    from render.trendline_executor import InvalidQuote
+    async def scenario(name):
+        store=TrendlinePlanStore(tmp_path / name / "plans.json")
+        payload={**_payload("bybit",test_trade=name!="single"),"instrument":"XRPUSDT","action":"sell","stop_loss_ticks":11,
+                 "anchors":[{"timestamp_ms":1794109020000,"price":"1.1614084957785737"},{"timestamp_ms":1794109440000,"price":"1.1605589895838992"}]}
+        plan=store.arm(store.create(payload,now_ms=1794109200000)["plan_id"],now_ms=1794109201000)
+        t=1794109500000;clock=[t];ticks=[];posts=[];calculations=[]
+        def snap(stamp,offset):
+            bid=projected_price(plan,stamp)+Decimal(offset)
+            return {"instrument":"XRPUSDT","timestamp_ms":stamp,"bid":str(bid),"ask":str(bid+Decimal("0.0001")),"tick_size":"0.0001"}
+        sequence=[snap(t,"0")]
+        if name in {"gap","duplicate","reverse"}:sequence=[snap(t,"-0.001"),snap(t+1000,"0.001")]
+        if name=="duplicate":sequence=[snap(t,"-0.001"),snap(t,"0.001"),snap(t+2000,"0.001"),snap(t+3000,"-0.001")]
+        if name=="reverse":sequence=[snap(t,"-0.001"),snap(t-1,"0.001"),snap(t+2000,"0.001"),snap(t+3000,"-0.001")]
+        async def quote(p):
+            q=sequence.pop(0);clock[0]=max(clock[0],q["timestamp_ms"]);ticks.append(q);return q
+        async def calculate(p,q):
+            calculations.append(True)
+            if name=="away":return {"trigger_quote":snap(t,"-0.001")}
+            if name=="invalid_final":return {"trigger_quote":{**q,"timestamp_ms":t+1}}
+            return {"trigger_quote":q}
+        async def submit(p,c,key):posts.append(key);return {"accepted":True,"order_id":"one"}
+        e=_selected_fixture_executor(store,quote,calculate,submit,live_execution_authorized,now_ms=lambda:clock[0])
+        while sequence:
+            await e.cycle()
+            if name in {"duplicate","reverse"} and len(ticks)==2:
+                assert e.latest_evaluations[plan["plan_id"]]["reason"] == ("quote_duplicate" if name=="duplicate" else "quote_out_of_order")
+                assert not e._previous and store.get(plan["plan_id"])["trigger_claim"] is None
+            if name in {"duplicate","reverse"} and len(ticks)==3:assert store.get(plan["plan_id"])["trigger_claim"] is None
+        latest=e.status()["latest_evaluations"][plan["plan_id"]]
+        if name in {"away","invalid_final"}:
+            assert store.get(plan["plan_id"])["trigger_claim"] is None and not posts
+            assert latest["stage"] == ("final_evaluation" if name=="away" else "final_quote")
+            if name=="away":assert latest["evaluation"]["classification"]=="below"
+            else:assert latest["reason"]=="quote_future"
+        else:
+            final=store.get(plan["plan_id"]);assert final["status"]=="submitted"
+            assert final["trigger_claim"]["trigger_kind"] == ("entered_band" if name in {"inside","single"} else "gap_through")
+            assert len(posts)==(1 if name=="single" else 0)
+            before=len(ticks);await e.cycle();assert len(ticks)==before
+            assert len(calculations)==1
+        # Bound latest records and retain no exception/body strings.
+        for i in range(140):e._record({**plan,"plan_id":str(i)},"candidate_quote","quote_pending")
+        assert len(e.latest_evaluations)==128
+    async def run():
+        for name in ("inside","gap","single","duplicate","reverse","away","invalid_final"):await scenario(name)
+    _run_fixture_loop(run())

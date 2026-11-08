@@ -6350,3 +6350,81 @@ SHA/push/fresh local-remote equality/last-use cleanup in compact delivery receip
 Manual acceptance remains separate: user next safe run_local_master_control.bat restart
 and calculator refresh, then review Save draft/Arm/Stop/selected-card resume. No real plan
 armed or broker call here. Jobs2-4 remain queued until verified Job1 user acceptance.
+
+
+2026-11-08 JOB1 XRPUSDT FAILED MANUAL ACCEPTANCE / BOUNDED DIAGNOSIS
+Baseline master40cdcf384bbb88a835dd5074ab158ee07df7b54f, empty index. AGENTS early
+Git-permission rule preserved; approved require_escalated saved-user route established
+at start, protected verify exit0/6.92sec, fresh local/remote both40cdcf3. Unrelated dirty
+service/summary/journal/tests/runtime/settings and root deletions preserved by baselines.
+ONE authorized read-only capture succeeded: actual child exit0/0.627109200sec,
+parent exit0/1.132769600sec,20sec outer cap. Exact two saved records, monitor/status
+and plan-list GET once each, bounded existing worker log head/tail. No broker/new-quote
+request, mutations, arming/cancel/monitor/app/MT5 restart, trades/Resync/import/build/
+install/schedule/subagent. All subsequent diagnosis used capture/fixtures only.
+Actual current Python workerPID98092 creation1794108972544ms = Brisbane13:36:12.544,
+log server process13:36:19/startup complete13:36:20. Not attributed to an old worker.
+Both plans revision2, armed/monitoring_eligible true, Demo/Test true, sell/executable
+(bid), Touch/either, zero tolerance, right extension true, expiry null, stop11, risk
+percent1, R1, timeframe1m. Live authorization null is expected for Demo Test, not rejection.
+Plan4212ace4875f4634ab283e488478e39b has A1 UTC03:33 1.1577744970569106 and
+A2 UTC03:44 1.1578216918455038: a different slightly rising line.
+Plan0a66ad83e1dc47bdafbbebb9648e9aff matches export EXACTLY:
+A1 1794109020000/UTC03:37 1.1614084957785737,
+A2 1794109440000/UTC03:44 1.1605589895838992, extension ON.
+Capture at1794111207648: worker running; last cycle1794111204354 processed2,
+reconciliation0, last_error QUOTE_INVALID: Fresh valid broker quote required.
+This proves at least one evaluation rejection. Existing global status cannot identify
+WHICH plan, whether symbol/spread/timestamp, duplicate/out-of-order sample, candidate
+adapter or final calculator quote. No historical executable bid/ask/timestamp/tick
+samples were recorded. DO NOT claim both plans rejected identically, quote moved away,
+clock drift/zero spread/stale timestamp/zero tolerance as actual root cause. Supplied
+chart alone cannot prove the sell-bid trigger. Original missed-touch root remains unknown.
+Demonstrated observability fault corrected in existing executor/status/list/card path:
+latest128per-plan in-memory records only, revision/stage/safe reason and bounded numeric
+now/quote/previous timestamp,bid,ask,tick plus projected/selected price/classifications.
+Unknown errors sanitized; no broker bodies/URLs/secrets persisted. Refresh plans includes
+latest record on each card. Stages distinguish candidate quote/evaluation from final
+calculator quote/evaluation and claim; duplicate/reversed timestamps expose reason and
+retain existing history reseed; rearm clears selected stale diagnostic. Existing strict
+symbol/freshness/future/spread/tick, original line/tolerance/sizing, entered-band and
+Touch gap-through, Arm/selected eligibility/Stop/restart, Live authority/Test simulation,
+claim/begin_submission/at-most-once behavior unchanged. No safety gate relaxed to force
+execution. This is a diagnostic correction, not a proven historical price-trigger repair.
+Regression fixture shapes use captured saved anchors/settings; all executable quote
+values/clocks are explicitly synthetic. Focused actual process exit0/31.078873200sec,
+JUnit3 completed PASS bodies (per-body times in private receipt):
+ test_missed_touch_quote_rejection_is_safe_and_plan_specific
+ test_missed_touch_latest_rejection_and_valid_trigger_paths
+ test_missed_touch_latest_evaluation_card_is_escaped_and_refreshable
+Coverage: current native adapter shape/strict timestamp and spread rejection, per-plan
+list status and sanitized errors, valid precise entered-band/gap-through simulation,
+one mocked real submission, duplicates/out-of-order history reset and fresh reseeding,
+final moved-away/invalid quote versus candidate rejection, bounded128latest and escaped
+actual production card renderer. Real tasks/locks use accepted no-socket fixture loop.
+New3distinct/1invocation/3scheduled of3/2/5 caps; no unchanged passing node repetition.
+CUMULATIVE Job1 tests6distinct/6invocations/14scheduled,274.205004100sec; earlier
+5invocations/11scheduled/243.126130900sec and all failures/180sec timeout kept in
+prior compact receipts, never reset/hidden. New per-test60 (outer process60), invocation
+180/ordinary180/discovery60/verification450/active900; earlier budgets not reset.
+Current private exact schema1 roots active/retained ltt-trendline-missed-trigger register
+outputs and audit-hook fixture creation/rename with PID/start/completion evidence.
+Canonical exact Audit/eligible Apply/reconcile outcomes and retained paths in receipt.
+Credential-free capture retained as sole original production evidence until resolved;
+prior unresolved fixtures untouched. Task-only service/summary candidates isolate dirty
+ownership. Scoped commit/protected push/current equality follow via approved route;
+actual SHA and last-use cleanup are recorded in compact private receipt.
+After delivered source, USER next safely restarts run_local_master_control.bat and
+refreshes calculator. Restart pauses armed plans: explicitly Arm ONLY the intended
+matching Test card, then Refresh plans and inspect Latest evaluation stage/reason,
+quote timestamp/bid/ask/tick/projected price. Do not infer historical touch recovery.
+Manual acceptance remains open; Jobs2-4 stay queued. Running LTT/plans untouched here.
+
+Verification artifact cleanup: canonical exact Audit then Apply succeeded, removing23
+regularfiles/10emptydirectories/17692logicalbytes,0failed/0skipped. Includes all current
+synthetic fixture lock files with independent creation/rename/PID/start/normal-exit proof;
+no lock exemption or forcing. New fixtures need no retained inaccessible subtree.
+Sole incident capture and current provenance/compact receipt remain for unresolved
+historical evidence; pending service/summary baselines/candidates release after delivery.
+Source and tests unchanged after completed PASS bodies. Final task diff whitespace clean.
+Fresh precommit protected verify normal exit0/36.79sec, local and remote master both40cdcf3. Saved-user approved route reused; helper unchanged.

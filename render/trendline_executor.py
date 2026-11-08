@@ -25,20 +25,52 @@ class DefiniteSubmissionFailure(Exception):
 class InvalidQuote(ValueError):
     """A snapshot cannot safely establish a trigger."""
 
+    def __init__(self, reason: str = "quote_invalid", inputs: Optional[Mapping[str, object]] = None):
+        super().__init__("Fresh valid broker quote required.")
+        self.reason = reason
+        self.inputs = dict(inputs or {})
+
+
+def _quote_inputs(snapshot: object, now_ms: int) -> Dict[str, object]:
+    """Only bounded numeric quote fields; never retain broker bodies or errors."""
+    result: Dict[str, object] = {"now_ms": now_ms}
+    if not isinstance(snapshot, Mapping):
+        return result
+    stamp = snapshot.get("timestamp_ms")
+    if type(stamp) is int and 0 <= stamp < 10**16:
+        result["timestamp_ms"] = stamp
+    for key in ("bid", "ask", "tick_size"):
+        value = snapshot.get(key)
+        if not isinstance(value, (str, int, float, Decimal)) or isinstance(value, bool):
+            continue
+        text = str(value)
+        try:
+            if len(text) <= 64 and Decimal(text).is_finite():
+                result[key] = text
+        except InvalidOperation:
+            pass
+    return result
+
 
 def validate_quote(snapshot: object, instrument: str, now_ms: int, max_age_ms: int) -> Dict[str, object]:
     """Validate candidate and final quotes identically without coercing timestamps."""
     if not isinstance(snapshot, Mapping) or snapshot.get("instrument") != instrument:
-        raise InvalidQuote()
+        raise InvalidQuote("quote_symbol_mismatch", _quote_inputs(snapshot, now_ms))
     stamp = snapshot.get("timestamp_ms")
-    if type(stamp) is not int or stamp < 0 or not 0 <= now_ms - stamp <= max_age_ms:
-        raise InvalidQuote()
+    if type(stamp) is not int or stamp < 0:
+        raise InvalidQuote("quote_timestamp_invalid", _quote_inputs(snapshot, now_ms))
+    if stamp > now_ms:
+        raise InvalidQuote("quote_future", _quote_inputs(snapshot, now_ms))
+    if now_ms - stamp > max_age_ms:
+        raise InvalidQuote("quote_stale", _quote_inputs(snapshot, now_ms))
     try:
         values = [Decimal(str(snapshot[k])) for k in ("bid", "ask", "tick_size")]
-        if any(not v.is_finite() or v <= 0 for v in values) or values[0] >= values[1]:
-            raise InvalidQuote()
+        if any(not v.is_finite() or v <= 0 for v in values):
+            raise InvalidQuote("quote_prices_invalid", _quote_inputs(snapshot, now_ms))
     except (KeyError, InvalidOperation, ValueError, TypeError) as exc:
-        raise InvalidQuote() from exc
+        raise InvalidQuote("quote_prices_invalid", _quote_inputs(snapshot, now_ms)) from exc
+    if values[0] >= values[1]:
+        raise InvalidQuote("quote_spread_invalid", _quote_inputs(snapshot, now_ms))
     return {"instrument": instrument, "timestamp_ms": stamp, **dict(zip(("bid", "ask", "tick_size"), map(str, values)))}
 
 
@@ -65,12 +97,24 @@ class TrendlinePlanExecutor:
     _cycle_guard: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     last_cycle: Optional[Dict[str, object]] = field(default=None, init=False)
     last_error: Optional[str] = field(default=None, init=False)
+    latest_evaluations: Dict[str, Dict[str, object]] = field(default_factory=dict, init=False)
     _control_guard: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _eligible: set[str] = field(default_factory=set, init=False)
     generation: str = field(default_factory=lambda: uuid4().hex, init=False)
 
     def eligible(self, plan_id: str) -> bool:
         return plan_id in self._eligible
+
+    def _record(self, plan: Mapping[str, object], stage: str, reason: str, *, quote: object = None, evaluation: Optional[Mapping[str, object]] = None) -> None:
+        plan_id = str(plan["plan_id"])
+        item = {"revision": plan["revision"], "stage": stage, "reason": reason,
+                "inputs": _quote_inputs(quote, self.now_ms())}
+        if evaluation is not None:
+            item["evaluation"] = {key: evaluation[key] for key in ("reason", "trigger_price", "projected_price", "classification", "previous_classification") if key in evaluation}
+        self.latest_evaluations.pop(plan_id, None)
+        self.latest_evaluations[plan_id] = item
+        while len(self.latest_evaluations) > 128:
+            self.latest_evaluations.pop(next(iter(self.latest_evaluations)))
 
     async def arm(self, plan_id: str, *, revision: int, generation: str, confirm_live: bool = False) -> Dict[str, object]:
         async with self._control_guard:
@@ -92,6 +136,7 @@ class TrendlinePlanExecutor:
                     await self._stop_worker()
                 raise
             self._previous.pop(plan_id, None)
+            self.latest_evaluations.pop(plan_id, None)
             self._eligible.add(plan_id)
             return plan
 
@@ -106,7 +151,7 @@ class TrendlinePlanExecutor:
                 "reconciliation_message": "Unresolved claims require manual broker reconciliation; automatic retry is disabled." if count else None}
 
     def status(self) -> Dict[str, object]:
-        return {"running": self._task is not None and not self._task.done(), "generation": self.generation, "last_cycle": self.last_cycle, "last_error": self.last_error,
+        return {"running": self._task is not None and not self._task.done(), "generation": self.generation, "last_cycle": self.last_cycle, "last_error": self.last_error, "latest_evaluations": dict(self.latest_evaluations),
                 **self._reconciliation_status()}
 
     async def start(self) -> bool:
@@ -194,6 +239,10 @@ class TrendlinePlanExecutor:
                 except Exception as exc:
                     self._previous.pop(str(plan["plan_id"]), None)
                     cycle_error = _safe_error(exc)
+                    latest = self.latest_evaluations.get(str(plan["plan_id"]), {})
+                    self._record(plan, str(latest.get("stage", "evaluation")), exc.reason if isinstance(exc, InvalidQuote) else "executor_error")
+                    if isinstance(exc, InvalidQuote):
+                        self.latest_evaluations[str(plan["plan_id"])]["inputs"] = exc.inputs
                 processed += 1
             self.last_error = cycle_error
         except Exception as exc:  # Cycle remains safe; no unclaimed plan was submitted.
@@ -210,62 +259,77 @@ class TrendlinePlanExecutor:
         if not self.eligible(plan_id):
             return
         if not plan["test_trade"] and not self.live_confirmed(plan):
+            self._record(plan, "authorization", "live_confirmation_required")
             return
         if plan["order_intent"] == "limit" and not plan.get("limit_entry_price"):
             raise TrendlinePlanError("Limit entry required.")
+        self._record(plan, "candidate_quote", "quote_pending")
         raw_quote = await _await(self.quote(plan))
         quote = validate_quote(raw_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
         tick_size = quote.get("tick_size")
         observation = {"timestamp_ms": quote.get("timestamp_ms"), "bid": quote.get("bid"), "ask": quote.get("ask")}
         previous = self._previous.get(plan_id)
         if previous is not None and int(observation["timestamp_ms"]) <= int(previous["timestamp_ms"]):
-            raise InvalidQuote()
+            raise InvalidQuote("quote_duplicate" if observation["timestamp_ms"] == previous["timestamp_ms"] else "quote_out_of_order", {**_quote_inputs(quote, self.now_ms()), "previous_timestamp_ms": previous["timestamp_ms"]})
         self._previous[plan_id] = observation
         try:
             evaluation = evaluate_trigger(plan, observation, previous_observation=previous, now_ms=self.now_ms(), tick_size=tick_size)
         except TrendlinePlanError:
             self._previous.pop(plan_id, None)
+            self._record(plan, "candidate_evaluation", "plan_validation_failed", quote=quote)
             return
+        self._record(plan, "candidate_evaluation", str(evaluation.get("reason")), quote=quote, evaluation=evaluation)
         if not evaluation.get("triggered"):
             self._previous[plan_id] = observation
             return
         # The calculator obtains the exact final quote used for sizing.  Re-test
         # that quote before a claim so a moved-away candidate cannot execute.
+        self._record(plan, "final_calculation", "calculation_pending", quote=quote, evaluation=evaluation)
         calculated = await _await(self.calculate(plan, quote))
         final_quote = calculated.get("trigger_quote") if isinstance(calculated, Mapping) else None
+        self._record(plan, "final_quote", "quote_pending", quote=final_quote)
         final_quote = validate_quote(final_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
         final_observation = {"timestamp_ms": final_quote.get("timestamp_ms"), "bid": final_quote.get("bid"), "ask": final_quote.get("ask")}
         if int(final_observation["timestamp_ms"]) < int(observation["timestamp_ms"]):
-            raise InvalidQuote()
+            raise InvalidQuote("final_quote_out_of_order", _quote_inputs(final_quote, self.now_ms()))
         self._previous[plan_id] = final_observation
         final_now = self.now_ms()
         final_eval = evaluate_trigger(plan, final_observation, previous_observation=previous, now_ms=final_now, tick_size=final_quote.get("tick_size"))
+        self._record(plan, "final_evaluation", str(final_eval.get("reason")), quote=final_quote, evaluation=final_eval)
         if not final_eval.get("triggered"):
             self._previous[plan_id] = final_observation
             return
         # Re-read after the final calculation: cancellation, expiry, revision or
         # replacement invalidate the candidate before the atomic claim.
         fresh = self.store.get(plan_id)
+        self._record(plan, "claim", "checking_current_plan", quote=final_quote, evaluation=final_eval)
         if fresh["status"] != "armed" or fresh["trigger_claim"] is not None or fresh["revision"] != plan["revision"] or fresh["execution_key"] != plan["execution_key"] or fresh.get("live_authorization") != plan.get("live_authorization"):
+            self._record(plan, "claim", "plan_changed_before_claim", quote=final_quote)
             return
         if not fresh["test_trade"] and not self.live_confirmed(fresh):
+            self._record(plan, "claim", "live_confirmation_required", quote=final_quote)
             return
         claim_now = self.now_ms()
         if not self.eligible(plan_id):
+            self._record(plan, "claim", "paused_before_claim", quote=final_quote)
             return
         validate_quote(final_quote, str(plan["instrument"]), claim_now, int(plan["max_quote_age_ms"]))
         if fresh["expiry_at_ms"] is not None and claim_now >= int(fresh["expiry_at_ms"]):
+            self._record(plan, "claim", "expired_before_claim", quote=final_quote)
             return
         claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": final_observation["timestamp_ms"], "trigger_price": final_eval["trigger_price"], "trigger_kind": final_eval["trigger_kind"]}, now_ms=claim_now, expected_revision=int(plan["revision"]), expected_execution_key=str(plan["execution_key"]))
         if not claim["claimed"]:
+            self._record(plan, "claim", "duplicate_claim", quote=final_quote)
             return
         claimed = claim["plan"]
         if claimed["test_trade"]:
             self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=self.now_ms())
+            self._record(plan, "complete", "simulated", quote=final_quote, evaluation=final_eval)
             return
         # A failed durable transition leaves the claim unresolved and MUST NOT
         # call the adapter. Reconstruction only processes armed plans.
         submitting = self.store.begin_submission(plan_id, execution_key=str(claim["execution_key"]), now_ms=self.now_ms())
+        self._record(plan, "submission", "submission_started", quote=final_quote, evaluation=final_eval)
         try:
             result = await _await(self.submit(submitting, calculated, str(claim["execution_key"])))
         except asyncio.CancelledError:

@@ -1383,3 +1383,22 @@ console.log(JSON.stringify({checks,netPayload,manualPayload,visibleAfterModeChan
     assert data["checks"]["retained"] == "standard"
     assert data["checks"]["raceBlocked"] is True
     assert "standard" in data["checks"]["standardHtml"] and "Estimated round-trip commission" in data["checks"]["standardHtml"]
+
+
+def test_missed_touch_latest_evaluation_card_is_escaped_and_refreshable():
+    node=shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    harness=r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert');const source=fs.readFileSync(process.argv[1],'utf8');
+const a=source.indexOf('  function trendlineEvaluationDetails(plan) {'),b=source.indexOf('  function renderTrendlinePlans()',a);assert(a>=0&&b>a);
+const ctx=vm.createContext({escapeHtml:s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')});vm.runInContext(source.slice(a,b),ctx);
+assert.equal(ctx.trendlineEvaluationDetails({}), '');
+const plan={latest_evaluation:{revision:2,stage:'candidate_quote',reason:'quote_future',inputs:{now_ms:100,timestamp_ms:101,bid:'1.15',ask:'1.1501',tick_size:'0.0001'}}};
+let html=ctx.trendlineEvaluationDetails(plan);assert(html.includes('candidate_quote / quote_future'));assert(html.includes('timestamp_ms'));assert(html.includes('1.1501'));
+plan.latest_evaluation={revision:2,stage:'final_evaluation',reason:'touch_not_reached',inputs:{timestamp_ms:102},evaluation:{reason:'touch_not_reached',projected_price:'1.16',classification:'below'}};
+html=ctx.trendlineEvaluationDetails(plan);assert(html.includes('final_evaluation'));assert(html.includes('1.16'));
+plan.latest_evaluation.reason='<img onerror=evil()>';html=ctx.trendlineEvaluationDetails(plan);assert(!html.includes('<img'));assert(html.includes('&lt;img'));
+assert(source.includes('${trendlineEvaluationDetails(plan)}'));assert(source.includes('state.trendlinePlans=response.plans||[];'));console.log('ok');
+"""
+    result=subprocess.run([node,"-e",harness,str(JS_PATH)],capture_output=True,text=True,timeout=20)
+    assert result.returncode==0,result.stderr
+    assert result.stdout.strip()=="ok"
