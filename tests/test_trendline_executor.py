@@ -658,3 +658,32 @@ def test_missed_touch_latest_rejection_and_valid_trigger_paths(tmp_path):
     async def run():
         for name in ("inside","gap","single","duplicate","reverse","away","invalid_final"):await scenario(name)
     _run_fixture_loop(run())
+
+
+def test_fresh_xrp_broker_clock_bounds_and_native_ordering(tmp_path):
+    from render.trendline_executor import validate_quote, quote_comparison_now, require_same_quote_clock, InvalidQuote
+    now=1794128670000
+    clock={"domain":"bybit","source":"api-demo.bybit.com","offset_ms":797,"synced_at_ms":now-1000,"rtt_ms":692,"valid_for_ms":300000}
+    native={"instrument":"XRPUSDT","timestamp_ms":now+797,"bid":"1.1639","ask":"1.1640","tick_size":"0.0001"}
+    with pytest.raises(InvalidQuote) as old:validate_quote(native,"XRPUSDT",now,60000)
+    assert old.value.reason=="quote_future"  # The independently measured offset reproduces the raw-local defect.
+    fixed=validate_quote({**native,"clock":clock},"XRPUSDT",now,60000)
+    assert fixed["timestamp_ms"]==native["timestamp_ms"] and fixed["clock"]==clock
+    assert quote_comparison_now(fixed,now)==now+797+348
+    assert quote_comparison_now(fixed,now+1000)==now+1000+797+348
+    for change,reason in [({"timestamp_ms":now+10000},"quote_future"),({"timestamp_ms":now-60000},"quote_stale"),({"timestamp_ms":"bad"},"quote_timestamp_invalid"),({"ask":"1.1639"},"quote_spread_invalid"),({"tick_size":"NaN"},"quote_prices_invalid")]:
+        with pytest.raises(InvalidQuote) as bad:validate_quote({**fixed,**change},"XRPUSDT",now,60000)
+        assert bad.value.reason==reason
+    for change,reason in [({"synced_at_ms":now-300001},"clock_sync_stale"),({"synced_at_ms":now+1},"clock_metadata_invalid"),({"rtt_ms":2001},"clock_sync_uncertain"),({"offset_ms":3001},"clock_sync_uncertain"),({"offset_ms":True},"clock_metadata_invalid"),({"domain":"oanda"},"clock_metadata_invalid")]:
+        with pytest.raises(InvalidQuote) as bad:validate_quote({**fixed,"clock":{**clock,**change}},"XRPUSDT",now,60000)
+        assert bad.value.reason==reason
+    negative={**native,"timestamp_ms":now-797,"clock":{**clock,"offset_ms":-797}}
+    assert validate_quote(negative,"XRPUSDT",now,60000)["timestamp_ms"]==now-797
+    with pytest.raises(InvalidQuote):require_same_quote_clock(fixed,{**fixed,"clock":{**clock,"source":"api.bybit.com"}})
+    with pytest.raises(InvalidQuote):require_same_quote_clock(fixed,native)
+    store=TrendlinePlanStore(tmp_path/'pending.json');plan=store.create(_payload('bybit'),now_ms=1000)
+    e=TrendlinePlanExecutor(store,lambda *a:{},lambda *a:{},lambda *a:{},lambda p:True,now_ms=lambda:now)
+    e._record(plan,'candidate_quote','quote_future',quote=fixed)
+    e._record(plan,'candidate_quote','quote_pending')
+    assert e.latest_evaluations[plan['plan_id']]['reason']=='quote_future'
+    assert e.latest_evaluations[plan['plan_id']]['pending_stage']=='candidate_quote'

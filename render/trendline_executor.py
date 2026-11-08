@@ -49,20 +49,68 @@ def _quote_inputs(snapshot: object, now_ms: int) -> Dict[str, object]:
                 result[key] = text
         except InvalidOperation:
             pass
+    clock = snapshot.get("clock")
+    if isinstance(clock, Mapping):
+        for key in ("offset_ms", "synced_at_ms", "rtt_ms"):
+            if type(clock.get(key)) is int:
+                result["clock_" + key] = clock[key]
     return result
+
+
+def quote_comparison_now(snapshot: object, local_now_ms: int) -> int:
+    """Compare authentic Bybit UTC against an independently measured UTC bound.
+
+    The estimate expires after at most five minutes, RTT at most two seconds,
+    offset at most three seconds (the existing drift warning boundary). Allow
+    half the measured RTT, 1ms rounding and 100ppm drift since synchronization.
+    Use the upper bound for both future validation and conservative quote age.
+    Source timestamps are never shifted; projection and ordering remain native.
+    Legacy injected/OANDA snapshots without clock metadata use local UTC.
+    """
+    clock = snapshot.get("clock") if isinstance(snapshot, Mapping) else None
+    if clock is None:
+        return local_now_ms
+    inputs = _quote_inputs(snapshot, local_now_ms)
+    if not isinstance(clock, Mapping) or clock.get("domain") != "bybit" or not isinstance(clock.get("source"), str) or re.fullmatch(r"[A-Za-z0-9.:-]{1,128}", clock["source"]) is None:
+        raise InvalidQuote("clock_metadata_invalid", inputs)
+    if any(type(clock.get(k)) is not int for k in ("offset_ms", "synced_at_ms", "rtt_ms", "valid_for_ms")):
+        raise InvalidQuote("clock_metadata_invalid", inputs)
+    age = local_now_ms - clock["synced_at_ms"]
+    inputs["clock_sync_age_ms"] = age
+    if not 0 < clock["valid_for_ms"] <= 300_000 or age < 0:
+        raise InvalidQuote("clock_metadata_invalid", inputs)
+    if age > clock["valid_for_ms"]:
+        raise InvalidQuote("clock_sync_stale", inputs)
+    if not 0 <= clock["rtt_ms"] <= 2000 or abs(clock["offset_ms"]) > 3000:
+        raise InvalidQuote("clock_sync_uncertain", inputs)
+    uncertainty = (clock["rtt_ms"] + 1) // 2 + 1 + (age + 9999) // 10000
+    return local_now_ms + clock["offset_ms"] + uncertainty
+
+
+def require_same_quote_clock(candidate: Mapping[str, object], final: Mapping[str, object]) -> None:
+    first, second = candidate.get("clock"), final.get("clock")
+    if first is None and second is None:
+        return
+    if not isinstance(first, Mapping) or not isinstance(second, Mapping) or any(first.get(k) != second.get(k) for k in ("domain", "source")):
+        raise InvalidQuote("quote_clock_mismatch")
 
 
 def validate_quote(snapshot: object, instrument: str, now_ms: int, max_age_ms: int) -> Dict[str, object]:
     """Validate candidate and final quotes identically without coercing timestamps."""
     if not isinstance(snapshot, Mapping) or snapshot.get("instrument") != instrument:
         raise InvalidQuote("quote_symbol_mismatch", _quote_inputs(snapshot, now_ms))
+    comparison_now = quote_comparison_now(snapshot, now_ms)
+    inputs = _quote_inputs(snapshot, now_ms)
+    if snapshot.get("clock") is not None:
+        inputs["comparison_now_ms"] = comparison_now
+        inputs["clock_uncertainty_ms"] = comparison_now - now_ms - snapshot["clock"]["offset_ms"]
     stamp = snapshot.get("timestamp_ms")
     if type(stamp) is not int or stamp < 0:
         raise InvalidQuote("quote_timestamp_invalid", _quote_inputs(snapshot, now_ms))
-    if stamp > now_ms:
-        raise InvalidQuote("quote_future", _quote_inputs(snapshot, now_ms))
-    if now_ms - stamp > max_age_ms:
-        raise InvalidQuote("quote_stale", _quote_inputs(snapshot, now_ms))
+    if stamp > comparison_now:
+        raise InvalidQuote("quote_future", inputs)
+    if comparison_now - stamp > max_age_ms:
+        raise InvalidQuote("quote_stale", inputs)
     try:
         values = [Decimal(str(snapshot[k])) for k in ("bid", "ask", "tick_size")]
         if any(not v.is_finite() or v <= 0 for v in values):
@@ -71,7 +119,10 @@ def validate_quote(snapshot: object, instrument: str, now_ms: int, max_age_ms: i
         raise InvalidQuote("quote_prices_invalid", _quote_inputs(snapshot, now_ms)) from exc
     if values[0] >= values[1]:
         raise InvalidQuote("quote_spread_invalid", _quote_inputs(snapshot, now_ms))
-    return {"instrument": instrument, "timestamp_ms": stamp, **dict(zip(("bid", "ask", "tick_size"), map(str, values)))}
+    result = {"instrument": instrument, "timestamp_ms": stamp, **dict(zip(("bid", "ask", "tick_size"), map(str, values)))}
+    if snapshot.get("clock") is not None:
+        result["clock"] = dict(snapshot["clock"])
+    return result
 
 
 def valid_order_reference(value: object) -> bool:
@@ -111,6 +162,14 @@ class TrendlinePlanExecutor:
                 "inputs": _quote_inputs(quote, self.now_ms())}
         if evaluation is not None:
             item["evaluation"] = {key: evaluation[key] for key in ("reason", "trigger_price", "projected_price", "classification", "previous_classification") if key in evaluation}
+        if isinstance(quote, Mapping) and quote.get("clock") is not None:
+            try:
+                item["inputs"]["comparison_now_ms"] = quote_comparison_now(quote, item["inputs"]["now_ms"])
+            except InvalidQuote:
+                pass
+        previous = self.latest_evaluations.get(plan_id)
+        if previous and reason in {"quote_pending", "calculation_pending", "checking_current_plan"}:
+            item = {**previous, "pending_stage": stage, "pending_at_ms": self.now_ms()}
         self.latest_evaluations.pop(plan_id, None)
         self.latest_evaluations[plan_id] = item
         while len(self.latest_evaluations) > 128:
@@ -240,7 +299,7 @@ class TrendlinePlanExecutor:
                     self._previous.pop(str(plan["plan_id"]), None)
                     cycle_error = _safe_error(exc)
                     latest = self.latest_evaluations.get(str(plan["plan_id"]), {})
-                    self._record(plan, str(latest.get("stage", "evaluation")), exc.reason if isinstance(exc, InvalidQuote) else "executor_error")
+                    self._record(plan, str(latest.get("pending_stage", latest.get("stage", "evaluation"))), exc.reason if isinstance(exc, InvalidQuote) else "executor_error")
                     if isinstance(exc, InvalidQuote):
                         self.latest_evaluations[str(plan["plan_id"])]["inputs"] = exc.inputs
                 processed += 1
@@ -265,6 +324,8 @@ class TrendlinePlanExecutor:
             raise TrendlinePlanError("Limit entry required.")
         self._record(plan, "candidate_quote", "quote_pending")
         raw_quote = await _await(self.quote(plan))
+        if plan["broker"] != "bybit" and isinstance(raw_quote, Mapping) and raw_quote.get("clock") is not None:
+            raise InvalidQuote("quote_clock_mismatch")
         quote = validate_quote(raw_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
         tick_size = quote.get("tick_size")
         observation = {"timestamp_ms": quote.get("timestamp_ms"), "bid": quote.get("bid"), "ask": quote.get("ask")}
@@ -273,7 +334,7 @@ class TrendlinePlanExecutor:
             raise InvalidQuote("quote_duplicate" if observation["timestamp_ms"] == previous["timestamp_ms"] else "quote_out_of_order", {**_quote_inputs(quote, self.now_ms()), "previous_timestamp_ms": previous["timestamp_ms"]})
         self._previous[plan_id] = observation
         try:
-            evaluation = evaluate_trigger(plan, observation, previous_observation=previous, now_ms=self.now_ms(), tick_size=tick_size)
+            evaluation = evaluate_trigger(plan, observation, previous_observation=previous, now_ms=quote_comparison_now(quote, self.now_ms()), tick_size=tick_size)
         except TrendlinePlanError:
             self._previous.pop(plan_id, None)
             self._record(plan, "candidate_evaluation", "plan_validation_failed", quote=quote)
@@ -289,11 +350,12 @@ class TrendlinePlanExecutor:
         final_quote = calculated.get("trigger_quote") if isinstance(calculated, Mapping) else None
         self._record(plan, "final_quote", "quote_pending", quote=final_quote)
         final_quote = validate_quote(final_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
+        require_same_quote_clock(quote, final_quote)
         final_observation = {"timestamp_ms": final_quote.get("timestamp_ms"), "bid": final_quote.get("bid"), "ask": final_quote.get("ask")}
         if int(final_observation["timestamp_ms"]) < int(observation["timestamp_ms"]):
             raise InvalidQuote("final_quote_out_of_order", _quote_inputs(final_quote, self.now_ms()))
         self._previous[plan_id] = final_observation
-        final_now = self.now_ms()
+        final_now = quote_comparison_now(final_quote, self.now_ms())
         final_eval = evaluate_trigger(plan, final_observation, previous_observation=previous, now_ms=final_now, tick_size=final_quote.get("tick_size"))
         self._record(plan, "final_evaluation", str(final_eval.get("reason")), quote=final_quote, evaluation=final_eval)
         if not final_eval.get("triggered"):
@@ -309,11 +371,12 @@ class TrendlinePlanExecutor:
         if not fresh["test_trade"] and not self.live_confirmed(fresh):
             self._record(plan, "claim", "live_confirmation_required", quote=final_quote)
             return
-        claim_now = self.now_ms()
+        claim_local_now = self.now_ms()
+        claim_now = quote_comparison_now(final_quote, claim_local_now)
         if not self.eligible(plan_id):
             self._record(plan, "claim", "paused_before_claim", quote=final_quote)
             return
-        validate_quote(final_quote, str(plan["instrument"]), claim_now, int(plan["max_quote_age_ms"]))
+        validate_quote(final_quote, str(plan["instrument"]), claim_local_now, int(plan["max_quote_age_ms"]))
         if fresh["expiry_at_ms"] is not None and claim_now >= int(fresh["expiry_at_ms"]):
             self._record(plan, "claim", "expired_before_claim", quote=final_quote)
             return

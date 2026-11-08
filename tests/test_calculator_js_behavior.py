@@ -1402,3 +1402,18 @@ assert(source.includes('${trendlineEvaluationDetails(plan)}'));assert(source.inc
     result=subprocess.run([node,"-e",harness,str(JS_PATH)],capture_output=True,text=True,timeout=20)
     assert result.returncode==0,result.stderr
     assert result.stdout.strip()=="ok"
+
+
+def test_fresh_xrp_timing_diagnostic_wraps_and_shows_pending_phase():
+    node=shutil.which('node') or r'C:\Program Files\nodejs\node.exe'
+    code=r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert'),src=fs.readFileSync(process.argv[1],'utf8');
+const a=src.indexOf('  function trendlineEvaluationDetails(plan) {'),b=src.indexOf('  function renderTrendlinePlans()',a);
+const ctx=vm.createContext({escapeHtml:s=>String(s).replace(/</g,'&lt;').replace(/>/g,'&gt;')});vm.runInContext(src.slice(a,b),ctx);
+const html=ctx.trendlineEvaluationDetails({latest_evaluation:{revision:2,stage:'candidate_quote',reason:'quote_future',pending_stage:'candidate_quote',inputs:{now_ms:1000,timestamp_ms:1797,comparison_now_ms:2145,clock_offset_ms:797}}});
+assert(html.includes('overflow-wrap:anywhere'));assert(html.includes('white-space:normal'));assert(html.includes('quote_future'));assert(html.includes('checking candidate_quote'));assert(html.includes('comparison_now_ms'));
+assert(!ctx.trendlineEvaluationDetails({latest_evaluation:{stage:'<img>',reason:'<script>',inputs:{}}}).includes('<img>'));console.log('ok');
+"""
+    p=subprocess.run([node,'-e',code,str(JS_PATH)],capture_output=True,text=True,timeout=15)
+    assert p.returncode==0,p.stderr
+    assert p.stdout.strip()=='ok'

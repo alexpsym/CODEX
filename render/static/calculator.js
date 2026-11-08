@@ -1026,7 +1026,7 @@
   function trendlineEvaluationDetails(plan) {
     const item=plan.latest_evaluation;
     if(!item) return '';
-    return `<div class="muted" role="status">Latest evaluation (revision ${escapeHtml(String(item.revision))}): ${escapeHtml(String(item.stage))} / ${escapeHtml(String(item.reason))}<br>${escapeHtml(JSON.stringify(item.inputs||{}))}${item.evaluation ? `<br>${escapeHtml(JSON.stringify(item.evaluation))}` : ''}</div>`;
+    return `<div class="muted" role="status" style="overflow-wrap:anywhere;white-space:normal;min-width:0">Latest evaluation (revision ${escapeHtml(String(item.revision))}): ${escapeHtml(String(item.stage))} / ${escapeHtml(String(item.reason))}${item.pending_stage ? ` (checking ${escapeHtml(String(item.pending_stage))})` : ''}<br>${escapeHtml(JSON.stringify(item.inputs||{}))}${item.evaluation ? `<br>${escapeHtml(JSON.stringify(item.evaluation))}` : ''}</div>`;
   }
   function renderTrendlinePlans() {
     const list=$('trendline-plan-list'); if(!list) return;

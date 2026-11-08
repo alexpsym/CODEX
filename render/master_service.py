@@ -137,7 +137,7 @@ from render.trendline_plans import (
     TrendlinePlanStore,
     live_execution_authorized,
 )
-from render.trendline_executor import TrendlinePlanExecutor, DefiniteSubmissionFailure, InvalidQuote, validate_quote, valid_order_reference
+from render.trendline_executor import TrendlinePlanExecutor, DefiniteSubmissionFailure, InvalidQuote, validate_quote, valid_order_reference, quote_comparison_now, require_same_quote_clock
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
     is_likely_oanda_pair,
@@ -302,10 +302,34 @@ async def _trendline_fresh_calculation(plan: Mapping[str, object], _quote: Optio
     if not isinstance(calculated["trigger_quote"], Mapping):
         raise ValueError("Final calculator quote snapshot was unavailable.")
     validate_quote(calculated["trigger_quote"], str(plan["instrument"]), time.time_ns() // 1_000_000, int(plan["max_quote_age_ms"]))
+    if _quote is not None:
+        require_same_quote_clock(_quote, calculated["trigger_quote"])
     return calculated
 
 
-def _trendline_broker_snapshot(broker: str, symbol: str, row: Mapping[str, object], tick: object, *, timestamp: object = None, max_age_ms: int = 60_000) -> Dict[str, object]:
+async def _trendline_bybit_clock(base_url: str) -> Dict[str, object]:
+    """Reuse the independent base-specific signing clock, never the ticker time.
+
+    Signing's fallback to an old offset/zero is unsuitable for trigger safety:
+    inspect the actual cache after its normal refresh and fail closed if absent,
+    expired or uncertain. No new clock cache or OS-clock adjustment is made.
+    """
+    try:
+        await _get_bybit_time_offset_ms(base_url)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise InvalidQuote("clock_metadata_invalid", {"now_ms": time.time_ns() // 1_000_000}) from exc
+    now = time.time_ns() // 1_000_000
+    cached = _BYBIT_TIME_OFFSET_CACHE.get(_normalize_bybit_base_url(base_url))
+    if not isinstance(cached, Mapping):
+        raise InvalidQuote("clock_sync_unavailable", {"now_ms": now})
+    clock = {"domain": "bybit", "source": _bybit_base_key(base_url),
+             "offset_ms": cached.get("offset_ms"), "synced_at_ms": cached.get("synced_at"),
+             "rtt_ms": cached.get("rtt_ms"), "valid_for_ms": min(300_000, BYBIT_TIME_OFFSET_TTL_SECONDS * 1000)}
+    quote_comparison_now({"clock": clock}, now)
+    return clock
+
+
+def _trendline_broker_snapshot(broker: str, symbol: str, row: Mapping[str, object], tick: object, *, timestamp: object = None, max_age_ms: int = 60_000, clock: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
     if broker == "oanda":
         if row.get("status") != "tradeable":
             raise InvalidQuote()
@@ -321,14 +345,21 @@ def _trendline_broker_snapshot(broker: str, symbol: str, row: Mapping[str, objec
         instrument = row.get("instrument")
     else:
         instrument, bid, ask = row.get("symbol"), row.get("bid1Price"), row.get("ask1Price")
-    return validate_quote({"instrument": instrument, "bid": bid, "ask": ask, "timestamp_ms": timestamp, "tick_size": tick}, symbol, time.time_ns() // 1_000_000, max_age_ms)
+    snapshot = {"instrument": instrument, "bid": bid, "ask": ask, "timestamp_ms": timestamp, "tick_size": tick}
+    if clock is not None:
+        if broker != "bybit":
+            raise InvalidQuote("quote_clock_mismatch")
+        snapshot["clock"] = dict(clock)
+    return validate_quote(snapshot, symbol, time.time_ns() // 1_000_000, max_age_ms)
 
 
 async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, object]:
     broker = str(plan["broker"])
     symbol = str(plan["instrument"]).upper()
+    clock = None
     if broker == "bybit":
         _mode, _key, _secret, base_url, _source = resolve_bybit_credentials_for(str(plan["account"]))
+        clock = await _trendline_bybit_clock(base_url)
         ticker = await _fetch_bybit_ticker_cached(base_url, "linear", symbol, max_age_s=0, allow_stale_s=0, timeout_s=1.5)
         payload = ticker.get("payload") if isinstance(ticker, Mapping) else {}
         row = _extract_valid_bybit_ticker_row(payload if isinstance(payload, dict) else {}, symbol)
@@ -346,7 +377,7 @@ async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, 
         tick = str(Decimal("1").scaleb(-int(meta["displayPrecision"])))
     else:
         raise ValueError("Unsupported trendline broker.")
-    return _trendline_broker_snapshot(broker, symbol, row, tick, timestamp=timestamp, max_age_ms=int(plan["max_quote_age_ms"]))
+    return _trendline_broker_snapshot(broker, symbol, row, tick, timestamp=timestamp, max_age_ms=int(plan["max_quote_age_ms"]), clock=clock)
 
 
 async def _trendline_executor_submit(plan: Mapping[str, object], calculation: Mapping[str, object], execution_key: str) -> Mapping[str, object]:
@@ -31559,7 +31590,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             if _include_trendline_snapshot:
                 if inst.get("status") != "Trading":
                     raise InvalidQuote()
-                sizing_snapshot = _trendline_broker_snapshot("bybit", symbol_in, row, tick_size, timestamp=tickers.get("time"), max_age_ms=_max_quote_age_ms)
+                sizing_snapshot = _trendline_broker_snapshot("bybit", symbol_in, row, tick_size, timestamp=tickers.get("time"), max_age_ms=_max_quote_age_ms, clock=await _trendline_bybit_clock(base_url))
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")

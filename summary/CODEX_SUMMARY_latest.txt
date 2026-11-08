@@ -6428,3 +6428,89 @@ Sole incident capture and current provenance/compact receipt remain for unresolv
 historical evidence; pending service/summary baselines/candidates release after delivery.
 Source and tests unchanged after completed PASS bodies. Final task diff whitespace clean.
 Fresh precommit protected verify normal exit0/36.79sec, local and remote master both40cdcf3. Saved-user approved route reused; helper unchanged.
+
+
+2026-11-08 JOB1 NEW XRP BUY/SELL / CLOCK-DOMAIN CORRECTION
+Baseline masterf0a9174eaea3010c788a8942ff60331955d478a9, staged paths empty. Read root
+AGENTS/current checkpoint and private receipts; no scoped AGENTS under render/tests.
+Preserved40cdcf3/f0a9174 and early Git-permission rule, unrelated dirty sources/summary/
+journal/tests/settings/runtime/deletions. Custom instructions untouched. Approved saved-user
+require_escalated helper verify at start exit0/10.70sec, fresh local/remote bothf0a9174.
+Fresh incident ONE capture: parent exit0/1.287739200sec, child completed0.778995000sec,
+outer20sec; exact current records read once, GET plan-list and monitor/status once each,
+bounded existing log window and process creation/image. No broker/time/pricing/history
+requests, state requests/mutations, plan replacement/arming/cancel, app/monitor/MT5 restart,
+trade/Resync/import/build/install/schedule/dependency/subagent operations. Capture preserved.
+Actual fresh worker PID96972, Python image, creation1794125772514=Brisbane18:16:12.514;
+log startup18:16:19 and both Arm200s match this incident. Supplied expected fingerprint
+52512b29684323b8 is not independently confirmed by sanitized captured log; no old-worker
+attribution. IDs4ff042542c31412a9b8bb8ed68518d83 SELL and
+ef81f95d522a465bb351984d31b45c54 BUY both revision2/armed/eligible, Demo/TestYes,
+Touch/executable (sell bid/buy ask), tolerance0, rayON, expiryNone, max-age60000/gap300000,
+stop10/riskpercent1/R1/timeframe1m, no claim/outcome. Source timestamps/settings unchanged.
+Sell anchors1794125340000@1.1644010536093532 ->1794125700000@1.1639763460829737.
+Buy anchors1794125640000@1.1617029116770599 ->1794125820000@1.1618028428597373.
+Buy A1 saved precision ends0599 (brief rounded059); fixtures preserve actual saved value.
+Capture at1794128670010: sell candidate_quote/executor_error; buy quote_pending,
+monitor running/processed2, global EXECUTOR_ERROR. It did NOT capture quote_future or
+its raw quote digits. Existing diagnostic pending overwrote completed results. Positive
+independent sync estimates captured (797/692,1223/1532,1188/1937,967/1462,905/1385,
+521/965,754/1168 offset/RTTms) support supplied screenshot's quote_future report.
+Confirmed canonical CODE defect by regression: authenticated-source Bybit UTC timestamp
+local+797 is rejected against raw local UTC, despite fresh independent797ms offset and
+692ms RTT. This reproduces the screenshot-reported clock-domain failure; do NOT assert
+that current capture's separate generic error, both historical cards or every chart
+crossing were explained. Historical executable samples remain unavailable; no replay.
+Correction reuses existing normalized account-base _BYBIT_TIME_OFFSET_CACHE and normal
+_get_bybit_time_offset_ms refresh, checking actual cache afterward (never its stale/zero
+fallback result). Missing metadata fails clock_sync_unavailable; stale/malformed/uncertain
+metadata fails safely. No new cache/provider/registry or OS/global/OANDA clock shift.
+Independent signing-clock metadata travels only with private Bybit snapshots through
+candidate adapter, real calculator private sizing snapshot and fresh calculation. Guard:
+integer source/offset/sync/RTT/TTL, sync age0..min(configTTL,300000), RTT0..2000, abs offset
+<=3000 (existing drift-warning threshold). Uncertainty=ceil(RTT/2)+1ms rounding+100ppm
+age drift. Compare quote timestamps against local+measuredOffset+uncertainty upper bound;
+use same upper bound conservatively for age/expiry and candidate/final evaluate_trigger,
+then last freshness/claim. Source timestamps remain authentic/unshifted for anchor
+projection/order; metadata is applied ONCE per comparison, never to quote timestamps.
+Final and candidate must retain same broker/base clock identity; absent/mismatched final
+clock rejected. OANDA snapshots use existing local UTC and cannot borrow Bybit clock.
+Legacy injected snapshots without clock retain local-UTC validation; canonical Bybit
+adapter always requires independent measured context. Strict symbol/prices/spread/tick,
+future/stale/order checks, zero-tolerance Touch/gap, final exact sizing quote, plan revision/
+eligibility/Live/Test/durable claim/begin_submission/replay/uncertain behavior retained.
+Last completed diagnostic now survives pending acquisition with separate pending phase;
+error recording follows active phase. Narrow inline wrapping on existing detail prevents
+numeric JSON overflow; escaping and bounded128latest retained. No new panel/polling/API.
+Focused invocation1 normal childOSexit0/24.461619200sec, JUnit4completed PASS bodies:
+ test_fresh_xrp_broker_clock_bounds_and_native_ordering
+ test_fresh_xrp_clock_refresh_is_base_scoped_and_fails_closed
+ test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome
+ test_fresh_xrp_timing_diagnostic_wraps_and_shows_pending_phase
+Clearly synthetic quotes/clocks use captured distinct slopes/settings, not invented
+historical prices. Real canonical adapter/independent cache refresh/calculator path,
+buy ask/sell bid, entered-band and valid gap, right extensions, one submitted/simulated
+claim each and0POSTs; no new broker or time call in tests. Guards cover bad spread,
+malformed/stale/far-future/native ordering, bad/stale sync, independent Demo/Live bases,
+final movement, reverse final timestamp, expiry of sync during calculation, stale last
+claim gate, duplicate claims and pending diagnostic/escaping/wrapping. Fixture event
+loop uses real async locks/tasks and no socketpair. Old directly affected adapter fixtures
+now explicitly supply measured zero-offset clocks; their intentionally changed fixtures
+were not rerun or claimed newly passing. No unchanged passing-test repetition.
+NEW4distinct/1invocation/4scheduled of4/2/6. CUMULATIVE10distinct/7invocations/18scheduled,
+298.666623300sec (earlier274.205004100 and original failures/180.066788400sec timeout
+preserved in prior receipts). Per-test60 (whole worker60), invocation180/ordinary180,
+discovery60/verify450/active1200; new incident capture1/1. Current root only under exact
+active/retained ltt-trendline-fresh-xrp-trigger; audit-hook creation/rename PID/start/normal
+completion evidence. Canonical reviewed Audit/eligible Apply and reconcile/actual counts
+in compact receipt. Sole failure capture retained until accepted resolution; prior
+unresolved fixtures untouched. Task-only source/summary baselines exclude unrelated dirt.
+One scoped commit/protected push/current equality follow via approved route; actual SHA
+and delivery/cleanup in private receipt. Manual acceptance remains awaiting user's Pass.
+Next user-safe normal run_local_master_control.bat restart and calculator refresh pauses
+plans; selected-card Arm uses SAME saved plans/settings/identity, not replacement. For
+TestYes a FUTURE qualifying sampled touch must finish submitted/outcome simulated once,
+visible after Refresh; no broker order expected. Inspect exact latest rejection if still
+armed. No actual restart, live retest, historical recovery or proven market touch claimed.
+Jobs2-4 remain queued, no next brief until user's acceptance.
+Precommit fresh protected verify exit0/11.51sec: local/remote bothf0a9174. Exact verification cleanup removed21files/9emptydirs/23223bytes,0failed/0skipped. Capture/provenance retained; consumed delivery candidates release after push.

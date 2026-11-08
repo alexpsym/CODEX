@@ -3366,6 +3366,9 @@ def test_trendline_real_calculator_snapshots_and_broker_outcomes(monkeypatch: py
     meta = {"symbol":"BTCUSDT", "status":"Trading", "priceFilter":{"tickSize":"0.1"},
             "lotSizeFilter":{"qtyStep":"0.001", "minOrderQty":"0.001", "maxOrderQty":"100000", "maxMktOrderQty":"100000", "minNotionalValue":"1"},
             "leverageFilter":{"maxLeverage":"100"}}
+    async def fixture_offset(*a,**kw):return 0
+    monkeypatch.setattr(service,"_get_bybit_time_offset_ms",fixture_offset)
+    monkeypatch.setattr(service,"_BYBIT_TIME_OFFSET_CACHE",{service._normalize_bybit_base_url("https://bybit.invalid"):{"synced_at":now,"offset_ms":0,"rtt_ms":0}})
     async def bybit_get(base, path, params, **kwargs):
         if path == "/v5/market/instruments-info": return {"retCode":0, "result":{"list":[meta]}}
         assert path == "/v5/market/tickers", path
@@ -4448,6 +4451,9 @@ def test_missed_touch_quote_rejection_is_safe_and_plan_specific(tmp_path, monkey
     monkeypatch.setattr(service.time,"time_ns",lambda:now*1000000)
     monkeypatch.setattr(service,"resolve_bybit_credentials_for",lambda a:("demo","private-key","private-secret","https://mock.invalid","mock"))
     quote={"symbol":"XRPUSDT","bid1Price":"1.15","ask1Price":"1.1501","lastPrice":"1.15"};stamp=[now]
+    async def fixture_offset(*a,**kw):return 0
+    monkeypatch.setattr(service,"_get_bybit_time_offset_ms",fixture_offset)
+    monkeypatch.setattr(service,"_BYBIT_TIME_OFFSET_CACHE",{service._normalize_bybit_base_url("https://mock.invalid"):{"synced_at":now,"offset_ms":0,"rtt_ms":0}})
     async def ticker(base,category,symbol,**kw):
         assert kw["max_age_s"]==0 and kw["allow_stale_s"]==0
         return {"payload":{"time":stamp[0],"result":{"list":[quote]}}}
@@ -4457,7 +4463,7 @@ def test_missed_touch_quote_rejection_is_safe_and_plan_specific(tmp_path, monkey
     e=TrendlinePlanExecutor(store,service._trendline_executor_quote,lambda *a:{},lambda *a:{},lambda p:True,now_ms=lambda:now);e._eligible.add(plan["plan_id"])
     monkeypatch.setattr(service,"TRENDLINE_PLAN_STORE",store);monkeypatch.setattr(service,"TRENDLINE_EXECUTOR",e);monkeypatch.setattr(service,"APP_PROFILE","local")
     async def run():
-        for value,reason in [(None,"quote_timestamp_invalid"),(str(now),"quote_timestamp_invalid"),(now+1,"quote_future"),(now-60001,"quote_stale")]:
+        for value,reason in [(None,"quote_timestamp_invalid"),(str(now),"quote_timestamp_invalid"),(now+2,"quote_future"),(now-60001,"quote_stale")]:
             stamp[0]=value;await e.cycle();latest=e.latest_evaluations[plan["plan_id"]]
             assert latest["stage"]=="candidate_quote" and latest["reason"]==reason
             assert e.last_error=="QUOTE_INVALID: Fresh valid broker quote required."
@@ -4470,5 +4476,125 @@ def test_missed_touch_quote_rejection_is_safe_and_plan_specific(tmp_path, monkey
         e.quote=bad;await e.cycle();assert e.latest_evaluations[plan["plan_id"]]["reason"]=="executor_error"
         assert "private" not in json.dumps(e.status())
         quote["ask1Price"]="1.1501";fresh=await service._trendline_executor_quote(plan)
-        assert fresh=={"instrument":"XRPUSDT","timestamp_ms":now,"bid":"1.15","ask":"1.1501","tick_size":"0.0001"}
+        assert fresh["clock"]["offset_ms"]==0
+        assert {k:v for k,v in fresh.items() if k!="clock"}=={"instrument":"XRPUSDT","timestamp_ms":now,"bid":"1.15","ask":"1.1501","tick_size":"0.0001"}
+    _run_fixture_loop(run())
+
+
+def test_fresh_xrp_clock_refresh_is_base_scoped_and_fails_closed(monkeypatch):
+    from test_trendline_executor import _run_fixture_loop
+    from render.trendline_executor import InvalidQuote
+    service=master_service;now=[1794128670000];demo='https://api-demo.bybit.com';live='https://api.bybit.com'
+    monkeypatch.setattr(service.time,'time',lambda:now[0]/1000);monkeypatch.setattr(service.time,'time_ns',lambda:now[0]*1000000)
+    monkeypatch.setattr(service,'_BYBIT_TIME_OFFSET_CACHE',{});monkeypatch.setattr(service,'_open_orders_authoritative',lambda:True)
+    calls=[]
+    async def server(base):
+        calls.append(base);before=now[0];now[0]+=692;return before+346+797
+    monkeypatch.setattr(service,'_fetch_bybit_server_time_ms',server)
+    async def run():
+        clock=await service._trendline_bybit_clock(demo)
+        assert clock['offset_ms']==797 and clock['rtt_ms']==692 and clock['source']=='api-demo.bybit.com'
+        assert calls==[demo]
+        await service._trendline_bybit_clock(demo);assert calls==[demo]
+        async def unavailable(*a):raise RuntimeError('synthetic outage')
+        monkeypatch.setattr(service,'_fetch_bybit_server_time_ms',unavailable)
+        with pytest.raises(InvalidQuote) as missing:await service._trendline_bybit_clock(live)
+        assert missing.value.reason=='clock_sync_unavailable'
+        now[0]+=300001
+        with pytest.raises(InvalidQuote) as stale:await service._trendline_bybit_clock(demo)
+        assert stale.value.reason=='clock_sync_stale'
+        key=service._normalize_bybit_base_url(demo)
+        service._BYBIT_TIME_OFFSET_CACHE[key]={'synced_at':now[0],'offset_ms':797,'rtt_ms':9999}
+        with pytest.raises(InvalidQuote) as uncertain:await service._trendline_bybit_clock(demo)
+        assert uncertain.value.reason=='clock_sync_uncertain'
+        service._BYBIT_TIME_OFFSET_CACHE[key]={'synced_at':'invalid','offset_ms':797,'rtt_ms':10}
+        with pytest.raises(InvalidQuote) as malformed:await service._trendline_bybit_clock(demo)
+        assert malformed.value.reason=='clock_metadata_invalid'
+    _run_fixture_loop(run())
+
+
+def test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome(tmp_path,monkeypatch):
+    from test_trendline_executor import _payload,_run_fixture_loop
+    from render.trendline_plans import projected_price,live_execution_authorized
+    from render.trendline_executor import TrendlinePlanExecutor
+    from decimal import Decimal as D
+    service=master_service;now=[1794126200000];base='https://api-demo.bybit.com';current={};counts={};post=[]
+    monkeypatch.setattr(service.time,'time',lambda:now[0]/1000);monkeypatch.setattr(service.time,'time_ns',lambda:now[0]*1000000)
+    monkeypatch.setattr(service,'resolve_bybit_credentials_for',lambda a:('demo','fixture-key','fixture-secret',base,'fixture'))
+    monkeypatch.setattr(service,'_BYBIT_TIME_OFFSET_CACHE',{});monkeypatch.setattr(service,'_BYBIT_TICKER_CACHE',{});monkeypatch.setattr(service,'_BYBIT_TICKER_INFLIGHT',{})
+    meta={'symbol':'XRPUSDT','status':'Trading','priceFilter':{'tickSize':'0.0001'},'lotSizeFilter':{'qtyStep':'0.001','minOrderQty':'0.001','maxOrderQty':'1000000','maxMktOrderQty':'1000000','minNotionalValue':'1'},'leverageFilter':{'maxLeverage':'100'}}
+    async def instrument(*a,**kw):return meta
+    async def resolve(*a,**kw):return 'XRPUSDT',meta,{}
+    async def wallet(*a,**kw):return {'available_usdt':D('1000'),'total_equity':D('1000')}
+    async def ticker(*a,**kw):
+        assert a[1]=='/v5/market/tickers'
+        p=current['plan'];stamp=now[0]+797
+        if current.get('final') and current['mode']=='reverse_final':stamp-=200
+        line=projected_price(p,stamp);offset=current['offset']
+        if current.get('final') and current['mode']=='away':offset=D('-0.001')
+        executable=line+offset;tick=D('0.0001');bid=executable if p['action']=='sell' else executable-tick;ask=bid+tick
+        counts[p['plan_id']]=counts.get(p['plan_id'],0)+1
+        return {'retCode':0,'time':stamp,'result':{'list':[{'symbol':'XRPUSDT','bid1Price':str(bid),'ask1Price':str(ask),'lastPrice':str((bid+ask)/2)}]}}
+    def forbidden(*a,**kw):post.append(True);raise AssertionError('No broker POST or real state')
+    monkeypatch.setattr(service,'_bybit_get_async',ticker);monkeypatch.setattr(service,'_bybit_get_instrument_info_cached',instrument);monkeypatch.setattr(service,'_resolve_bybit_calculator_symbol_fast',resolve);monkeypatch.setattr(service,'_fetch_bybit_balance_usdt_cached',lambda *a,**kw:wallet_result())
+    async def wallet_result():return await wallet(),{}
+    for name in ('_upsert_calculator_trade_context','_upsert_bybit_demo_calc_context','_schedule_dropbox_upload_state_backup','_log_webhook_event','cache_bybit_demo_tpsl_request','_invalidate_open_orders_cache'):
+        monkeypatch.setattr(service,name,lambda *a,**kw:{})
+    async def no_time_request(*a,**kw):raise RuntimeError('fixture clock refresh unavailable')
+    monkeypatch.setattr(service,'_fetch_bybit_server_time_ms',no_time_request)
+    monkeypatch.setattr(service,'_bybit_signed_post',forbidden);monkeypatch.setattr(service,'_bybit_signed_get',forbidden)
+    monkeypatch.setattr(service,'_OANDA_AUD_USD_CACHE',{'value':0.66,'ts':now[0]/1000})
+    anchors={'sell':[{'timestamp_ms':1794125340000,'price':'1.1644010536093532'},{'timestamp_ms':1794125700000,'price':'1.1639763460829737'}],'buy':[{'timestamp_ms':1794125640000,'price':'1.1617029116770599'},{'timestamp_ms':1794125820000,'price':'1.1618028428597373'}]}
+    async def scenario(mode):
+        store=service.TrendlinePlanStore(tmp_path/mode/'plans.json');plans=[];seen={};claims=[]
+        for side in ('sell','buy'):
+            p=store.create({**_payload('bybit',test_trade=True),'instrument':'XRPUSDT','action':side,'anchors':anchors[side],'stop_loss_ticks':10,'rr_target':'1','risk_mode':'percent','risk_value':'1'},now_ms=1794125930000)
+            plans.append(store.arm(p['plan_id'],now_ms=1794125931000))
+        async def candidate(p):
+            now[0]+=100;seen[p['plan_id']]=seen.get(p['plan_id'],0)+1
+            current.update(plan=p,mode=mode,final=False,offset=D('-0.001') if mode=='gap' and seen[p['plan_id']]==1 else D('0.001') if mode=='gap' else D('0'))
+            q=await service._trendline_executor_quote(p)
+            assert q['timestamp_ms']==now[0]+797 and q['clock']['offset_ms']==797
+            return q
+        async def calculate(p,q):
+            now[0]+=2;current['final']=True
+            service._OANDA_AUD_USD_CACHE.update(value=0.66,ts=now[0]/1000)
+            calc=await service._trendline_fresh_calculation(p,q)
+            assert calc['trigger_quote']['timestamp_ms']==now[0]+797-(200 if mode=='reverse_final' else 0)
+            assert D(calc['entry_price'])==service._snap_to_increment(D(calc['trigger_quote']['ask' if p['action']=='buy' else 'bid']),D('0.0001'))
+            if mode=='clock_expired':now[0]+=300001
+            return calc
+        e=TrendlinePlanExecutor(store,candidate,calculate,forbidden,live_execution_authorized,now_ms=lambda:now[0]);e._eligible.update(p['plan_id'] for p in plans)
+        original=store.claim_trigger
+        def claiming(pid,trigger,**kw):
+            claims.append(pid);assert kw['now_ms']>=trigger['trigger_timestamp_ms'];return original(pid,trigger,**kw)
+        monkeypatch.setattr(store,'claim_trigger',claiming)
+        if mode=='claim_stale':
+            get=store.get
+            def delayed(pid):
+                p=get(pid)
+                if current.get('final'):now[0]+=60001
+                return p
+            monkeypatch.setattr(store,'get',delayed)
+        key=service._normalize_bybit_base_url(base)
+        service._BYBIT_TIME_OFFSET_CACHE[key]={'synced_at':now[0],'offset_ms':797,'rtt_ms':692}
+        # Keep this independent clock fresh at the scenario boundary only.
+        await e.cycle()
+        if mode=='gap':await e.cycle()
+        for p in plans:
+            final=original_get(store,p['plan_id'])
+            if mode in ('inside','gap'):
+                assert final['status']=='submitted' and final['execution_result']['outcome']=='simulated'
+                assert claims.count(p['plan_id'])==1
+                assert original(p['plan_id'],{},now_ms=now[0])['duplicate'] is True
+                assert final['anchors']==anchors[p['action']]
+                assert final['trigger_claim']['trigger_kind']==('entered_band' if mode=='inside' else 'gap_through')
+            else:
+                assert final['status']=='armed' and final['trigger_claim'] is None
+        before=dict(counts)
+        if mode in ('inside','gap'):await e.cycle();assert counts==before
+        assert not post
+    original_get=service.TrendlinePlanStore.get
+    async def run():
+        for mode in ('inside','gap','away','clock_expired','claim_stale','reverse_final'):await scenario(mode)
     _run_fixture_loop(run())
