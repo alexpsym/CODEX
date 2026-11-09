@@ -38190,49 +38190,64 @@ def _trendline_full_close_proof(plan, context, history, executions):
 
 
 async def _trendline_read_close_proof(plan, context, config):
-    """At most three history and three execution pages, bounded by the owning job."""
-    async def read(path, params):
-        response = await _open_orders_scoped_read(_bybit_signed_get(base_url=config["base_url"], api_key=config["api_key"],
-            api_secret=config["api_secret"], path=path, params=params), "Trendline closure " + path)
-        result = response.get("result") or {}
-        if response.get("retCode") not in (0, "0") or result.get("category") not in (None, "linear") or not isinstance(result.get("list"), list):
-            raise ValueError("Closure history incomplete")
-        return result
+    """Complete bounded symbol-window pages, then correlate only exact order IDs."""
+    counts = {"history": 0, "execution": 0}
+    def decision(reason, proof=None):
+        BYBIT_LOGGER.info("Trendline closure decision plan=%s generation=%s reason=%s history_pages=%s execution_pages=%s",
+                         plan["plan_id"], _OPEN_ORDERS_COLLECTION_VERSION.get(), reason, counts["history"], counts["execution"])
+        return proof
+    async def pages(path, params, kind):
+        rows, cursor, seen = [], "", set()
+        for _ in range(3):
+            request = dict(params)
+            if cursor:
+                request["cursor"] = cursor
+            counts[kind] += 1
+            response = await _open_orders_scoped_read(_bybit_signed_get(base_url=config["base_url"], api_key=config["api_key"],
+                api_secret=config["api_secret"], path=path, params=request), "Trendline closure " + path)
+            result = response.get("result") or {}
+            if response.get("retCode") not in (0, "0") or result.get("category") not in (None, "linear") or not isinstance(result.get("list"), list):
+                return decision(kind + "_response_invalid")
+            if any(not isinstance(row, dict) or row.get("symbol") != plan["instrument"] for row in result["list"]):
+                return decision(kind + "_symbol_mismatch")
+            rows.extend(result["list"])
+            cursor = str(result.get("nextPageCursor") or "")
+            if not cursor:
+                return rows
+            if cursor in seen:
+                return decision(kind + "_cursor_repeated")
+            seen.add(cursor)
+        return decision(kind + "_pages_incomplete")
     order_id = plan["execution_result"]["order_id"]
-    first = await read("/v5/order/history", {"category": "linear", "orderId": order_id, "limit": "1"})
-    if len(first["list"]) != 1 or first.get("nextPageCursor"):
-        return None
-    opener = first["list"][0]
-    if opener.get("orderId") != order_id or opener.get("symbol") != plan["instrument"] or int(opener.get("positionIdx", -1)) != context["position_idx"]:
-        return None
-    start, end = int(opener["createdTime"]), time.time_ns() // 1_000_000
+    start, end = int(plan["created_at_ms"]), time.time_ns() // 1_000_000
     if start <= 0 or end < start or end - start > _BYBIT_MAX_WINDOW_MS:
-        return None  # No truncation/age-based closure inference.
-    executions, cursor, seen = [], "", set()
-    for _ in range(3):
-        params = {"category": "linear", "symbol": plan["instrument"], "startTime": str(start), "endTime": str(end), "limit": "100"}
-        if cursor:
-            params["cursor"] = cursor
-        page = await read("/v5/execution/list", params)
-        executions.extend(page["list"])
-        cursor = str(page.get("nextPageCursor") or "")
-        if not cursor:
-            break
-        if cursor in seen:
-            return None
-        seen.add(cursor)
-    if cursor:
+        return decision("history_window_unavailable")
+    # Bybit can return a cursor on a singleton exact-ID result followed by an
+    # empty final page. One complete scoped history window supplies the exact
+    # opener AND closing order scopes without exceeding three history pages.
+    rows = await pages("/v5/order/history", {"category": "linear", "symbol": plan["instrument"],
+        "startTime": str(start), "endTime": str(end), "limit": "50"}, "history")
+    if rows is None:
         return None
-    order_ids = {row.get("orderId") for row in executions if row.get("execType") == "Trade" and row.get("symbol") == plan["instrument"]}
-    if not order_ids or len(order_ids) > 3 or None in order_ids:
+    history = {}
+    for row in rows:
+        identity = row.get("orderId")
+        if not identity or identity in history and history[identity] != row:
+            return decision("history_identity_conflict")
+        history[identity] = row
+    opener = history.get(order_id) or {}
+    if (opener.get("symbol") != plan["instrument"] or opener.get("orderLinkId") != plan["execution_key"]
+            or int(opener.get("positionIdx", -1)) != context["position_idx"]):
+        return decision("opening_scope_unconfirmed")
+    start = int(opener["createdTime"])
+    if start <= 0 or start > end or end - start > _BYBIT_MAX_WINDOW_MS:
+        return decision("execution_window_unavailable")
+    executions = await pages("/v5/execution/list", {"category": "linear", "symbol": plan["instrument"],
+        "startTime": str(start), "endTime": str(end), "limit": "100"}, "execution")
+    if executions is None:
         return None
-    history = {order_id: opener}
-    for identity in sorted(order_ids - {order_id}):
-        page = await read("/v5/order/history", {"category": "linear", "orderId": identity, "limit": "1"})
-        if len(page["list"]) != 1 or page["list"][0].get("orderId") != identity or page.get("nextPageCursor"):
-            return None
-        history[identity] = page["list"][0]
-    return _trendline_full_close_proof(plan, context, history, executions)
+    proof = _trendline_full_close_proof(plan, context, history, executions)
+    return decision("full_close_proven" if proof else "inventory_unreconciled", proof)
 
 
 class _OpenOrdersJob:

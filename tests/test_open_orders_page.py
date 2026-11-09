@@ -6794,23 +6794,39 @@ def test_trendline_exact_full_close_reconciliation(tmp_path, monkeypatch):
         closer=dict(orderId="different-stop-close",orderLinkId="broker-stop",symbol="XRPUSDT",positionIdx=0,side="Sell",orderStatus="Filled")
         history={order_id:opener,"different-stop-close":closer}
         fills=[dict(execId="open-fill",orderId=order_id,symbol="XRPUSDT",side="Buy",execType="Trade",execQty="903.2",closedSize="0",execTime="2000",seq=1),dict(execId="stop-fill",orderId=closer["orderId"],symbol="XRPUSDT",side="Sell",execType="Trade",execQty="903.2",closedSize="903.2",execTime="3000",seq=2)]
-        calls=[]
+        calls=[]; mode=["complete"]
         async def broker(**kw):
             assert kw['base_url']=="fixture-"+account
             calls.append(kw['path'])
+            params=kw['params'];assert params['symbol']=='XRPUSDT' and params['category']=='linear'
+            cursor='captured-continuation-token' if not params.get('cursor') else ''
+            if mode[0]=='incomplete':cursor='page-'+str(len(calls))
+            if mode[0]=='repeated':cursor='repeated'
             if kw['path']=='/v5/order/history':
-                assert kw['params']['orderId'] in history
-                rows=[history[kw['params']['orderId']]]
+                assert params['limit']=='50' and int(params['startTime'])==original['created_at_ms']
+                rows=list(history.values()) if not params.get('cursor') else []
+                if mode[0]=='conflict':rows=rows+[dict(opener,orderLinkId='conflicting')]
             else:
-                assert kw['path']=='/v5/execution/list' and kw['params']['symbol']=='XRPUSDT'
-                rows=fills
-            return {'retCode':0,'result':{'category':'linear','list':copy.deepcopy(rows),'nextPageCursor':''}}
+                assert kw['path']=='/v5/execution/list' and params['limit']=='100'
+                rows=list(reversed(fills)) if not params.get('cursor') else []
+            return {'retCode':0,'result':{'category':'linear','list':copy.deepcopy(rows),'nextPageCursor':cursor}}
         monkeypatch.setattr(service,"_bybit_signed_get",broker)
         native=dict(broker="Bybit",account=account,category="linear",instrument="XRPUSDT",side="Buy",type="Position",id="native-xrp",position_idx=0,size="903.2",status="Open",raw_refs={"order_ids_complete":True,"order_ids":[order_id]})
         ake=dict(broker="Bybit",account=account,category="linear",instrument="AKEUSDT",side="Buy",type="Position",id="open-ake",position_idx=0,size="100",status="Open")
         try:
             proof=service._trendline_full_close_proof(original,context,history,fills)
             assert proof and proof['closing_order_id']!=order_id
+            # Actual provider shape: nonempty cursor on the data page, empty terminal page.
+            for invalid_mode in ('incomplete','repeated','conflict'):
+                mode[0]=invalid_mode;calls.clear()
+                assert await service._trendline_read_close_proof(original,context,config) is None
+                assert calls.count('/v5/order/history')<=3 and not calls.count('/v5/execution/list')
+            mode[0]='complete';calls.clear()
+            assert await service._trendline_read_close_proof(original,context,config)==proof
+            assert calls==['/v5/order/history']*2+['/v5/execution/list']*2
+            blank_close=copy.deepcopy(fills);blank_close[-1]['closedSize']=''
+            assert service._trendline_full_close_proof(original,context,history,blank_close) is None
+            calls.clear()
             assert service._trendline_full_close_proof(original,context,{**history,order_id:{**opener,'orderLinkId':'unrelated'}},fills) is None
             partial=copy.deepcopy(fills);partial[-1].update(execQty='400',closedSize='400')
             assert service._trendline_full_close_proof(original,context,history,partial) is None
@@ -6847,11 +6863,11 @@ def test_trendline_exact_full_close_reconciliation(tmp_path, monkeypatch):
                 patch.setattr(store,'record_broker_closure',lambda *a,**k:(_ for _ in ()).throw(TrendlinePlanPersistenceError('fixture disk failure')))
                 job.schedule_trendline_closures();job.schedule_trendline_closures()
                 await __import__('asyncio').gather(*job.auxiliary.values())
-            assert len(calls)==3 and not store.get(p['plan_id']).get('broker_closure')
+            assert len(calls)==4 and not store.get(p['plan_id']).get('broker_closure')
             job.sources['orders']['run']+=1
             job.schedule_trendline_closures();await __import__('asyncio').gather(*job.auxiliary.values())
             closed=TrendlinePlanStore(store.path).get(p['plan_id'])
-            assert closed['broker_closure']==proof and len(calls)==6
+            assert closed['broker_closure']==proof and len(calls)==8
             for field in ('trigger_claim','execution_key','execution_result','submission_refs','test_trade'):
                 assert closed[field]==original[field]
             assert [r['instrument'] for r in job.payload['items']]==['AKEUSDT']
