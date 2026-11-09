@@ -39,6 +39,7 @@
     trendlinePlansAvailable: false,
     trendlinePlans: [],
     trendlineEditId: '',
+    trendlineRiskEdit: null,
     trendlineMutationPending: false,
     trendlineListLoading: false,
     trendlineListRequestSeq: 0,
@@ -1029,19 +1030,89 @@
     if(!item) return '';
     return `<div class="muted" role="status" style="overflow-wrap:anywhere;white-space:normal;min-width:0">Latest evaluation (revision ${escapeHtml(String(item.revision))}): ${escapeHtml(String(item.stage))} / ${escapeHtml(String(item.reason))}${item.pending_stage ? ` (checking ${escapeHtml(String(item.pending_stage))})` : ''}<br>${escapeHtml(JSON.stringify(item.inputs||{}))}${item.evaluation ? `<br>${escapeHtml(JSON.stringify(item.evaluation))}` : ''}</div>`;
   }
+  function trendlineCardContent(plan) {
+    let actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
+    if(plan.status==='armed' && plan.monitoring_eligible!==true) actions=`<button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button>`+actions;
+    if(plan.status==='armed' && plan.monitoring_eligible===true) actions+=`<button type="button" data-tl-action="risk-edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit stop and target</button>`;
+    if(plan.can_delete===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Permanently delete this unused plan">Delete</button>`;
+    return `<strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}${trendlineEvaluationDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div>`;
+  }
+  function updateRiskEditor() {
+    const edit=state.trendlineRiskEdit;if(!edit)return;
+    const plan=state.trendlinePlans.find(p=>p.plan_id===edit.planId);
+    const active=plan?.status==='armed'&&plan.monitoring_eligible===true;
+    const current=plan?.revision===edit.revision&&plan?.monitor_generation===edit.generation;
+    edit.save.disabled=edit.pending||!active||!current;
+    edit.cancel.disabled=edit.pending;edit.stop.disabled=edit.pending;edit.rr.disabled=edit.pending;
+    edit.status.textContent=edit.pending?'Saving changes...':!active?'Plan is no longer monitoring; edit did not take effect. Attempted values retained.':!current?'Plan changed; edit did not take effect. Attempted values retained; Cancel edit and reopen current settings.':edit.message||'';
+  }
   function renderTrendlinePlans() {
-    const list=$('trendline-plan-list'); if(!list) return;
-    if (!state.trendlinePlans.length) { list.innerHTML='<div class="muted">No local trendline plans saved.</div>'; return; }
-    list.innerHTML=state.trendlinePlans.map((plan) => {
-      let actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
-      if(plan.status==='armed' && plan.monitoring_eligible!==true) actions=`<button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button>`+actions;
-      if(plan.can_delete===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Permanently delete this unused plan">Delete</button>`;
-      return `<div class="card"><strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}${trendlineEvaluationDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
-    }).join('');
-    list.querySelectorAll('[data-tl-action]').forEach((btn) => btn.addEventListener('click', () => trendlineAction(btn.dataset.tlAction, btn.dataset.tlId)));
+    const list=$('trendline-plan-list');if(!list)return;
+    const edit=state.trendlineRiskEdit;
+    if(!edit){
+      list.innerHTML=state.trendlinePlans.length?state.trendlinePlans.map(plan=>`<div class="card" data-tl-plan="${escapeHtml(plan.plan_id)}"><div data-tl-content>${trendlineCardContent(plan)}</div></div>`).join(''):'<div class="muted">No local trendline plans saved.</div>';
+    }else{
+      // Keep the editor's outer card and mounted inputs through publications.
+      const cards=Array.from(list.querySelectorAll('[data-tl-plan]'));
+      for(const plan of state.trendlinePlans){
+        let card=cards.find(node=>node.dataset.tlPlan===plan.plan_id);
+        if(!card){card=document.createElement('div');card.className='card';card.dataset.tlPlan=plan.plan_id;card.innerHTML='<div data-tl-content></div>';list.appendChild(card);}
+        card.querySelector('[data-tl-content]').innerHTML=trendlineCardContent(plan);
+      }
+      for(const card of cards){if(card.dataset.tlPlan!==edit.planId&&!state.trendlinePlans.some(plan=>plan.plan_id===card.dataset.tlPlan))card.remove();}
+      updateRiskEditor();
+    }
+    list.querySelectorAll('[data-tl-action]').forEach(btn=>btn.addEventListener('click',()=>trendlineAction(btn.dataset.tlAction,btn.dataset.tlId)));
+  }
+  function openTrendlineRiskEditor(plan) {
+    if(plan.status!=='armed'||plan.monitoring_eligible!==true)return;
+    if(state.trendlineRiskEdit?.pending)return;
+    state.trendlineRiskEdit?.node.remove();state.trendlineRiskEdit=null;renderTrendlinePlans();
+    const card=Array.from($('trendline-plan-list').querySelectorAll('[data-tl-plan]')).find(node=>node.dataset.tlPlan===plan.plan_id);
+    if(!card)return;
+    const node=document.createElement('div');node.className='group';
+    const input=(label,value,step)=>{const el=document.createElement('label');el.textContent=label+' ';const field=document.createElement('input');field.type='number';field.step=step;field.min=step==='1'?'1':'0';field.value=String(value);field.setAttribute('aria-label',label);el.appendChild(field);node.appendChild(el);return field;};
+    const edit={planId:plan.plan_id,revision:plan.revision,generation:plan.monitor_generation,baseStop:plan.stop_loss_ticks,baseR:plan.rr_target,node,pending:false,message:''};
+    edit.stop=input('Stop-loss ticks',plan.stop_loss_ticks,'1');edit.rr=input('Target R',plan.rr_target,'any');
+    edit.save=document.createElement('button');edit.save.type='button';edit.save.textContent='Save changes';edit.save.addEventListener('click',saveTrendlineRiskEdit);node.appendChild(edit.save);
+    edit.cancel=document.createElement('button');edit.cancel.type='button';edit.cancel.textContent='Cancel edit';edit.cancel.addEventListener('click',()=>{if(edit.pending)return;edit.node.remove();state.trendlineRiskEdit=null;renderTrendlinePlans();});node.appendChild(edit.cancel);
+    edit.status=document.createElement('span');edit.status.className='muted';edit.status.setAttribute('role','status');node.appendChild(edit.status);
+    state.trendlineRiskEdit=edit;card.appendChild(node);updateRiskEditor();edit.stop.focus?.();
+  }
+  function riskDecimalKey(value) {
+    const match=String(value).trim().match(/^\+?(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/);
+    if(!match)return null;
+    const fraction=match[2]??match[3]??'';let digits=((match[1]||'')+fraction).replace(/^0+/,'');
+    if(!digits)return '0';const trailing=digits.length-digits.replace(/0+$/,'').length;digits=digits.slice(0,digits.length-trailing);
+    return digits+'e'+(BigInt(match[4]||0)-BigInt(fraction.length)+BigInt(trailing)).toString();
+  }
+  async function saveTrendlineRiskEdit() {
+    const edit=state.trendlineRiskEdit;if(!edit||edit.pending||state.trendlineMutationPending||edit.save.disabled)return;
+    const plan=state.trendlinePlans.find(p=>p.plan_id===edit.planId);if(!plan)return;
+    const desiredStop=edit.stop.value,desiredR=edit.rr.value,changes={};
+    if(desiredStop!==String(edit.baseStop))changes.stop_loss_ticks=desiredStop;
+    if(desiredR!==String(edit.baseR))changes.rr_target=desiredR;
+    if(!Object.keys(changes).length){edit.message='No changes to save.';updateRiskEditor();return;}
+    const live=plan.account==='live'&&(plan.broker==='bybit'||!plan.test_trade);
+    if(live&&(typeof confirm!=='function'||!confirm(`Authorize revised ${plan.broker} Live ${plan.instrument} ${plan.action} plan: stop ${desiredStop} ticks, target ${desiredR} R, for actual broker execution?`)))return;
+    edit.pending=true;state.trendlineMutationPending=true;++state.trendlineListRequestSeq;updateRiskEditor();
+    let confirmed=null,errorText='';
+    const applied=p=>p?.plan_id===edit.planId&&p.risk_update?.from_revision===edit.revision&&p.risk_update?.saved_revision===edit.revision+1&&String(p.stop_loss_ticks).replace(/^0+/,'')===String(desiredStop).trim().replace(/^0+/,'')&&riskDecimalKey(p.rr_target)!==null&&riskDecimalKey(p.rr_target)===riskDecimalKey(desiredR);
+    try{
+      const data=await request(`/api/trendline-plans/${encodeURIComponent(edit.planId)}/risk`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({...changes,revision:edit.revision,monitor_generation:edit.generation,...(live?{confirm_live_execution:true}:{})})});
+      if(data.ok!==true||!applied(data.plan))throw new Error('Save acknowledgement did not confirm these revised values.');confirmed=data.plan;
+    }catch(error){
+      errorText=String(error.message||error);
+      try{const data=await request('/api/trendline-plans',{cache:'no-store'});state.trendlinePlans=data.plans||[];const authoritative=state.trendlinePlans.find(p=>p.plan_id===edit.planId);if(applied(authoritative))confirmed=authoritative;}catch(_){errorText+=' Save status could not be confirmed; refresh before retry.';}
+    }finally{
+      ++state.trendlineListRequestSeq;edit.pending=false;state.trendlineMutationPending=false;
+      if(confirmed){state.trendlinePlans=state.trendlinePlans.map(p=>p.plan_id===edit.planId?confirmed:p);edit.node.remove();state.trendlineRiskEdit=null;trendlineStatus('Stop and target saved on the same plan. Current state: '+confirmed.status+'.');notifyOpenOrdersStateChanged({action:'trendline'});}
+      else edit.message=errorText+' Edit did not take effect or is not confirmed; attempted values retained.';
+      renderTrendlinePlans();
+    }
   }
   async function refreshTrendlinePlans() {
-    if (!state.trendlinePlansAvailable) return;
+    if (!state.trendlinePlansAvailable || state.trendlineRiskEdit?.pending) return;
     const seq=++state.trendlineListRequestSeq;
     state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; if(typeof response.monitoring_active==='boolean') renderTrendlineMonitor({...state.trendlineMonitorStatus,running:response.monitoring_active}); renderTrendlinePlans(); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
   }
@@ -1114,6 +1185,7 @@
     if (state.trendlineMutationPending || state.trendlineMonitorPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
     if (!plan) { trendlineStatus('Plan changed; refresh the list.'); return; }
     if(action==='edit') return editTrendlinePlan(plan);
+    if(action==='risk-edit') return openTrendlineRiskEditor(plan);
     if(action==='delete') {
       if(!plan || plan.can_delete!==true) { trendlineStatus('This plan is protected from deletion. Refresh the list.');return; }
       ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;

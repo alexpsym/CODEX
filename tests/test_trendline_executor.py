@@ -711,3 +711,81 @@ def test_fresh_xrp_broker_clock_bounds_and_native_ordering(tmp_path):
     e._record(plan,'candidate_quote','quote_pending')
     assert e.latest_evaluations[plan['plan_id']]['reason']=='quote_future'
     assert e.latest_evaluations[plan['plan_id']]['pending_stage']=='candidate_quote'
+
+
+
+def test_armed_risk_edit_resizes_trigger_without_replay(tmp_path,monkeypatch):
+    from render.trendline_plans import live_execution_authorized,TrendlinePlanError
+    async def scenario(mode):
+        clock=[2000];store=TrendlinePlanStore(tmp_path/mode/'plans.json')
+        payload={**_payload('bybit'),'trigger_mode':'confirmed_cross' if mode in {'cross','repeat','stale','moved'} else 'touch','cross_direction':'upward' if mode in {'cross','repeat','stale','moved'} else 'either'}
+        p=store.create(payload,now_ms=1000);calculations=[];submissions=[];started=asyncio.Event();release=asyncio.Event();submitting=asyncio.Event();finish=asyncio.Event()
+        def snap(stamp,price):
+            from decimal import Decimal
+            return {'instrument':p['instrument'],'timestamp_ms':stamp,'bid':str(Decimal(price)-Decimal('0.1')),'ask':price,'tick_size':'0.1'}
+        async def quote(plan):return snap(clock[0],'99' if clock[0]==2000 else '100' if mode=='inside' else '101')
+        async def calculate(plan,q):
+            calculations.append((plan['revision'],plan['stop_loss_ticks'],plan['rr_target']))
+            if mode=='repeat' and len(calculations)<=2:
+                await e.update_risk(plan['plan_id'],{'stop_loss_ticks':20} if len(calculations)==1 else {'rr_target':'4'},revision=plan['revision'],generation=e.generation)
+            elif mode!='claim_first' and len(calculations)==1:
+                started.set();await release.wait()
+            stamp=q['timestamp_ms']+1;clock[0]=max(clock[0],stamp)
+            final=snap(stamp,'99' if mode=='moved' and len(calculations)>1 else str(q['ask']))
+            if mode=='stale':clock[0]=stamp+60001
+            return {'trigger_quote':final,'entry_price':final['ask'],'quantity':str(plan['stop_loss_ticks']),'sized_revision':plan['revision'],'sized_r':plan['rr_target']}
+        async def submit(plan,calculated,key):
+            submissions.append((plan,calculated,key))
+            if mode=='claim_first':submitting.set();await finish.wait()
+            return {'accepted':True,'order_id':'actual-mocked-order'}
+        e=TrendlinePlanExecutor(store,quote,calculate,submit,live_execution_authorized,now_ms=lambda:clock[0])
+        async def idle():await e._stop.wait()
+        monkeypatch.setattr(e,'_run',idle)
+        task=None
+        try:
+            p=await e.arm(p['plan_id'],revision=p['revision'],generation=e.generation);worker=e._task
+            await e.cycle();assert not calculations
+            clock[0]=3000
+            if mode=='repeat':
+                await e.cycle();assert not submissions and e._previous[p['plan_id']]['timestamp_ms']==3002
+                clock[0]=4000;await e.cycle()
+            else:
+                task=asyncio.create_task(e.cycle())
+                if mode=='claim_first':
+                    await submitting.wait();claimed=store.get(p['plan_id'])
+                    with pytest.raises(TrendlinePlanError):await e.update_risk(p['plan_id'],{'rr_target':'7'},revision=claimed['revision'],generation=e.generation)
+                    finish.set()
+                else:
+                    await started.wait()
+                    original_previous=dict(e._previous[p['plan_id']])
+                    other=store.create({**_payload('bybit'),'instrument':'ETHUSDT'},now_ms=1000)
+                    other=await e.arm(other['plan_id'],revision=other['revision'],generation=e.generation)
+                    e._previous[other['plan_id']]={'timestamp_ms':1500,'bid':'97','ask':'98'}
+                    await e.update_risk(p['plan_id'],{'stop_loss_ticks':20,'rr_target':'3'},revision=p['revision'],generation=e.generation)
+                    assert e._previous[p['plan_id']]==original_previous and e._previous[other['plan_id']]['timestamp_ms']==1500
+                    assert e._task is worker and e.eligible(other['plan_id'])
+                    # Keep the other observation independent without evaluating it in this fixture.
+                    e._eligible.discard(other['plan_id'])
+                    release.set()
+                await task
+            final=store.get(p['plan_id'])
+            if mode in {'stale','moved'}:
+                assert final['status']=='armed' and final['trigger_claim'] is None and not submissions
+            else:
+                assert final['status']=='submitted' and len(submissions)==1
+                sent,calc,key=submissions[0]
+                assert key==p['execution_key'] and sent['anchors']==p['anchors']
+                if mode=='claim_first':assert calc['quantity']=='10' and sent['rr_target']=='2'
+                else:
+                    assert calc['quantity']=='20' and sent['stop_loss_ticks']==20
+                    assert calc['sized_r']==sent['rr_target']==('4' if mode=='repeat' else '3')
+                    assert calc['sized_revision']==sent['risk_update']['saved_revision']
+                    assert len(calculations)>1
+                await e.cycle();assert len(submissions)==1
+        finally:
+            release.set();finish.set()
+            if task and not task.done():task.cancel();await asyncio.gather(task,return_exceptions=True)
+            await e.stop()
+    async def run():
+        for mode in ('cross','gap','inside','repeat','stale','moved','claim_first'):await scenario(mode)
+    _run_fixture_loop(run())

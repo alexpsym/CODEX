@@ -30801,7 +30801,7 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
-    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "broker_closure"}.intersection(payload):
+    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "broker_closure", "risk_update"}.intersection(payload):
         raise TrendlinePlanError("Display and submission records are server-owned.")
     forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
@@ -31010,6 +31010,21 @@ async def trendline_plan_cancel(plan_id: str) -> JSONResponse:
     _trendline_plans_require_local()
     try:
         plan = TRENDLINE_PLAN_STORE.cancel(plan_id)
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
+
+
+@app.patch("/api/trendline-plans/{plan_id}/risk")
+async def trendline_plan_update_risk(plan_id: str, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        controls = {"revision", "monitor_generation", "confirm_live_execution"}
+        if set(payload) - controls - {"stop_loss_ticks", "rr_target"}:
+            raise TrendlinePlanError("Only stop_loss_ticks and rr_target may be edited while monitoring.")
+        changes = {key: payload[key] for key in ("stop_loss_ticks", "rr_target") if key in payload}
+        plan = await TRENDLINE_EXECUTOR.update_risk(plan_id, changes, revision=payload.get("revision"),
+            generation=payload.get("monitor_generation"), confirm_live=payload.get("confirm_live_execution") is True)
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)

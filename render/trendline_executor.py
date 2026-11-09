@@ -199,6 +199,19 @@ class TrendlinePlanExecutor:
             self._eligible.add(plan_id)
             return plan
 
+    async def update_risk(self, plan_id: str, changes: Mapping[str, object], *, revision: int, generation: str, confirm_live: bool = False) -> Dict[str, object]:
+        async with self._control_guard:
+            if generation != self.generation or not self.status()["running"] or not self.eligible(plan_id):
+                raise TrendlinePlanError("Plan is paused or monitoring changed; edit did not take effect.")
+            return self.store.update_armed_risk(plan_id, changes, expected_revision=revision,
+                                              confirm_live=confirm_live, now_ms=self.now_ms())
+
+    @staticmethod
+    def _risk_only_change(before, after):
+        ignored = {"stop_loss_ticks", "rr_target", "revision", "updated_at_ms", "lifecycle", "live_authorization", "display_snapshot", "risk_update"}
+        return (after["revision"] > before["revision"] and after.get("lifecycle", {}).get("last_transition") == "risk_updated"
+                and {k: v for k, v in before.items() if k not in ignored} == {k: v for k, v in after.items() if k not in ignored})
+
     def _reconciliation_status(self) -> Dict[str, object]:
         try:
             registry = self.store.load()
@@ -329,9 +342,10 @@ class TrendlinePlanExecutor:
         quote = validate_quote(raw_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
         tick_size = quote.get("tick_size")
         observation = {"timestamp_ms": quote.get("timestamp_ms"), "bid": quote.get("bid"), "ask": quote.get("ask")}
-        previous = self._previous.get(plan_id)
-        if previous is not None and int(observation["timestamp_ms"]) <= int(previous["timestamp_ms"]):
-            raise InvalidQuote("quote_duplicate" if observation["timestamp_ms"] == previous["timestamp_ms"] else "quote_out_of_order", {**_quote_inputs(quote, self.now_ms()), "previous_timestamp_ms": previous["timestamp_ms"]})
+        latest = self._previous.get(plan_id)
+        previous = latest.get("_risk_retry_previous", latest) if latest is not None else None
+        if latest is not None and int(observation["timestamp_ms"]) <= int(latest["timestamp_ms"]):
+            raise InvalidQuote("quote_duplicate" if observation["timestamp_ms"] == latest["timestamp_ms"] else "quote_out_of_order", {**_quote_inputs(quote, self.now_ms()), "previous_timestamp_ms": latest["timestamp_ms"]})
         self._previous[plan_id] = observation
         try:
             evaluation = evaluate_trigger(plan, observation, previous_observation=previous, now_ms=quote_comparison_now(quote, self.now_ms()), tick_size=tick_size)
@@ -343,46 +357,63 @@ class TrendlinePlanExecutor:
         if not evaluation.get("triggered"):
             self._previous[plan_id] = observation
             return
-        # The calculator obtains the exact final quote used for sizing.  Re-test
-        # that quote before a claim so a moved-away candidate cannot execute.
-        self._record(plan, "final_calculation", "calculation_pending", quote=quote, evaluation=evaluation)
-        calculated = await _await(self.calculate(plan, quote))
-        final_quote = calculated.get("trigger_quote") if isinstance(calculated, Mapping) else None
-        self._record(plan, "final_quote", "quote_pending", quote=final_quote)
-        final_quote = validate_quote(final_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
-        require_same_quote_clock(quote, final_quote)
-        final_observation = {"timestamp_ms": final_quote.get("timestamp_ms"), "bid": final_quote.get("bid"), "ask": final_quote.get("ask")}
-        if int(final_observation["timestamp_ms"]) < int(observation["timestamp_ms"]):
-            raise InvalidQuote("final_quote_out_of_order", _quote_inputs(final_quote, self.now_ms()))
-        self._previous[plan_id] = final_observation
-        final_now = quote_comparison_now(final_quote, self.now_ms())
-        final_eval = evaluate_trigger(plan, final_observation, previous_observation=previous, now_ms=final_now, tick_size=final_quote.get("tick_size"))
-        self._record(plan, "final_evaluation", str(final_eval.get("reason")), quote=final_quote, evaluation=final_eval)
-        if not final_eval.get("triggered"):
+        # A risk-only save can supersede sizing while preserving this trigger's
+        # original preceding sample. Keep the newest timestamp for ordering, and
+        # revalidate the original evidence (including gap/clock/expiry) each time.
+        for sizing_attempt in range(2):
+            self._record(plan, "final_calculation", "calculation_pending", quote=quote, evaluation=evaluation)
+            calculated = await _await(self.calculate(plan, quote))
+            final_quote = calculated.get("trigger_quote") if isinstance(calculated, Mapping) else None
+            self._record(plan, "final_quote", "quote_pending", quote=final_quote)
+            final_quote = validate_quote(final_quote, str(plan["instrument"]), self.now_ms(), int(plan["max_quote_age_ms"]))
+            require_same_quote_clock(quote, final_quote)
+            final_observation = {"timestamp_ms": final_quote.get("timestamp_ms"), "bid": final_quote.get("bid"), "ask": final_quote.get("ask")}
+            if int(final_observation["timestamp_ms"]) < int(observation["timestamp_ms"]):
+                raise InvalidQuote("final_quote_out_of_order", _quote_inputs(final_quote, self.now_ms()))
             self._previous[plan_id] = final_observation
-            return
-        # Re-read after the final calculation: cancellation, expiry, revision or
-        # replacement invalidate the candidate before the atomic claim.
-        fresh = self.store.get(plan_id)
-        self._record(plan, "claim", "checking_current_plan", quote=final_quote, evaluation=final_eval)
-        if fresh["status"] != "armed" or fresh["trigger_claim"] is not None or fresh["revision"] != plan["revision"] or fresh["execution_key"] != plan["execution_key"] or fresh.get("live_authorization") != plan.get("live_authorization"):
-            self._record(plan, "claim", "plan_changed_before_claim", quote=final_quote)
-            return
-        if broker_submission_required(fresh) and not self.live_confirmed(fresh):
-            self._record(plan, "claim", "live_confirmation_required", quote=final_quote)
-            return
-        claim_local_now = self.now_ms()
-        claim_now = quote_comparison_now(final_quote, claim_local_now)
-        if not self.eligible(plan_id):
-            self._record(plan, "claim", "paused_before_claim", quote=final_quote)
-            return
-        validate_quote(final_quote, str(plan["instrument"]), claim_local_now, int(plan["max_quote_age_ms"]))
-        if fresh["expiry_at_ms"] is not None and claim_now >= int(fresh["expiry_at_ms"]):
-            self._record(plan, "claim", "expired_before_claim", quote=final_quote)
-            return
-        claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": final_observation["timestamp_ms"], "trigger_price": final_eval["trigger_price"], "trigger_kind": final_eval["trigger_kind"]}, now_ms=claim_now, expected_revision=int(plan["revision"]), expected_execution_key=str(plan["execution_key"]))
-        if not claim["claimed"]:
-            self._record(plan, "claim", "duplicate_claim", quote=final_quote)
+            final_now = quote_comparison_now(final_quote, self.now_ms())
+            final_eval = evaluate_trigger(plan, final_observation, previous_observation=previous, now_ms=final_now, tick_size=final_quote.get("tick_size"))
+            self._record(plan, "final_evaluation", str(final_eval.get("reason")), quote=final_quote, evaluation=final_eval)
+            if not final_eval.get("triggered"):
+                return
+            # No quote/calculator/broker await under control or store locks.
+            async with self._control_guard:
+                fresh = self.store.get(plan_id)
+                if fresh["status"] != "armed" or fresh["trigger_claim"] is not None or fresh["execution_key"] != plan["execution_key"]:
+                    self._record(plan, "claim", "plan_changed_before_claim", quote=final_quote)
+                    return
+                changed = fresh["revision"] != plan["revision"] or fresh.get("live_authorization") != plan.get("live_authorization")
+                if changed and not self._risk_only_change(plan, fresh):
+                    self._record(plan, "claim", "plan_changed_before_claim", quote=final_quote)
+                    return
+                if not self.eligible(plan_id):
+                    self._record(plan, "claim", "paused_before_claim", quote=final_quote)
+                    return
+                if broker_submission_required(fresh) and not self.live_confirmed(fresh):
+                    self._record(plan, "claim", "live_confirmation_required", quote=final_quote)
+                    return
+                claim_local_now = self.now_ms()
+                claim_now = quote_comparison_now(final_quote, claim_local_now)
+                validate_quote(final_quote, str(plan["instrument"]), claim_local_now, int(plan["max_quote_age_ms"]))
+                if fresh["expiry_at_ms"] is not None and claim_now >= int(fresh["expiry_at_ms"]):
+                    self._record(plan, "claim", "expired_before_claim", quote=final_quote)
+                    return
+                if changed:
+                    revised_eval = evaluate_trigger(fresh, final_observation, previous_observation=previous, now_ms=claim_now, tick_size=final_quote.get("tick_size"))
+                    if not revised_eval.get("triggered"):
+                        return
+                    self._previous[plan_id] = dict(final_observation, _risk_retry_previous=previous)
+                    plan, quote, observation, evaluation = fresh, final_quote, final_observation, revised_eval
+                    self._record(plan, "final_calculation", "risk_update_requires_fresh_sizing", quote=final_quote)
+                    continue
+                claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": final_observation["timestamp_ms"], "trigger_price": final_eval["trigger_price"], "trigger_kind": final_eval["trigger_kind"]}, now_ms=claim_now, expected_revision=int(plan["revision"]), expected_execution_key=str(plan["execution_key"]))
+                if not claim["claimed"]:
+                    self._record(plan, "claim", "duplicate_claim", quote=final_quote)
+                    return
+                break
+        else:
+            # Repeated saves defer to the next normal worker sample. The saved
+            # preceding evidence expires normally and never weakens ordering.
             return
         claimed = claim["plan"]
         if not broker_submission_required(claimed):

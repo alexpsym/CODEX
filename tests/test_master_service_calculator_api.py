@@ -4628,3 +4628,81 @@ def test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome(tmp_path,monke
         for test in (True,False):
             for mode in ('inside','gap','away','clock_expired','claim_stale','reverse_final','rejected','uncertain'):await scenario(mode,test)
     _run_fixture_loop(run())
+
+
+
+def test_armed_risk_update_transaction_route_and_projection(tmp_path, monkeypatch):
+    from render.trendline_executor import TrendlinePlanExecutor
+    from render.trendline_plans import TrendlinePlanError, TrendlinePlanPersistenceError, live_execution_authorized
+    from test_trendline_executor import _payload, _run_fixture_loop
+    service=master_service;store=service.TrendlinePlanStore(tmp_path/'risk.json');clock=[2500]
+    calls=[]
+    async def forbidden(*args):calls.append(args);raise AssertionError('No quote/broker IO for editing')
+    e=TrendlinePlanExecutor(store,forbidden,forbidden,forbidden,live_execution_authorized,now_ms=lambda:clock[0])
+    async def idle():await e._stop.wait()
+    monkeypatch.setattr(e,'_run',idle)
+    monkeypatch.setattr(service,'APP_PROFILE','local');monkeypatch.setattr(service,'TRENDLINE_PLAN_STORE',store);monkeypatch.setattr(service,'TRENDLINE_EXECUTOR',e)
+    async def patch(plan,changes,**controls):
+        payload={'revision':plan['revision'],'monitor_generation':e.generation,**changes,**controls}
+        return json.loads((await service.trendline_plan_update_risk(plan['plan_id'],payload)).body)['plan']
+    async def scenario():
+        try:
+            draft=store.create(_payload('bybit',test_trade=True),display_snapshot={'quantity':'2','entry_price':'100','stop_price':'99','target_price':'102'},now_ms=1000)
+            with pytest.raises(service.HTTPException):await patch(draft,{'rr_target':'3'})
+            plan=await e.arm(draft['plan_id'],revision=draft['revision'],generation=e.generation)
+            worker=e._task;key=plan['execution_key'];before_row=service._trendline_dashboard_rows([],plans=[plan],executor=e,contexts=[])[0]
+            with pytest.raises(TrendlinePlanError):store.update(plan['plan_id'],{'rr_target':'4'},now_ms=2500)
+            for changes in ({},{'anchors':[]},{'risk_value':'90'},{'risk_update':{}},{'stop_loss_ticks':True},{'stop_loss_ticks':1.5},{'stop_loss_ticks':'1.0'},{'stop_loss_ticks':0},{'rr_target':'NaN'},{'rr_target':'Infinity'},{'rr_target':True},{'rr_target':'0'}):
+                with pytest.raises(service.HTTPException):await patch(plan,changes)
+            for controls in ({'revision':0},{'revision':True},{'monitor_generation':'old'}):
+                with pytest.raises(service.HTTPException):await patch(plan,{'rr_target':'3'},**controls)
+            assert store.get(plan['plan_id'])==plan
+            original_bytes=store.path.read_bytes()
+            with monkeypatch.context() as scope:
+                scope.setattr(store,'_write',lambda _:(_ for _ in ()).throw(TrendlinePlanPersistenceError('fixture write failure')))
+                with pytest.raises(service.HTTPException):await patch(plan,{'stop_loss_ticks':'20','rr_target':'3'})
+            assert store.path.read_bytes()==original_bytes
+            other=await e.arm((other:=store.create(_payload('bybit'),now_ms=1000))['plan_id'],revision=other['revision'],generation=e.generation)
+            e._previous[other['plan_id']]={'timestamp_ms':2000,'bid':'98','ask':'99'};observation=dict(e._previous[other['plan_id']])
+            changed=await patch(plan,{'stop_loss_ticks':'20','rr_target':'3.50'})
+            allowed={'revision','updated_at_ms','lifecycle','display_snapshot','stop_loss_ticks','rr_target','risk_update'}
+            assert all(changed[k]==v for k,v in plan.items() if k not in allowed)
+            assert changed['rr_target']=='3.5' and changed['stop_loss_ticks']==20 and changed['revision']==plan['revision']+1
+            assert changed['risk_update']['from_revision']==plan['revision'] and changed['execution_key']==key
+            assert e._task is worker and e.eligible(plan['plan_id']) and e._previous[other['plan_id']]==observation
+            row=service._trendline_dashboard_rows([],plans=[store.get(plan['plan_id'])],executor=e,contexts=[])[0]
+            assert row['display_id']==before_row['display_id'] and row['stop_loss_ticks']==20 and row['risk_reward']=='3.5'
+            assert row['size'] is None and row['planned_stop_price'] is None and row['planned_target_price'] is None
+            native={'broker':'Bybit','account':'demo','category':'linear','instrument':'AKEUSDT','type':'Position','id':'real-ake','size':'7','status':'Open'}
+            rows=service._trendline_dashboard_rows([native],plans=[store.get(plan['plan_id'])],executor=e,contexts=[])
+            assert len(rows)==2 and rows[0] is native
+            assert service._trendline_calculator_payload(changed)['stop_loss_ticks']==20 and service._trendline_calculator_payload(changed)['risk_reward']=='3.5'
+            stop_only=await patch(changed,{'stop_loss_ticks':21})
+            assert stop_only['rr_target']=='3.5'
+            for flag in (True,False):
+                live=store.create({**_payload('bybit',test_trade=flag),'account':'live'},now_ms=1000)
+                live=await e.arm(live['plan_id'],revision=live['revision'],generation=e.generation,confirm_live=True)
+                for invalid in (None,False,'true',1):
+                    with pytest.raises(service.HTTPException):await patch(live,{'rr_target':'4'},confirm_live_execution=invalid)
+                assert store.get(live['plan_id'])['live_authorization']==live['live_authorization']
+                revised=await patch(live,{'rr_target':'4'},confirm_live_execution=True)
+                assert revised['live_authorization']['plan_revision']==revised['revision'] and revised['live_authorization']['execution_key']==live['execution_key']
+                assert live_execution_authorized(revised) and revised['test_trade'] is flag
+            oanda=store.create({**_payload('oanda',test_trade=True),'account':'live'},now_ms=1000)
+            oanda=await e.arm(oanda['plan_id'],revision=oanda['revision'],generation=e.generation)
+            assert (await patch(oanda,{'rr_target':'5'}))['live_authorization'] is None
+            expiring=store.create({**_payload('bybit'),'expiry_at_ms':3000},now_ms=1000)
+            expiring=await e.arm(expiring['plan_id'],revision=expiring['revision'],generation=e.generation);clock[0]=3500
+            with pytest.raises(service.HTTPException):await patch(expiring,{'rr_target':'3'})
+            clock[0]=2500
+            claim=store.claim_trigger(stop_only['plan_id'],{'trigger_timestamp_ms':2500,'trigger_price':'100','trigger_kind':'touch'},now_ms=2500)
+            with pytest.raises(service.HTTPException):await patch(claim['plan'],{'rr_target':'9'})
+            await e.stop()
+            with pytest.raises(service.HTTPException):await patch(other,{'rr_target':'9'})
+            with monkeypatch.context() as scope:
+                scope.setattr(service,'APP_PROFILE','render')
+                with pytest.raises(service.HTTPException) as denied:await patch(other,{'rr_target':'3'})
+                assert denied.value.status_code==410
+            assert not calls
+        finally:await e.stop()
+    _run_fixture_loop(scenario())

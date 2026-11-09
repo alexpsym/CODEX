@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -46,6 +47,7 @@ _IMMUTABLE_FIELDS = {
     "display_snapshot", "submission_refs",
     "execution_policy", "dashboard_dismissal",
     "broker_closure",
+    "risk_update",
 }
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
@@ -278,6 +280,19 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     }
     claim = _normalise_claim(record.get("trigger_claim"), execution_key)
     execution_result = _normalise_execution_result(record.get("execution_result"))
+    risk_update = record.get("risk_update")
+    if risk_update is not None:
+        if not isinstance(risk_update, Mapping):
+            raise TrendlinePlanError("risk_update must be server-owned audit metadata.")
+        risk_update = {"from_revision": _positive_int(risk_update.get("from_revision"), "risk_update.from_revision"),
+                       "saved_revision": _positive_int(risk_update.get("saved_revision"), "risk_update.saved_revision"),
+                       "at_ms": _int_ms(risk_update.get("at_ms"), "risk_update.at_ms"),
+                       "stop_loss_ticks": _positive_int(risk_update.get("stop_loss_ticks"), "stop_loss_ticks"),
+                       "rr_target": _decimal_string(risk_update.get("rr_target"), "rr_target", positive=True)}
+        if (risk_update["saved_revision"] != risk_update["from_revision"] + 1 or risk_update["saved_revision"] > revision
+                or risk_update["stop_loss_ticks"] != record.get("stop_loss_ticks")
+                or risk_update["rr_target"] != _decimal_string(record.get("rr_target"), "rr_target", positive=True)):
+            raise TrendlinePlanError("Risk update does not match this saved revision/settings.")
     closure = record.get("broker_closure")
     if closure is not None:
         if (not isinstance(closure, Mapping) or record.get("broker") != "bybit" or status != "submitted"
@@ -357,6 +372,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "submission_refs": _submission_references(record.get("submission_refs")),
         "execution_policy": policy,
         "broker_closure": closure,
+        "risk_update": risk_update,
         "dashboard_dismissal": dismissal,
     }
 
@@ -717,6 +733,46 @@ class TrendlinePlanStore:
             updated["display_snapshot"] = dict(display_snapshot, plan_id=plan_id, plan_revision=updated["revision"]) if display_snapshot is not None else None
             canonical = validate_plan(updated)
             registry["plans"][canonical["plan_id"]] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
+
+    def update_armed_risk(self, plan_id: str, changes: Mapping[str, object], *, expected_revision: int, confirm_live: bool, now_ms: int) -> Dict[str, object]:
+        """Narrow settings transaction; the executor separately owns active eligibility."""
+        if not isinstance(changes, Mapping) or not changes or set(changes) - {"stop_loss_ticks", "rr_target"}:
+            raise TrendlinePlanError("Supply stop_loss_ticks and/or rr_target only.")
+        values = dict(changes)
+        if "stop_loss_ticks" in values:
+            raw = values["stop_loss_ticks"]
+            if isinstance(raw, str) and re.fullmatch(r"[0-9]+", raw.strip()):
+                raw = int(raw.strip())
+            values["stop_loss_ticks"] = _positive_int(raw, "stop_loss_ticks")
+        if "rr_target" in values:
+            values["rr_target"] = _decimal_string(values["rr_target"], "rr_target", positive=True)
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None or type(expected_revision) is not int or plan["revision"] != expected_revision:
+                raise TrendlinePlanError("Plan changed; edit did not take effect. Refresh current settings.")
+            if plan["status"] != "armed" or plan["trigger_claim"] is not None:
+                raise TrendlinePlanError("Plan is no longer unclaimed and armed; edit did not take effect.")
+            now = _transition_time(plan, now_ms)
+            if plan["expiry_at_ms"] is not None and now >= plan["expiry_at_ms"]:
+                raise TrendlinePlanError("Plan expired; edit did not take effect.")
+            if not live_execution_authorized(plan):
+                raise TrendlinePlanError("Current Arm authorization required before editing.")
+            live = requires_live_confirmation(plan)
+            if live and confirm_live is not True:
+                raise TrendlinePlanError("Explicit Live confirmation required for revised stop and target.")
+            updated = copy.deepcopy(plan)
+            updated.update(values)
+            updated.update(revision=plan["revision"] + 1, updated_at_ms=now, display_snapshot=None,
+                           lifecycle={"last_transition": "risk_updated", "last_transition_at_ms": now})
+            updated["risk_update"] = {"from_revision": plan["revision"], "saved_revision": updated["revision"], "at_ms": now,
+                                      "stop_loss_ticks": updated["stop_loss_ticks"], "rr_target": updated["rr_target"]}
+            if live:
+                updated["live_authorization"] = {"execution_key": plan["execution_key"], "plan_revision": updated["revision"], "authorized_at_ms": now}
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
             self._write(registry)
             return copy.deepcopy(canonical)
 
