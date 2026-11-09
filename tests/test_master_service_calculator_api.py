@@ -4434,6 +4434,20 @@ def test_arm_route_selected_revision_and_monitoring_view(tmp_path, monkeypatch):
             with pytest.raises(master_service.HTTPException) as denied:
                 await master_service.trendline_plan_arm(fresh["plan_id"],stale)
             assert denied.value.status_code == 410
+        for test_flag in (True,False):
+            selected=store.create({**_payload("bybit",test_trade=test_flag),"account":"live"},now_ms=1000)
+            request={"revision":selected["revision"],"monitor_generation":e.generation}
+            for confirmation in (None,False,"true",1):
+                with pytest.raises(master_service.HTTPException):
+                    await master_service.trendline_plan_arm(selected["plan_id"],{**request,"confirm_live_execution":confirmation})
+            assert store.get(selected["plan_id"])==selected
+            for wrong in ({**request,"revision":0},{**request,"monitor_generation":"stale"}):
+                with pytest.raises(master_service.HTTPException):
+                    await master_service.trendline_plan_arm(selected["plan_id"],{**wrong,"confirm_live_execution":True})
+            accepted=json.loads((await master_service.trendline_plan_arm(selected["plan_id"],{**request,"confirm_live_execution":True})).body)["plan"]
+            assert accepted["test_trade"] is test_flag and live_execution_authorized(accepted)
+            assert master_service._trendline_calculator_payload(accepted)["test_trade"] is test_flag
+            await e.stop()
         async def fail_worker(): raise RuntimeError("watcher failed")
         with monkeypatch.context() as patch:
             patch.setattr(e,"_run",fail_worker)
@@ -4516,7 +4530,7 @@ def test_fresh_xrp_clock_refresh_is_base_scoped_and_fails_closed(monkeypatch):
 def test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome(tmp_path,monkeypatch):
     from test_trendline_executor import _payload,_run_fixture_loop
     from render.trendline_plans import projected_price,live_execution_authorized
-    from render.trendline_executor import TrendlinePlanExecutor
+    from render.trendline_executor import TrendlinePlanExecutor, DefiniteSubmissionFailure
     from decimal import Decimal as D
     service=master_service;now=[1794126200000];base='https://api-demo.bybit.com';current={};counts={};post=[]
     monkeypatch.setattr(service.time,'time',lambda:now[0]/1000);monkeypatch.setattr(service.time,'time_ns',lambda:now[0]*1000000)
@@ -4543,12 +4557,23 @@ def test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome(tmp_path,monke
     async def no_time_request(*a,**kw):raise RuntimeError('fixture clock refresh unavailable')
     monkeypatch.setattr(service,'_fetch_bybit_server_time_ms',no_time_request)
     monkeypatch.setattr(service,'_bybit_signed_post',forbidden);monkeypatch.setattr(service,'_bybit_signed_get',forbidden)
+    async def actual_submission(payload, *, request_id, invalidate_cache, _request_state):
+        p=current['plan'];assert payload['account']==p['account']=='demo'
+        assert payload['test_trade'] is p['test_trade'] and request_id==p['execution_key']
+        assert payload['calculation_context_id'] and payload['quantity'] and payload['stop_loss_price']
+        post.append((p['plan_id'],p['test_trade'],request_id))
+        if current['mode']=='rejected':raise DefiniteSubmissionFailure('mock rejection')
+        if current['mode']=='uncertain':_request_state['posted']=True;raise RuntimeError('mock lost response')
+        return {'order':{'orderId':'demo-'+request_id}}
+    monkeypatch.setattr(service,'_place_bybit_order',actual_submission)
+
     monkeypatch.setattr(service,'_OANDA_AUD_USD_CACHE',{'value':0.66,'ts':now[0]/1000})
     anchors={'sell':[{'timestamp_ms':1794125340000,'price':'1.1644010536093532'},{'timestamp_ms':1794125700000,'price':'1.1639763460829737'}],'buy':[{'timestamp_ms':1794125640000,'price':'1.1617029116770599'},{'timestamp_ms':1794125820000,'price':'1.1618028428597373'}]}
-    async def scenario(mode):
-        store=service.TrendlinePlanStore(tmp_path/mode/'plans.json');plans=[];seen={};claims=[]
+    async def scenario(mode, test):
+        before_posts=len(post)
+        store=service.TrendlinePlanStore(tmp_path/(mode+str(test))/'plans.json');plans=[];seen={};claims=[]
         for side in ('sell','buy'):
-            p=store.create({**_payload('bybit',test_trade=True),'instrument':'XRPUSDT','action':side,'anchors':anchors[side],'stop_loss_ticks':10,'rr_target':'1','risk_mode':'percent','risk_value':'1'},now_ms=1794125930000)
+            p=store.create({**_payload('bybit',test_trade=test),'instrument':'XRPUSDT','action':side,'anchors':anchors[side],'stop_loss_ticks':10,'rr_target':'1','risk_mode':'percent','risk_value':'1'},now_ms=1794125930000)
             plans.append(store.arm(p['plan_id'],now_ms=1794125931000))
         async def candidate(p):
             now[0]+=100;seen[p['plan_id']]=seen.get(p['plan_id'],0)+1
@@ -4564,7 +4589,7 @@ def test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome(tmp_path,monke
             assert D(calc['entry_price'])==service._snap_to_increment(D(calc['trigger_quote']['ask' if p['action']=='buy' else 'bid']),D('0.0001'))
             if mode=='clock_expired':now[0]+=300001
             return calc
-        e=TrendlinePlanExecutor(store,candidate,calculate,forbidden,live_execution_authorized,now_ms=lambda:now[0]);e._eligible.update(p['plan_id'] for p in plans)
+        e=TrendlinePlanExecutor(store,candidate,calculate,service._trendline_executor_submit,live_execution_authorized,now_ms=lambda:now[0]);e._eligible.update(p['plan_id'] for p in plans)
         original=store.claim_trigger
         def claiming(pid,trigger,**kw):
             claims.append(pid);assert kw['now_ms']>=trigger['trigger_timestamp_ms'];return original(pid,trigger,**kw)
@@ -4584,17 +4609,22 @@ def test_fresh_xrp_canonical_buy_sell_clock_and_simulated_outcome(tmp_path,monke
         for p in plans:
             final=original_get(store,p['plan_id'])
             if mode in ('inside','gap'):
-                assert final['status']=='submitted' and final['execution_result']['outcome']=='simulated'
+                assert final['status']=='submitted' and final['execution_result']['outcome']=='executed'
+                assert final['execution_result']['order_id']=='demo-'+p['execution_key']
+                assert final['test_trade'] is test
                 assert claims.count(p['plan_id'])==1
                 assert original(p['plan_id'],{},now_ms=now[0])['duplicate'] is True
                 assert final['anchors']==anchors[p['action']]
                 assert final['trigger_claim']['trigger_kind']==('entered_band' if mode=='inside' else 'gap_through')
+            elif mode in ('rejected','uncertain'):
+                assert final['status']==('failed' if mode=='rejected' else 'uncertain') and final['trigger_claim'] is not None
             else:
                 assert final['status']=='armed' and final['trigger_claim'] is None
         before=dict(counts)
-        if mode in ('inside','gap'):await e.cycle();assert counts==before
-        assert not post
+        if mode in ('inside','gap','rejected','uncertain'):await e.cycle();assert counts==before
+        assert len(post)-before_posts==(2 if mode in ('inside','gap','rejected','uncertain') else 0)
     original_get=service.TrendlinePlanStore.get
     async def run():
-        for mode in ('inside','gap','away','clock_expired','claim_stale','reverse_final'):await scenario(mode)
+        for test in (True,False):
+            for mode in ('inside','gap','away','clock_expired','claim_stale','reverse_final','rejected','uncertain'):await scenario(mode,test)
     _run_fixture_loop(run())

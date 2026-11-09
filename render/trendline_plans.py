@@ -44,6 +44,7 @@ _IMMUTABLE_FIELDS = {
     "schema_version", "plan_id", "execution_key", "revision", "created_at_ms",
     "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result", "live_authorization",
     "display_snapshot", "submission_refs",
+    "execution_policy", "dashboard_dismissal",
 }
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
@@ -276,6 +277,17 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     }
     claim = _normalise_claim(record.get("trigger_claim"), execution_key)
     execution_result = _normalise_execution_result(record.get("execution_result"))
+    policy = record.get("execution_policy")
+    if policy not in (None, "bybit-broker-v1"):
+        raise TrendlinePlanError("Unsupported trendline execution policy.")
+    dismissal = record.get("dashboard_dismissal")
+    if dismissal is not None:
+        if not isinstance(dismissal, Mapping) or dismissal.get("display_id") != f"trendline:{record.get('broker')}:{record.get('account')}:{plan_id}":
+            raise TrendlinePlanError("Invalid dashboard dismissal identity.")
+        dismissal = {"display_id": dismissal["display_id"], "dismissed_at_ms": _int_ms(dismissal.get("dismissed_at_ms"), "dismissed_at_ms"),
+                     "plan_revision": _positive_int(dismissal.get("plan_revision"), "dismissal.plan_revision")}
+        if dismissal["plan_revision"] > revision or status != "submitted" or not execution_result or execution_result.get("outcome") != "simulated" or record["test_trade"] is not True or claim is None:
+            raise TrendlinePlanError("Only a completed local simulation can be dismissed.")
     display_snapshot = _display_numbers(record.get("display_snapshot"))
     if display_snapshot is not None:
         source = record["display_snapshot"]
@@ -327,6 +339,8 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "live_authorization": live_authorization,
         "display_snapshot": display_snapshot,
         "submission_refs": _submission_references(record.get("submission_refs")),
+        "execution_policy": policy,
+        "dashboard_dismissal": dismissal,
     }
 
 
@@ -337,8 +351,19 @@ def _bounded_ms(value: object, field: str, maximum: int) -> int:
     return parsed
 
 
+def broker_submission_required(plan: Mapping[str, object]) -> bool:
+    """Bybit Test is classification; retain OANDA's existing simulation policy."""
+    return plan.get("broker") == "bybit" or plan.get("test_trade") is not True
+
+
+def requires_live_confirmation(plan: Mapping[str, object]) -> bool:
+    return plan.get("account") == "live" and broker_submission_required(plan)
+
+
 def live_execution_authorized(plan: Mapping[str, object]) -> bool:
-    if plan.get("account") == "demo" or plan.get("test_trade") is True:
+    if plan.get("broker") == "bybit" and plan.get("test_trade") is True and plan.get("execution_policy") != "bybit-broker-v1":
+        return False  # Old simulation-era arms require a new explicit Arm.
+    if not requires_live_confirmation(plan):
         return True
     auth = plan.get("live_authorization")
     return (plan.get("account") == "live" and plan.get("status") == "armed"
@@ -691,6 +716,37 @@ class TrendlinePlanStore:
         allowed = {"created", "updated"} if status == "draft" else {"cancelled"}
         return isinstance(lifecycle, Mapping) and lifecycle.get("last_transition") in allowed
 
+    @staticmethod
+    def can_dismiss_dashboard(plan: Mapping[str, object]) -> bool:
+        return (plan.get("status") == "submitted" and plan.get("test_trade") is True
+                and plan.get("trigger_claim") is not None
+                and (plan.get("execution_result") or {}).get("outcome") == "simulated")
+
+    def dismiss_dashboard(self, plan_id: str, *, broker: str, account: str, display_id: str, expected_revision: int, now_ms: Optional[int] = None) -> Dict[str, object]:
+        """Persist only a completed local result's display preference, never delete history."""
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None or plan["broker"] != broker or plan["account"] != account or display_id != f"trendline:{broker}:{account}:{plan_id}":
+                raise TrendlinePlanError("Dashboard plan identity changed; refresh before removal.")
+            if not self.can_dismiss_dashboard(plan):
+                raise TrendlinePlanError("Only a completed local simulation may be removed from the dashboard.")
+            if type(expected_revision) is not int:
+                raise TrendlinePlanError("Current plan revision required.")
+            previous = plan.get("dashboard_dismissal")
+            if previous and expected_revision in {plan["revision"], previous["plan_revision"] - 1}:
+                return copy.deepcopy(plan)
+            if plan["revision"] != expected_revision:
+                raise TrendlinePlanError("Plan changed; refresh before removal.")
+            now = _transition_time(plan, utc_epoch_ms() if now_ms is None else now_ms)
+            updated = copy.deepcopy(plan)
+            updated.update(revision=int(plan["revision"]) + 1, updated_at_ms=now)
+            updated["dashboard_dismissal"] = {"display_id": display_id, "dismissed_at_ms": now, "plan_revision": updated["revision"]}
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
+
     def delete(self, plan_id: str) -> str:
         """Permanently remove one unused plan under the existing registry lock."""
         with self._locked():
@@ -729,6 +785,8 @@ class TrendlinePlanStore:
             raise TrendlinePlanError("Unsupported transition.")
         next_plan = copy.deepcopy(plan)
         next_plan["status"] = target
+        if target == "armed" and plan["broker"] == "bybit":
+            next_plan["execution_policy"] = "bybit-broker-v1"
         if target in {"cancelled", "expired"}:
             next_plan["live_authorization"] = None
         next_plan["revision"] = int(plan["revision"]) + 1
@@ -751,13 +809,15 @@ class TrendlinePlanStore:
             now = _transition_time(plan, now_ms)
             if plan["expiry_at_ms"] is not None and now >= int(plan["expiry_at_ms"]):
                 raise TrendlinePlanError("Expired plans cannot be armed.")
-            live = plan["account"] == "live" and not plan["test_trade"]
+            live = requires_live_confirmation(plan)
             if live and confirm_live is not True:
                 raise TrendlinePlanError("Current live confirmation required.")
             updated = copy.deepcopy(plan)
             updated.update(status="armed", revision=int(plan["revision"]) + 1, updated_at_ms=now,
                            lifecycle={"last_transition": "live_authorized_armed" if live else "armed", "last_transition_at_ms": now})
             updated["live_authorization"] = {"execution_key": plan["execution_key"], "plan_revision": updated["revision"], "authorized_at_ms": now} if live else None
+            if plan["broker"] == "bybit":
+                updated["execution_policy"] = "bybit-broker-v1"
             canonical = validate_plan(updated)
             registry["plans"][plan_id] = canonical
             self._write(registry)
@@ -779,6 +839,8 @@ class TrendlinePlanStore:
             updated = copy.deepcopy(plan); updated["status"] = "armed"; updated["revision"] = int(plan["revision"]) + 1
             updated["updated_at_ms"] = now; updated["lifecycle"] = {"last_transition": "live_authorized_armed", "last_transition_at_ms": now}
             updated["live_authorization"] = {"execution_key": plan["execution_key"], "plan_revision": updated["revision"], "authorized_at_ms": now}
+            if plan["broker"] == "bybit":
+                updated["execution_policy"] = "bybit-broker-v1"
             canonical = validate_plan(updated); registry["plans"][canonical["plan_id"]] = canonical; self._write(registry); return copy.deepcopy(canonical)
 
     def cancel(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
@@ -839,7 +901,7 @@ class TrendlinePlanStore:
             plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None:
                 raise TrendlinePlanError("Unknown trendline plan.")
-            if plan["status"] != "claimed" or plan["trigger_claim"] is None or plan["execution_key"] != execution_key or plan["test_trade"]:
+            if plan["status"] != "claimed" or plan["trigger_claim"] is None or plan["execution_key"] != execution_key or not broker_submission_required(plan):
                 raise TrendlinePlanError("Only the matching non-test claim may begin submission.")
             now = _transition_time(plan, now)
             updated = copy.deepcopy(plan)
@@ -863,7 +925,7 @@ class TrendlinePlanStore:
             plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None:
                 raise TrendlinePlanError("Unknown trendline plan.")
-            simulation = plan["test_trade"] and plan["status"] == "claimed" and status == "submitted" and outcome.get("outcome") == "simulated"
+            simulation = not broker_submission_required(plan) and plan["status"] == "claimed" and status == "submitted" and outcome.get("outcome") == "simulated"
             if plan["trigger_claim"] is None or not (simulation or plan["status"] == "submitting"):
                 raise TrendlinePlanError("Only submitting plans or claimed test simulations may be resolved.")
             now = _transition_time(plan, now)

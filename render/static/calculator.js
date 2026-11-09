@@ -1015,7 +1015,7 @@
     };
     const riskUnit=plan.risk_mode==='fixed_aud'?' AUD':plan.risk_mode==='percent'?' %':'';
     const entries=[['Broker/account',`${text(plan.broker)} / ${text(plan.account)}`],['Instrument/side/timeframe',`${text(plan.instrument)} / ${text(plan.action)} / ${text(plan.timeframe)}`],
-      ['Test mode',typeof plan.test_trade==='boolean'?(plan.test_trade?'Yes':'No'):'Not recorded'],['Order',`${text(plan.order_intent)} | Limit price: ${text(plan.limit_entry_price)}`],
+      ['Arm execution',plan.broker==='bybit'?`Actual Bybit ${text(plan.account)} broker order; Test Yes is classification`:plan.test_trade?'OANDA Test simulation':'Actual OANDA broker order'],['Test mode',typeof plan.test_trade==='boolean'?(plan.test_trade?'Yes':'No'):'Not recorded'],['Order',`${text(plan.order_intent)} | Limit price: ${text(plan.limit_entry_price)}`],
       ['Risk',`${text(plan.risk_mode)} | ${text(plan.risk_value)}${riskUnit}`],['Stop ticks / target R',`${text(plan.stop_loss_ticks)} / ${text(plan.rr_target)} R`],
       ['Trigger',`${text(plan.trigger_mode)} / ${text(plan.cross_direction)} / ${text(plan.trigger_price_basis)} | Tolerance: ${text(plan.tolerance_ticks)} ticks`],
       ['Extension',typeof plan.right_extension==='boolean'?(plan.right_extension?'On':'Off'):'Not recorded'],
@@ -1134,8 +1134,8 @@
       finally { state.trendlineMutationPending=false; }
       return;
     }
-    const liveArm=action==='arm' && plan?.account==='live' && !plan?.test_trade;
-    if(liveArm && (typeof confirm!=='function' || !confirm('Authorize and arm this live plan for local monitoring and execution?'))) return;
+    const liveArm=action==='arm' && plan?.account==='live' && (plan?.broker==='bybit' || !plan?.test_trade);
+    if(liveArm && (typeof confirm!=='function' || !confirm(`Authorize this ${plan.broker} Live ${plan.instrument} ${plan.action} plan to submit an actual broker order${plan.broker==='bybit'?', including Test Yes':''}?`))) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
     try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,action==='arm'?{revision:plan.revision,monitor_generation:plan.monitor_generation,...(liveArm?{confirm_live_execution:true}:{})}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); notifyOpenOrdersStateChanged({action:"trendline"}); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); await refreshTrendlinePlans(); } finally { state.trendlineMutationPending=false; }
   }

@@ -1019,7 +1019,7 @@ async function run(profile){
  const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
  for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
  Object.assign(el['calc-symbol'],{value:'BTCUSDT'});el['calc-risk'].value='1';el['calc-sl-ticks'].value='10';el['calc-rr'].value='2';
- let plans=[],confirmed=false,running=false,fail=false,changeOnFailure=false;
+ let plans=[],confirmed=false,running=false,fail=false,changeOnFailure=false;const prompts=[];
  const response=(data,status=200)=>({ok:status<400,status,statusText:'mock',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
  const fetch=async(url,opts={})=>{
   const method=opts.method||'GET';calls.push({url,method,body:opts.body?JSON.parse(opts.body):null});
@@ -1042,19 +1042,20 @@ async function run(profile){
  };
  // A VM does not inherit browser/Node web globals. Symbol resolution uses
  // AbortController before its first awaited fetch, just as in the browser.
- vm.runInNewContext(source,{document:{getElementById:id=>el[id]},fetch,confirm:()=>confirmed,navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,URL,URLSearchParams,AbortController});
+ vm.runInNewContext(source,{document:{getElementById:id=>el[id]},fetch,confirm:text=>{prompts.push(text);return confirmed;},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,URL,URLSearchParams,AbortController});
  await flush();
  if(profile!=='local'){assert.equal(el['trendline-plans-panel'].style.display,'none');assert(!calls.some(c=>c.url.startsWith('/api/trendline-plans')));return;}
  assert.equal(el['trendline-plans-panel'].style.display,'');
  el['calc-symbol'].listeners.input();await flush();
  assert(el['calc-canonical-symbol'].textContent.includes('BTCUSDT'),'Canonical resolution must complete before saving');
  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();
+ el['test-toggle'].buttons.find(b=>b.dataset.v==='yes').click();
  el['order-toggle'].buttons.find(b=>b.dataset.v==='limit').click();
  el['calc-limit'].value='99.25';el['trendline-anchor-1-time'].value='2025-01-01T01:00';el['trendline-anchor-2-time'].value='2025-01-01T02:00';el['trendline-anchor-1-price'].value='100';el['trendline-anchor-2-price'].value='101';
  el['trendline-price-basis'].value='executable';
  const save=el['trendline-save'].click();el['trendline-save'].click();await save;
  assert.equal(calls.filter(c=>c.method==='POST' && c.url==='/api/trendline-plans').length,1,el['trendline-plan-status'].textContent);
- assert.equal(plans[0].limit_entry_price,'99.25');assert.equal(plans[0].order_intent,'limit');
+ assert.strictEqual(plans[0].test_trade,true);assert.equal(plans[0].limit_entry_price,'99.25');assert.equal(plans[0].order_intent,'limit');
  const action=name=>{const b=el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction===name);assert(b,'Missing action '+name);return b;};
  el['order-toggle'].buttons.find(b=>b.dataset.v==='market').click();el['calc-limit'].value='123';
  await action('edit').click();assert.equal(el['calc-limit'].value,'99.25');await el['trendline-save'].click();
@@ -1072,6 +1073,13 @@ async function run(profile){
  assert.equal(calls.filter(c=>c.url.endsWith('/arm')).length,2);
  assert.equal(calls.filter(c=>c.url.endsWith('/monitor/start')).length,0);
  assert(!calls.some(c=>c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
+ assert(prompts.some(text=>text.includes('Live')&&text.includes('actual broker order')&&text.includes('Test Yes')));
+ fail=false;await el['trendline-monitor-stop'].click();plans[0].test_trade=false;await el['trendline-refresh'].click();
+ const previous=calls.filter(c=>c.url.endsWith('/arm')).length;confirmed=false;await action('arm').click();
+ assert.equal(calls.filter(c=>c.url.endsWith('/arm')).length,previous);
+ confirmed=true;await action('arm').click();
+ assert.equal(calls.filter(c=>c.url.endsWith('/arm')).length,previous+1);
+
 }
 (async()=>{await run('render');await run('local');console.log('ok');})().catch(e=>{console.error(e);process.exitCode=1;});
 '''

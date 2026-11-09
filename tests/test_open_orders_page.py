@@ -6497,38 +6497,78 @@ def _dashboard_plan_fixture(tmp_path, *, broker="bybit", test=False):
     return store, plan, executor, rows
 
 
+def _historical_trendline_simulation(store):
+    # Isolated simulation-era persisted shape; the revised executor cannot create this Bybit outcome.
+    from test_trendline_executor import _payload
+    p=store.arm(store.create({**_payload("bybit",test_trade=True),"instrument":"XRPUSDT"},now_ms=1000)["plan_id"],now_ms=1500)
+    store.claim_trigger(p["plan_id"],{"trigger_timestamp_ms":2000,"trigger_price":"100","trigger_kind":"touch"},now_ms=2000)
+    registry=store.load();old=registry["plans"][p["plan_id"]]
+    old.update(status="submitted",revision=old["revision"]+1,updated_at_ms=2001,execution_policy=None,
+               execution_result={"outcome":"simulated","message":"Historical Test simulation; no broker order sent.","recorded_at_ms":2001},
+               lifecycle={"last_transition":"claim_submitted","last_transition_at_ms":2001})
+    store._write(registry)
+    return store.get(p["plan_id"])
+
+
 def test_trendline_dashboard_durable_lifecycle_and_server_snapshot(tmp_path, monkeypatch):
-    from render.trendline_plans import TrendlinePlanError, TrendlinePlanStore
+    from render.trendline_plans import TrendlinePlanError, TrendlinePlanPersistenceError, TrendlinePlanStore
+    from test_trendline_executor import _run_fixture_loop, _payload
     store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path, test=True)
-    assert rows() == []
-    plan = store.arm(plan["plan_id"], now_ms=1500); monitor.selected.add(plan["plan_id"])
-    row = rows()[0]; key = row["display_id"]
-    assert row["status"] == "Armed" and row["planned_entry_price"] == "100" and row["size"] == "2"
-    assert row["trendline_local"] and row["id"] is None and row["is_test_trade"] == "Yes"
-    monitor.running = False
-    assert rows()[0]["status"] == "Paused" and rows()[0]["display_id"] == key
-    monitor.running = True
-    store.claim_trigger(plan["plan_id"], {"trigger_timestamp_ms": 2000, "trigger_price": "100", "trigger_kind": "touch"}, now_ms=2000)
-    assert rows()[0]["status"] == "Claimed"
-    store.resolve_claim(plan["plan_id"], status="submitted", outcome={"outcome": "simulated", "calculated": {"quantity": "3", "stop_loss_price": "98", "take_profit_price": "104"}}, now_ms=2001)
-    final = rows()[0]
-    assert final["display_id"] == key and final["status"] == "Simulated" and final["trendline_local"]
-    restored = TrendlinePlanStore(store.path).get(plan["plan_id"])
-    assert restored["execution_result"]["calculated"]["stop_price"] == "98"
-    ctx = dict(broker="bybit", account="demo", category="linear", instrument="BTCUSDT", side="buy", order_type="market", risk_mode="fixed_aud", risk_value="10", stop_loss_ticks=10, risk_reward="2", timeframe="1h", is_test_trade=True, calculation_context_id="saved", quote_result={"quantity":"2","entry_price":"100","stop_loss_price":"99","take_profit_price":"102"})
-    monkeypatch.setattr(master_service, "_load_calculator_trade_contexts", lambda: [ctx])
-    monkeypatch.setattr(master_service, "_calc_context_uses_repo_local", lambda: False)
-    assert master_service._trendline_saved_display({"calculation_context_id":"saved", "quantity":"999"}, restored)["quantity"] == "2"
-    ctx["risk_value"] = "11"
-    assert master_service._trendline_saved_display({"calculation_context_id":"saved"}, restored) is None
-    with pytest.raises(TrendlinePlanError):
-        master_service._trendline_plan_payload({"display_snapshot": {"quantity":"999"}})
+    assert rows()==[]
+    plan=store.arm(plan["plan_id"],now_ms=1500);monitor.selected.add(plan["plan_id"])
+    row=rows()[0];key=row["display_id"]
+    assert row["status"]=="Armed" and row["size"]=="2" and row["planned_entry_price"]=="100" and row["is_test_trade"]=="Yes"
+    assert row["trendline_local"] and row["id"] is None and not row["dashboard_dismissible"]
+    monitor.running=False
+    assert rows()[0]["status"]=="Paused" and rows()[0]["display_id"]==key
+    monitor.running=True
+    store.claim_trigger(plan["plan_id"],{"trigger_timestamp_ms":2000,"trigger_price":"100","trigger_kind":"touch"},now_ms=2000)
+    assert rows()[0]["status"]=="Claimed" and not rows()[0]["dashboard_dismissible"]
+    store.begin_submission(plan["plan_id"],execution_key=plan["execution_key"],submission_refs={"calculation_context_id":"fresh","order_link_id":plan["execution_key"]},now_ms=2001)
+    assert rows()[0]["status"]=="Submitting"
+    store.resolve_claim(plan["plan_id"],status="submitted",outcome={"outcome":"executed","order_id":"acknowledged","calculated":{"quantity":"3","stop_loss_price":"98","take_profit_price":"104"}},now_ms=2002)
+    final=rows()[0];assert final["display_id"]==key and final["status"]=="Submitted; awaiting broker visibility" and not final["dashboard_dismissible"]
+    restored=TrendlinePlanStore(store.path).get(plan["plan_id"])
+    assert restored["execution_result"]["calculated"]["stop_price"]=="98"
+    ctx=dict(broker="bybit",account="demo",category="linear",instrument="BTCUSDT",side="buy",order_type="market",risk_mode="fixed_aud",risk_value="10",stop_loss_ticks=10,risk_reward="2",timeframe="1H",is_test_trade=True,calculation_context_id="saved",quote_result={"quantity":"2","entry_price":"100","stop_loss_price":"99","take_profit_price":"102"})
+    monkeypatch.setattr(master_service,"_load_calculator_trade_contexts",lambda:[ctx]);monkeypatch.setattr(master_service,"_calc_context_uses_repo_local",lambda:False)
+    assert master_service._trendline_saved_display({"calculation_context_id":"saved","quantity":"999"},restored)["quantity"]=="2"
+    ctx["risk_value"]="11"
+    assert master_service._trendline_saved_display({"calculation_context_id":"saved"},restored) is None
+    for field in ("display_snapshot","submission_refs","execution_policy","dashboard_dismissal"):
+        with pytest.raises(TrendlinePlanError):master_service._trendline_plan_payload({field:{}})
+        with pytest.raises(TrendlinePlanError):store.create({**_payload("bybit"),field:{}},now_ms=1000)
+    historical=_historical_trendline_simulation(store)
+    active=store.arm(store.create({**_payload("bybit",test_trade=True),"instrument":"XRPUSDT","action":"sell"},now_ms=1000)["plan_id"],now_ms=1500)
+    hrow=next(r for r in rows() if r["trendline_plan_id"]==historical["plan_id"])
+    assert hrow["status"]=="Simulated" and hrow["dashboard_dismissible"] and hrow["trendline_local"]
+    args=dict(broker="bybit",account="demo",display_id=hrow["display_id"],expected_revision=historical["revision"])
+    for bad in ({**args,"expected_revision":0},{**args,"account":"live"}):
+        with pytest.raises(TrendlinePlanError):store.dismiss_dashboard(historical["plan_id"],**bad,now_ms=3000)
+    before=store.path.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(store,"_write",lambda _:(_ for _ in ()).throw(TrendlinePlanPersistenceError("fixture disk unavailable")))
+        with pytest.raises(TrendlinePlanPersistenceError):store.dismiss_dashboard(historical["plan_id"],**args,now_ms=3000)
+    assert store.path.read_bytes()==before and any(r["trendline_plan_id"]==historical["plan_id"] for r in rows())
+    monkeypatch.setattr(master_service,"APP_PROFILE","local");monkeypatch.setattr(master_service,"TRENDLINE_PLAN_STORE",store);monkeypatch.setattr(master_service,"TRENDLINE_EXECUTOR",monitor)
+    monitor.latest_evaluations={};monitor.generation="fixture"
+    async def dismiss():
+        return json.loads((await master_service.trendline_plan_dismiss_dashboard(historical["plan_id"],{"broker":"bybit","account":"demo","display_id":hrow["display_id"],"revision":historical["revision"]})).body)["plan"]
+    dismissed=_run_fixture_loop(dismiss());assert dismissed["dashboard_dismissal"]
+    assert store.dismiss_dashboard(historical["plan_id"],**args,now_ms=3001)==store.get(historical["plan_id"])
+    rebuilt=TrendlinePlanStore(store.path).get(historical["plan_id"])
+    for field in ("execution_result","trigger_claim","execution_key","submission_refs","live_authorization"):
+        assert rebuilt[field]==historical[field]
+    assert not any(r["trendline_plan_id"]==historical["plan_id"] for r in rows())
+    assert any(r["trendline_plan_id"]==active["plan_id"] for r in rows())
+    for ineligible in (active,store.get(plan["plan_id"])):
+        with pytest.raises(TrendlinePlanError):store.dismiss_dashboard(ineligible["plan_id"],broker="bybit",account="demo",display_id=f"trendline:bybit:demo:{ineligible['plan_id']}",expected_revision=ineligible["revision"],now_ms=4000)
 
 
 def test_trendline_dashboard_exact_broker_correlation_and_aggregation(tmp_path):
     import copy
     for broker in ("bybit", "oanda"):
-        store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path, broker=broker)
+        store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path, broker=broker, test=broker=="bybit")
         assert rows() == []
         plan = store.arm(plan["plan_id"], now_ms=1500)
         monitor.selected.add(plan["plan_id"])
@@ -6542,6 +6582,7 @@ def test_trendline_dashboard_exact_broker_correlation_and_aggregation(tmp_path):
         native = dict(broker=broker.title(), account="demo", account_id="acct", category="linear" if broker=="bybit" else "forex", instrument=plan["instrument"], side="Buy", type="Order", id="order-1", order_link_id=plan["execution_key"], position_idx=0, size="2", status="Pending", entry_price="100")
         linked = dict(native, broker=broker, side="buy", calculation_context_id="fresh", order_id="order-1", trade_id="trade-1")
         first = rows([native], [linked]); assert len(first)==1 and not first[0]["trendline_local"]
+        assert first[0]["is_test_trade"]==("Yes" if broker=="bybit" else "No") and not first[0]["dashboard_dismissible"]
         key=first[0]["display_id"]
         position=dict(native, type="Position", id="position-1" if broker=="bybit" else "trade-1", status="Open", raw_refs={"order_ids_complete":True,"order_ids":["order-1"]}, funding_paid="4")
         second=rows([position], [linked]); assert len(second)==1 and second[0]["display_id"]==key and second[0]["id"]==position["id"]
@@ -6564,11 +6605,12 @@ def test_trendline_dashboard_exact_broker_correlation_and_aggregation(tmp_path):
 
 def test_trendline_dashboard_publication_without_collection_churn(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path)
+    store, plan, monitor, rows = _dashboard_plan_fixture(tmp_path,test=True)
     service=master_service
     monkeypatch.setattr(service,"APP_PROFILE","local")
     monkeypatch.setattr(service,"TRENDLINE_PLAN_STORE",store);monkeypatch.setattr(service,"TRENDLINE_EXECUTOR",monitor)
     monkeypatch.setattr(service,"_load_calculator_trade_contexts",lambda:[])
+    monkeypatch.setattr(service,"_load_trade_contexts",lambda:[])
     monkeypatch.setattr(service,"_load_pending_webhooks",lambda:[])
     monkeypatch.setattr(service,"_pepperstone_local_tracker_rows",lambda:[])
     monkeypatch.setattr(service.script_manager,"get",lambda _:SimpleNamespace(is_running=False))
@@ -6585,6 +6627,24 @@ def test_trendline_dashboard_publication_without_collection_churn(tmp_path, monk
     monitor.running=False;job.publish()
     assert job.payload["items"][0]["status"]=="Paused" and owner.revision>revision
     assert job.payload["items"][0]["display_id"]==armed["items"][0]["display_id"] and owner.job is job
+    job.sources["pending"]={"core":True,"meta":{"broker":"Bybit","account":"demo","category":"linear","source_type":"orders"},"state":"pending","last_success":None,"last_success_at":None,"attempts":0,"next_retry":0,"errors":[],"warnings":[],"items":[],"previous":[]}
+    job.publish();assert job.payload["pending"] and job.payload["items"][0]["status"]=="Paused"
+    job.sources["pending"].update(state="failed",errors=[{"broker":"Bybit","message":"Fixture source unavailable"}])
+    historical=_historical_trendline_simulation(store)
+    job.publish();sim=next(r for r in job.payload["items"] if r["trendline_plan_id"]==historical["plan_id"])
+    assert sim["dashboard_dismissible"] and sim["status"]=="Simulated" and job.payload["errors"]
+    original_revision=owner.revision;generation=job.version
+    store.dismiss_dashboard(historical["plan_id"],broker="bybit",account="demo",display_id=sim["display_id"],expected_revision=historical["revision"],now_ms=3000)
+    job.publish();assert owner.revision>original_revision and job.version==generation and owner.job is job and not job.tasks
+    assert not any(r["trendline_plan_id"]==historical["plan_id"] for r in job.payload["items"])
+    # Broker exposure is counted once even for Test Yes, through the actual publication path.
+    claimed=store.claim_trigger(plan["plan_id"],{"trigger_timestamp_ms":3000,"trigger_price":"100","trigger_kind":"touch"},now_ms=3000)
+    store.begin_submission(plan["plan_id"],execution_key=plan["execution_key"],now_ms=3001)
+    store.resolve_claim(plan["plan_id"],status="submitted",outcome={"outcome":"executed","order_id":"actual-order"},now_ms=3002)
+    native=dict(broker="Bybit",account="demo",category="linear",instrument=plan["instrument"],side="Buy",type="Position",id="actual-position",size="2",status="Open",raw_refs={"order_ids_complete":True,"order_ids":["actual-order"]})
+    job.sources["pending"].update(state="complete",errors=[],items=[native],last_success=service._open_orders_now(),last_success_at="2026-11-09T00:00:00Z")
+    job.publish();assert len(job.payload["items"])==1 and job.payload["source_counts"]["live_broker_positions"]==1
+    assert job.payload["items"][0]["display_id"]==armed["items"][0]["display_id"]
 
 
 def test_trendline_dashboard_browser_preserves_row_and_draft():
@@ -6656,6 +6716,38 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
  const position={...order,type:'Position',id:'real-position',status:'Open',classification_target:'position-target'};
  hooks.render([position]);assert.strictEqual(tbody.children.length,1);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(select(timeframe),draft);assert.strictEqual(document.activeElement,draft);assert(find(timeframe,'Save').disabled);assert(find(tr.children[39],'Close'));
  assert.notStrictEqual(hooks.brokerObjectKey(order),hooks.brokerObjectKey(position));assert.strictEqual(hooks.rowKey(order),hooks.rowKey(position));
+
+ const historical={...base,display_id:'trendline:bybit:demo:history',trendline_plan_id:'history',plan_revision:7,status:'Simulated',dashboard_dismissible:true};
+ const other={...base,display_id:'trendline:bybit:demo:other',trendline_plan_id:'other',status:'Armed'};
+ let removeCalls=0,releaseRemoval,saved=false,failRemoval=true;
+ const durable={plan_id:'history',broker:'bybit',account:'demo',revision:8,dashboard_dismissal:{display_id:historical.display_id,plan_revision:8}};
+ const oldFetch=global.fetch;
+ global.fetch=async(url,opts={})=>{
+  if(url.includes('/dismiss-dashboard')){
+   removeCalls++;assert.deepStrictEqual(JSON.parse(opts.body),{broker:'bybit',account:'demo',display_id:historical.display_id,revision:7});
+   await new Promise(resolve=>releaseRemoval=resolve);
+   if(failRemoval)return reply({detail:'fixture disk failure'},500);
+   saved=true;throw new Error('ambiguous response after durable save');
+  }
+  if(url==='/api/trendline-plans')return reply({ok:true,plans:saved?[durable]:[{...durable,revision:7,dashboard_dismissal:null}]});
+  if(url==='/api/open-orders')return reply({...snapshot,items:[position,other]});
+  return oldFetch(url,opts);
+ };
+ hooks.render([historical,position,other]);let historyTr=tbody.children.find(tr=>find(tr.children[39],'Remove from dashboard'));
+ assert(historyTr,'Historical simulation removal available on first publication');
+ const removing=find(historyTr.children[39],'Remove from dashboard');const pending=removing.click();removing.click();
+ assert(removing.disabled&&removeCalls===1);hooks.render([historical,position,other]);assert.strictEqual(tbody.children.length,3);
+ releaseRemoval();await pending;historyTr=tbody.children.find(tr=>find(tr.children[39],'Remove from dashboard'));
+ assert(historyTr&&historyTr.children[39].textContent.includes('failed'));
+ const retry=find(historyTr.children[39],'Remove from dashboard');assert(!retry.disabled);failRemoval=false;
+ const second=retry.click();releaseRemoval();await second;
+ assert.strictEqual(removeCalls,2);assert.strictEqual(tbody.children.length,2);
+ hooks.render([historical,position,other]);assert.strictEqual(tbody.children.length,2,'late pre-dismissal publication must be rejected');
+ hooks.handleStateChange({type:'state-changed',action:'trendline-dashboard-dismissed',broker:'bybit',account:'demo',plan_id:'other',display_id:other.display_id,revision:9});
+ hooks.render([historical,position,{...other,trendline_local:false,type:'Order',id:'actual-other'}]);
+ assert.strictEqual(tbody.children.length,2,'local tombstone must never hide actual broker exposure');
+ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));await flush();
+ assert(!tbody.children.some(tr=>find(tr.children[39],'Remove from dashboard')),'reload uses persisted server omission');
  console.log('trendline stable mounted row assertions passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''

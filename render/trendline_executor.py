@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
-from render.trendline_plans import TrendlinePlanError, TrendlinePlanStore, evaluate_trigger, utc_epoch_ms
+from render.trendline_plans import TrendlinePlanError, TrendlinePlanStore, evaluate_trigger, utc_epoch_ms, broker_submission_required, requires_live_confirmation
 
 AsyncValue = Callable[..., Awaitable[Mapping[str, object]] | Mapping[str, object]]
 
@@ -184,9 +184,9 @@ class TrendlinePlanExecutor:
                 raise TrendlinePlanError("Plan changed; refresh plans before Arm.")
             if existing["status"] not in {"draft", "armed"} or existing["trigger_claim"] is not None or self.eligible(plan_id):
                 raise TrendlinePlanError("Plan is already monitoring or cannot be armed.")
-            live = existing["account"] == "live" and not existing["test_trade"]
+            live = requires_live_confirmation(existing)
             if live and confirm_live is not True:
-                raise TrendlinePlanError("Live non-test plans require explicit local execution confirmation.")
+                raise TrendlinePlanError("Live broker orders require explicit local execution confirmation, including Bybit Test Yes.")
             started = await self._start()
             try:
                 plan = self.store.resume_and_arm(plan_id, expected_revision=revision, confirm_live=confirm_live, now_ms=self.now_ms())
@@ -317,7 +317,7 @@ class TrendlinePlanExecutor:
         plan_id = str(plan["plan_id"])
         if not self.eligible(plan_id):
             return
-        if not plan["test_trade"] and not self.live_confirmed(plan):
+        if broker_submission_required(plan) and not self.live_confirmed(plan):
             self._record(plan, "authorization", "live_confirmation_required")
             return
         if plan["order_intent"] == "limit" and not plan.get("limit_entry_price"):
@@ -368,7 +368,7 @@ class TrendlinePlanExecutor:
         if fresh["status"] != "armed" or fresh["trigger_claim"] is not None or fresh["revision"] != plan["revision"] or fresh["execution_key"] != plan["execution_key"] or fresh.get("live_authorization") != plan.get("live_authorization"):
             self._record(plan, "claim", "plan_changed_before_claim", quote=final_quote)
             return
-        if not fresh["test_trade"] and not self.live_confirmed(fresh):
+        if broker_submission_required(fresh) and not self.live_confirmed(fresh):
             self._record(plan, "claim", "live_confirmation_required", quote=final_quote)
             return
         claim_local_now = self.now_ms()
@@ -385,7 +385,7 @@ class TrendlinePlanExecutor:
             self._record(plan, "claim", "duplicate_claim", quote=final_quote)
             return
         claimed = claim["plan"]
-        if claimed["test_trade"]:
+        if not broker_submission_required(claimed):
             self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent.", "calculated": calculated}, now_ms=self.now_ms())
             self._record(plan, "complete", "simulated", quote=final_quote, evaluation=final_eval)
             return

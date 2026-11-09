@@ -29,6 +29,9 @@ def _run_fixture_loop(coroutine):
     try:
         return loop.run_until_complete(coroutine)
     finally:
+        pending=asyncio.all_tasks(loop)
+        for task in pending:task.cancel()
+        if pending:loop.run_until_complete(asyncio.gather(*pending,return_exceptions=True))
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
@@ -527,8 +530,8 @@ def test_arm_selected_monitor_session_and_submission_guards(tmp_path, monkeypatc
         assert calls.count(("submit", d["plan_id"])) == 1
         assert store.get(d["plan_id"])["execution_key"] == d["execution_key"]
         await arm(drafts[2]); await e.cycle()
-        assert store.get(drafts[2]["plan_id"])["execution_result"]["outcome"] == "simulated"
-        assert not any(k == "submit" and v == drafts[2]["plan_id"] for k,v in calls)
+        assert store.get(drafts[2]["plan_id"])["execution_result"]["outcome"] == "executed"
+        assert calls.count(("submit", drafts[2]["plan_id"])) == 1
         await e.stop()
         reconstructed = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda:2500)
         before = list(calls); await reconstructed.cycle(); assert calls == before
@@ -602,9 +605,30 @@ def test_arm_selected_monitor_session_and_submission_guards(tmp_path, monkeypatc
             await real.cycle()  # First price above line must seed, not cross old below-line sample.
             assert real_store.get(cross["plan_id"])["trigger_claim"] is None
             await real.cycle()
-            assert real_store.get(cross["plan_id"])["execution_result"]["outcome"] == "simulated"
+            assert real_store.get(cross["plan_id"])["execution_result"]["outcome"] == "executed"
             assert not real.eligible(inactive["plan_id"])
             await real.stop()
+        # Simulation-era Bybit Test arms cannot silently adopt the new execution policy.
+        legacy_store=TrendlinePlanStore(tmp_path/"legacy-policy.json")
+        legacy=legacy_store.arm(legacy_store.create(_payload("bybit",test_trade=True),now_ms=1000)["plan_id"],now_ms=1500)
+        registry=legacy_store.load();registry["plans"][legacy["plan_id"]]["execution_policy"]=None;legacy_store._write(registry)
+        legacy_executor=TrendlinePlanExecutor(legacy_store,quote,calculate,submit,live_execution_authorized,now_ms=lambda:2500)
+        legacy_executor._eligible.add(legacy["plan_id"])
+        before=list(calls);await legacy_executor.cycle();assert calls==before
+        with pytest.raises(TrendlinePlanError):
+            legacy_store.claim_trigger(legacy["plan_id"],{"trigger_timestamp_ms":2500,"trigger_price":"100","trigger_kind":"touch"},now_ms=2500)
+        await legacy_executor.stop()
+        async def idle_legacy():await legacy_executor._stop.wait()
+        monkeypatch.setattr(legacy_executor,"_run",idle_legacy)
+        await legacy_executor.arm(legacy["plan_id"],revision=legacy["revision"],generation=legacy_executor.generation)
+        await legacy_executor.cycle();await legacy_executor.cycle()
+        assert calls.count(("submit",legacy["plan_id"]))==1
+        await legacy_executor.stop()
+        oanda=legacy_store.arm(legacy_store.create(_payload("oanda",test_trade=True),now_ms=1000)["plan_id"],now_ms=1500)
+        simulator=_selected_fixture_executor(legacy_store,quote,calculate,submit,live_execution_authorized,now_ms=lambda:2500)
+        before=list(calls);await simulator.cycle()
+        assert legacy_store.get(oanda["plan_id"])["execution_result"]["outcome"]=="simulated"
+        assert not any(kind=="submit" and pid==oanda["plan_id"] for kind,pid in calls[len(before):])
     _run_fixture_loop(run())
 
 

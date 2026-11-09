@@ -136,6 +136,7 @@ from render.trendline_plans import (
     TrendlinePlanPersistenceError,
     TrendlinePlanStore,
     live_execution_authorized,
+    broker_submission_required,
 )
 from render.trendline_executor import TrendlinePlanExecutor, DefiniteSubmissionFailure, InvalidQuote, validate_quote, valid_order_reference, quote_comparison_now, require_same_quote_clock
 from shared.bybit_option_resolver import resolve_option_by_target_risk
@@ -286,7 +287,7 @@ def _trendline_calculator_payload(plan: Mapping[str, object]) -> Dict[str, objec
         "order_type": plan["order_intent"], "risk_mode": plan["risk_mode"], "risk_value": plan["risk_value"],
         "entry_price": plan.get("limit_entry_price") if plan["order_intent"] == "limit" else None,
         "stop_loss_ticks": plan["stop_loss_ticks"], "risk_reward": plan["rr_target"], "target_mode": "rr",
-        "timeframe": plan["timeframe"], "test_trade": False, "webhook": "no", **dict(plan["order_metadata"]),
+        "timeframe": plan["timeframe"], "test_trade": plan["test_trade"] if plan["broker"] == "bybit" else False, "webhook": "no", **dict(plan["order_metadata"]),
     }
 
 
@@ -29542,7 +29543,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <table class="calc-table">
               <caption id="trendline-plans-title">Local trendline plans</caption>
               <tbody>
-                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Save draft, then click Arm on the selected plan. Arm starts watching that plan while Local Trading Tools is running and the computer is awake. Stop monitoring pauses all plans; click Arm on each specific card to resume after Stop or an LTT restart. Test plans simulate without sending broker orders; eligible non-test plans can submit once after fresh validation, and live plans require explicit live confirmation. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below for automatic preview; Apply fills both anchor fields; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Preview shows its optional extension flag; Apply sets it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and import/Apply/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
+                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Save draft, then click Arm on the selected plan. Arm starts watching that plan while Local Trading Tools is running and the computer is awake. Stop monitoring pauses all plans; click Arm on each specific card to resume after Stop or an LTT restart. Bybit plans submit an actual order to their saved Demo or Live account after fresh validation, including Test Yes; Test is a trade classification. Any Bybit Live order requires explicit Live confirmation. OANDA Test plans retain simulation without a broker order. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below for automatic preview; Apply fills both anchor fields; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Preview shows its optional extension flag; Apply sets it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and import/Apply/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
                 <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste one LTT_ANCHORS_V1 export or its JSON"></textarea><div class="group"><div class="muted">Paste -> automatic preview -> Apply anchors -> Save/Update draft.</div><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
                 <tr><th><label for="trendline-anchor-1-time">Anchor 1</label></th><td><div class="grid"><input id="trendline-anchor-1-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-1-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-1-utc" class="muted"></div></td></tr>
                 <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
@@ -30800,7 +30801,7 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
-    if {"display_snapshot", "submission_refs"}.intersection(payload):
+    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal"}.intersection(payload):
         raise TrendlinePlanError("Display and submission records are server-owned.")
     forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
@@ -31010,6 +31011,19 @@ async def trendline_plan_cancel(plan_id: str) -> JSONResponse:
     try:
         plan = TRENDLINE_PLAN_STORE.cancel(plan_id)
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
+
+
+@app.post("/api/trendline-plans/{plan_id}/dismiss-dashboard")
+async def trendline_plan_dismiss_dashboard(plan_id: str, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        if set(payload) != {"broker", "account", "display_id", "revision"}:
+            raise TrendlinePlanError("Exact dashboard plan identity and revision required.")
+        plan = TRENDLINE_PLAN_STORE.dismiss_dashboard(plan_id, broker=payload["broker"], account=payload["account"],
+            display_id=payload["display_id"], expected_revision=payload["revision"])
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan)})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
 
@@ -38707,7 +38721,7 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
     projected, matches = [], {}
     for plan in plans:
         state = plan["status"]
-        if state in {"draft", "cancelled", "expired"}:
+        if state in {"draft", "cancelled", "expired"} or plan.get("dashboard_dismissal"):
             continue
         result = plan.get("execution_result") or {}
         snapshot = plan.get("display_snapshot") or result.get("calculated") or {}
@@ -38740,6 +38754,7 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
         row = dict(scope, broker=plan["broker"].title(), venue=plan["broker"].title(),
                    display_id=f"trendline:{plan['broker']}:{plan['account']}:{plan['plan_id']}",
                    trendline_plan_id=plan["plan_id"], execution_key=plan["execution_key"],
+                   plan_revision=plan["revision"], dashboard_dismissible=TrendlinePlanStore.can_dismiss_dashboard(plan),
                    trendline_local=True, type="Trendline plan", status=label, id=None,
                    asset="crypto" if plan["broker"] == "bybit" else "fx", order_type=plan["order_intent"],
                    timeframe=plan["timeframe"], is_test_trade="Yes" if plan["test_trade"] else "No",
@@ -38750,7 +38765,7 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
                    planned_target_price=snapshot.get("target_price"), classification_target=None,
                    classification_unavailable="No confirmed broker object", **plan["order_metadata"])
         candidates = []
-        if not plan["test_trade"] and state in {"submitting", "submitted", "uncertain"}:
+        if broker_submission_required(plan) and result.get("outcome") != "simulated" and state in {"submitting", "submitted", "uncertain"}:
             for index, native in enumerate(items):
                 if not _context_scope_compatible(dict(scope, **{k: refs[k] for k in ("account_id", "position_idx") if k in refs}), native):
                     continue
@@ -38782,7 +38797,9 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
             native = items[index]
             merged = dict(row, **native)
             merged.update(display_id=row["display_id"], trendline_plan_id=row["trendline_plan_id"], trendline_local=False,
-                          quantity_is_estimate=False)
+                          quantity_is_estimate=False, dashboard_dismissible=False, is_test_trade=row["is_test_trade"])
+            if isinstance(merged.get("classification_values"), dict):
+                merged["classification_values"] = dict(merged["classification_values"], is_test_trade=row["is_test_trade"] == "Yes")
             rows.append(merged)
             consumed.add(index)
         else:

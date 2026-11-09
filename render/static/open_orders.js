@@ -10,6 +10,8 @@
   const warningsList = warningsBox?.querySelector('ul');
   const pendingManualActions = new Map();
   const localRemovalStates = new Map();
+  const trendlineDismissals = new Map();
+  const trendlineDismissStates = new Map();
   const localRemovalDescription = 'Removes local tracking only. Manage MT5 orders in MT5.';
   const pendingVisibilityChecks = new Map();
   const VERIFY_SCHEDULE_MS = [300, 700, 1500, 3000, 3000];
@@ -165,7 +167,45 @@
       setBadge(message);
     }
   };
+  const acknowledgeTrendlineDismissal=plan=>{
+    const saved=plan?.dashboard_dismissal;
+    if(!saved||!plan.plan_id||!Number.isInteger(plan.revision)||plan.revision<1||saved.display_id!==`trendline:${plan.broker}:${plan.account}:${plan.plan_id}`)return false;
+    trendlineDismissals.set(saved.display_id,Number(plan.revision));
+    return true;
+  };
+  const postTrendlineDismissal=async(row,btn)=>{
+    const key=rowKey(row);if(trendlineDismissStates.get(key)?.pending)return;
+    trendlineDismissStates.set(key,{pending:true});btn.disabled=true;btn.textContent='Removing...';
+    let acknowledged=null;
+    try{
+      const data=await fetchJson(`/api/trendline-plans/${encodeURIComponent(row.trendline_plan_id)}/dismiss-dashboard`,GET_TIMEOUT_MS,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({broker:String(row.broker).toLowerCase(),account:row.account,display_id:row.display_id,revision:row.plan_revision})});
+      if(data.ok!==true||data.plan?.plan_id!==row.trendline_plan_id||data.plan?.dashboard_dismissal?.display_id!==key||!acknowledgeTrendlineDismissal(data.plan))throw new Error('Dashboard removal was not confirmed.');
+      acknowledged=data.plan;
+    }catch(error){
+      // One authoritative recovery read, never another state-changing retry.
+      try{
+        const state=await fetchJson('/api/trendline-plans');
+        const plan=state.plans?.find(p=>p.plan_id===row.trendline_plan_id&&p.broker===String(row.broker).toLowerCase()&&p.account===row.account);
+        if(plan&&acknowledgeTrendlineDismissal(plan))acknowledged=plan;
+      }catch(_){}
+      if(!acknowledged)trendlineDismissStates.set(key,{pending:false,error:'Remove from dashboard failed: '+safeDiagnostic(error?.message||error,'Request failed; retry.')});
+    }
+    if(acknowledged){
+      trendlineDismissStates.delete(key);
+      broadcastStateChange({action:'trendline-dashboard-dismissed',display_id:key,plan_id:row.trendline_plan_id,broker:String(row.broker).toLowerCase(),account:row.account,revision:acknowledged.revision});
+    }
+    render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+  };
   const renderActionCell=(row,cell,{allowAction=true}={})=>{
+    if(row.trendline_local===true&&row.dashboard_dismissible===true){
+      const state=trendlineDismissStates.get(rowKey(row));
+      const btn=document.createElement('button');btn.type='button';btn.className='action-btn';btn.textContent=state?.pending?'Removing...':'Remove from dashboard';
+      btn.setAttribute('aria-label','Remove completed local result from dashboard');btn.disabled=!allowAction||state?.pending===true;
+      btn.addEventListener('click',()=>postTrendlineDismissal(row,btn));cell.appendChild(btn);
+      if(state?.error){const error=document.createElement('span');error.className='classification-feedback';error.setAttribute('role','status');error.textContent=state.error;cell.appendChild(error);}
+      return;
+    }
     const local=row.local_tracking===true&&String(row.broker||'').toLowerCase()==='pepperstone'
       &&['demo','live'].includes(row.account)&&row.calculation_context_id
       &&row.id===`pepperstone-local:${row.account}:${row.calculation_context_id}`
@@ -496,6 +536,7 @@
   };
   const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?item.manual_fill_price:(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
+    items=items.filter(item=>!(item.trendline_local===true&&trendlineDismissals.has(rowKey(item))));
     items=items.map(item=>{const expiry=expiryStatusRecords.get(item.order_expiry?.id);
       if(expiry&&Number(expiry.revision)>=Number(item.order_expiry.revision||0)&&expiry.mode===item.order_expiry.mode&&expiry.environment===item.order_expiry.environment&&expiry.order_link_id===item.order_expiry.order_link_id)item={...item,order_expiry:expiry};
       const previous=classificationRows.get(classificationKey(item))?.item;return preferReferencePrice(preferNewerLocalFill(item,previous),previous);});
@@ -603,6 +644,10 @@
   };
   const handleStateChange=(event)=>{
     if(!event||event.type!=='state-changed')return;
+    if(event.action==='trendline-dashboard-dismissed'&&event.display_id===`trendline:${event.broker}:${event.account}:${event.plan_id}`){
+      trendlineDismissals.set(event.display_id,Number(event.revision));
+      render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+    }
     if(String(event.action||'').toLowerCase()!=='submit'){
       if(document.hidden){refreshQueued=true;return;}
       refresh('broadcast').catch(()=>{});return;
