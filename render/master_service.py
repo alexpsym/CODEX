@@ -30801,7 +30801,7 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
-    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal"}.intersection(payload):
+    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "broker_closure"}.intersection(payload):
         raise TrendlinePlanError("Display and submission records are server-owned.")
     forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
@@ -38082,6 +38082,159 @@ def _pepperstone_reference_quote(raw, instrument):
     return result
 
 
+def _trendline_scope_coverage(sources, plan, context):
+    settlement = context.get("settlement_currency")
+    if settlement not in {"USDT", "USDC"} or context.get("position_idx") not in {0, 1, 2}:
+        return None
+    selected = []
+    for kind in ("orders", "positions"):
+        rows = [e for e in sources.values() if e.get("core") and e["meta"].get("broker") == "Bybit"
+                and e["meta"].get("account") == plan["account"] and e["meta"].get("category") == "linear"
+                and e["meta"].get("settlement_coin") == settlement and e["meta"].get("source_type") == kind]
+        if len(rows) != 1:
+            return None
+        entry = rows[0]
+        if (entry["state"] != "complete" or entry["errors"] or entry["warnings"] or entry.get("last_success") is None
+                or _open_orders_now() - entry["last_success"] >= _OPEN_ORDERS_STALE_AFTER_SECONDS):
+            return None
+        try:
+            stamp = int(datetime.fromisoformat(entry["last_success_at"].replace("Z", "+00:00")).timestamp() * 1000)
+        except (ValueError, TypeError, AttributeError):
+            return None
+        selected.append((entry, stamp))
+    return selected
+
+
+def _trendline_exposure_conflicts(items, plan, context):
+    order_id = (plan.get("execution_result") or {}).get("order_id")
+    for row in items:
+        if any(str(row.get(k) or "").lower() != str(v).lower() for k, v in
+               (("broker", "bybit"), ("account", plan["account"]), ("category", "linear"), ("instrument", plan["instrument"]))):
+            continue
+        if str(row.get("type")).lower() == "order":
+            if str(row.get("id")) == order_id or row.get("order_link_id") == plan["execution_key"]:
+                return True
+        elif str(row.get("type")).lower() == "position":
+            if row.get("position_idx") is not None and row["position_idx"] != context["position_idx"]:
+                continue
+            refs = row.get("raw_refs") or {}
+            if refs.get("order_ids_complete") is True and refs.get("order_ids") and order_id not in refs["order_ids"]:
+                continue  # A proven replacement is real exposure, not the old execution.
+            return True
+    return False
+
+
+def _trendline_full_close_proof(plan, context, history, executions):
+    """Exact opening-fill inventory to zero, never a symbol/time association."""
+    order_id = (plan.get("execution_result") or {}).get("order_id")
+    opener = history.get(order_id) or {}
+    if (opener.get("orderLinkId") != plan["execution_key"] or opener.get("orderStatus") not in {"Filled", "Cancelled", "PartiallyFilledCanceled"}
+            or str(opener.get("side")).lower() != plan["action"]):
+        return None
+    try:
+        expected = Decimal(str(opener["cumExecQty"]))
+        if not expected.is_finite() or expected <= 0:
+            return None
+        rows, dedup = [], {}
+        for raw in executions:
+            if raw.get("execType") != "Trade" or raw.get("symbol") != plan["instrument"]:
+                continue
+            order = history.get(raw.get("orderId"))
+            if not order or order.get("symbol") != plan["instrument"]:
+                return None
+            if int(order["positionIdx"]) != context["position_idx"]:
+                continue
+            if raw.get("positionIdx") is not None and int(raw["positionIdx"]) != context["position_idx"]:
+                return None
+            if not raw.get("execId") or not raw.get("orderId"):
+                return None
+            if raw["execId"] in dedup:
+                if dedup[raw["execId"]] != raw:
+                    return None
+                continue
+            dedup[raw["execId"]] = raw
+            qty, closed = Decimal(str(raw["execQty"])), Decimal(str(raw["closedSize"]))
+            if not qty.is_finite() or not closed.is_finite() or qty <= 0 or closed < 0 or closed > qty:
+                return None
+            rows.append((int(raw["execTime"]), int(raw["seq"]), raw, qty, closed))
+        rows.sort(key=lambda row: (row[0], row[1], row[2]["execId"]))
+        opening = [r for r in rows if r[2]["orderId"] == order_id]
+        if not opening or sum(r[3] for r in opening) != expected or any(r[4] != 0 for r in opening):
+            return None
+        balance = opened = Decimal(0)
+        started = False
+        ordering = {}
+        for stamp, seq, raw, qty, closed in rows:
+            if not started and raw["orderId"] != order_id:
+                continue
+            started = True
+            key = (stamp, seq)
+            if key in ordering and ordering[key] != raw["orderId"]:
+                return None  # Broker ordering ambiguous at the same timestamp/sequence.
+            ordering[key] = raw["orderId"]
+            if raw["orderId"] == order_id and str(raw.get("side")).lower() == plan["action"] and closed == 0:
+                balance += qty
+                opened += qty
+            elif str(raw.get("side")).lower() in {"buy", "sell"} and str(raw["side"]).lower() != plan["action"] and closed == qty and qty <= balance:
+                balance -= qty
+            else:
+                return None  # Aggregation, reversal or unlinked opening inventory.
+            if opened == expected and balance == 0:
+                return {"kind": "bybit_full_execution_ledger", "account": plan["account"], "instrument": plan["instrument"],
+                        "category": "linear", "settlement_currency": context["settlement_currency"], "position_idx": context["position_idx"],
+                        "order_id": order_id, "order_link_id": plan["execution_key"], "closing_order_id": raw["orderId"],
+                        "closed_at_ms": stamp, "opening_quantity": str(expected)}
+    except (KeyError, ValueError, TypeError, ArithmeticError):
+        return None
+    return None
+
+
+async def _trendline_read_close_proof(plan, context, config):
+    """At most three history and three execution pages, bounded by the owning job."""
+    async def read(path, params):
+        response = await _open_orders_scoped_read(_bybit_signed_get(base_url=config["base_url"], api_key=config["api_key"],
+            api_secret=config["api_secret"], path=path, params=params), "Trendline closure " + path)
+        result = response.get("result") or {}
+        if response.get("retCode") not in (0, "0") or result.get("category") not in (None, "linear") or not isinstance(result.get("list"), list):
+            raise ValueError("Closure history incomplete")
+        return result
+    order_id = plan["execution_result"]["order_id"]
+    first = await read("/v5/order/history", {"category": "linear", "orderId": order_id, "limit": "1"})
+    if len(first["list"]) != 1 or first.get("nextPageCursor"):
+        return None
+    opener = first["list"][0]
+    if opener.get("orderId") != order_id or opener.get("symbol") != plan["instrument"] or int(opener.get("positionIdx", -1)) != context["position_idx"]:
+        return None
+    start, end = int(opener["createdTime"]), time.time_ns() // 1_000_000
+    if start <= 0 or end < start or end - start > _BYBIT_MAX_WINDOW_MS:
+        return None  # No truncation/age-based closure inference.
+    executions, cursor, seen = [], "", set()
+    for _ in range(3):
+        params = {"category": "linear", "symbol": plan["instrument"], "startTime": str(start), "endTime": str(end), "limit": "100"}
+        if cursor:
+            params["cursor"] = cursor
+        page = await read("/v5/execution/list", params)
+        executions.extend(page["list"])
+        cursor = str(page.get("nextPageCursor") or "")
+        if not cursor:
+            break
+        if cursor in seen:
+            return None
+        seen.add(cursor)
+    if cursor:
+        return None
+    order_ids = {row.get("orderId") for row in executions if row.get("execType") == "Trade" and row.get("symbol") == plan["instrument"]}
+    if not order_ids or len(order_ids) > 3 or None in order_ids:
+        return None
+    history = {order_id: opener}
+    for identity in sorted(order_ids - {order_id}):
+        page = await read("/v5/order/history", {"category": "linear", "orderId": identity, "limit": "1"})
+        if len(page["list"]) != 1 or page["list"][0].get("orderId") != identity or page.get("nextPageCursor"):
+            return None
+        history[identity] = page["list"][0]
+    return _trendline_full_close_proof(plan, context, history, executions)
+
+
 class _OpenOrdersJob:
     def __init__(self, service, configurations, fingerprint, version):
         self.service, self.loop = service, service.loop
@@ -38096,6 +38249,7 @@ class _OpenOrdersJob:
         self.reconciled = False
         self.oanda_tags = {}
         self.funding = {}
+        self.trendline_closure_checks = {}
 
     def reference_groups(self, rows):
         feeds = {account: cfg for broker, account, cfg in self.configurations
@@ -38364,6 +38518,8 @@ class _OpenOrdersJob:
                 await entry["after"](entry, result)
             if entry["meta"]["broker"] == "Bybit" and entry["meta"]["source_type"] == "positions":
                 await self.ensure_funding(entry["meta"]["account"])
+            if entry["meta"]["broker"] == "Bybit" and entry["core"]:
+                self.schedule_trendline_closures()
             self.publish()
         except asyncio.CancelledError:
             raise
@@ -38539,6 +38695,56 @@ class _OpenOrdersJob:
     @property
     def pending(self):
         return any(entry["state"] == "pending" for entry in self.sources.values())
+
+    def schedule_trendline_closures(self):
+        if APP_PROFILE != "local" or not self.authoritative:
+            return
+        try:
+            contexts = _load_calculator_trade_contexts()
+            for plan in TRENDLINE_PLAN_STORE.load()["plans"].values():
+                result = plan.get("execution_result") or {}
+                if plan["broker"] != "bybit" or plan["status"] != "submitted" or result.get("outcome") != "executed" or plan.get("broker_closure"):
+                    continue
+                refs = plan.get("submission_refs") or {}
+                linked = [c for c in contexts if c.get("calculation_context_id") == refs.get("calculation_context_id")
+                          and c.get("order_id") == result.get("order_id") and c.get("order_link_id") == plan["execution_key"]
+                          and all(str(c.get(k) or "").lower() == str(v).lower() for k, v in
+                                  (("broker", "bybit"), ("account", plan["account"]), ("category", "linear"), ("instrument", plan["instrument"])))]
+                if len(linked) != 1:
+                    continue
+                context = linked[0]
+                coverage = _trendline_scope_coverage(self.sources, plan, context)
+                if not coverage or _trendline_exposure_conflicts([row for entry, _ in coverage for row in entry["items"]], plan, context):
+                    continue
+                signature = tuple((e["key"], e["run"], e["last_success_at"]) for e, _ in coverage)
+                if self.trendline_closure_checks.get(plan["plan_id"]) == signature:
+                    continue
+                self.trendline_closure_checks[plan["plan_id"]] = signature
+                self.shared_task(("trendline-closure", plan["plan_id"]),
+                    lambda p=plan, c=context, s=signature: self.reconcile_trendline_closure(p, c, s))
+        except (TrendlinePlanError, OSError):
+            BYBIT_LOGGER.warning("Trendline closure registry unavailable; visibility retained")
+
+    async def reconcile_trendline_closure(self, plan, context, signature):
+        try:
+            coverage = _trendline_scope_coverage(self.sources, plan, context)
+            if not coverage:
+                return
+            async with self.semaphore:
+                proof = await asyncio.wait_for(_trendline_read_close_proof(plan, context, coverage[0][0]["config"]), timeout=12)
+            current = _trendline_scope_coverage(self.sources, plan, context)
+            if (not proof or not self.authoritative or not _open_orders_authoritative() or not current
+                    or tuple((e["key"], e["run"], e["last_success_at"]) for e, _ in current) != signature
+                    or min(stamp for _, stamp in current) < proof["closed_at_ms"]
+                    or _trendline_exposure_conflicts([row for e, _ in current for row in e["items"]], plan, context)):
+                return
+            TRENDLINE_PLAN_STORE.record_broker_closure(plan["plan_id"], expected_revision=plan["revision"],
+                execution_key=plan["execution_key"], order_id=plan["execution_result"]["order_id"], proof=proof)
+            self.publish()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            BYBIT_LOGGER.warning("Trendline exact closure unconfirmed; visibility retained plan=%s", plan["plan_id"])
 
     def publish(self):
         if not self.authoritative:
@@ -38736,9 +38942,10 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
                   and _context_scope_compatible(scope, ctx)
                   and all(str(ctx.get(k) or "").lower() == str(scope[k]).lower() for k in ("broker", "account", "instrument", "category"))
                   and (not refs.get("order_id") or str(ctx.get("order_id") or "") == str(refs["order_id"]))]
+        terminal = plan.get("broker_closure")
         if len(linked) == 1:
             if str(linked[0].get("status") or "").lower() in {"closed", "cancelled", "canceled"}:
-                continue
+                terminal = terminal or {"closed_at_ms": 0}
             for key in ("trade_id", "account_id", "position_idx"):
                 if linked[0].get(key) is not None:
                     refs.setdefault(key, linked[0][key])
@@ -38787,11 +38994,26 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
                         proven = bool(refs.get("trade_id")) and str(native.get("trade_id") or native.get("id")) == str(refs["trade_id"])
                 if proven:
                     candidates.append(index)
-        projected.append((row, candidates))
+        projected.append((row, candidates, terminal))
         for index in candidates:
             matches[index] = matches.get(index, 0) + 1
     consumed, rows = set(), []
-    for row, candidates in projected:
+    for row, candidates, terminal in projected:
+        if terminal:
+            if not candidates:
+                continue
+            old = []
+            for index in candidates:
+                native = items[index]
+                try:
+                    stamp = int(datetime.fromisoformat(str(native.get("source_last_success_at") or "").replace("Z", "+00:00")).timestamp() * 1000)
+                except ValueError:
+                    stamp = None
+                if terminal.get("closed_at_ms") and (native.get("source_stale") or native.get("source_pending") or stamp is not None and stamp <= terminal["closed_at_ms"]):
+                    old.append(index)
+            if len(old) == len(candidates):
+                consumed.update(index for index in old if matches[index] == 1)
+                continue
         if len(candidates) == 1 and matches[candidates[0]] == 1:
             index = candidates[0]
             native = items[index]

@@ -6754,3 +6754,123 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
     result = subprocess.run([shutil.which("node") or r"C:\Program Files\nodejs\node.exe", "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert "trendline stable mounted row assertions passed" in result.stdout
+
+
+
+def test_trendline_exact_full_close_reconciliation(tmp_path, monkeypatch):
+    """Captured XRP identity/scope; closing fills and clocks below are synthetic."""
+    import copy
+    from types import SimpleNamespace
+    from render.trendline_plans import TrendlinePlanStore, TrendlinePlanError, TrendlinePlanPersistenceError
+    from test_trendline_executor import _payload, _run_fixture_loop
+    service=master_service
+    monkeypatch.setattr(service,"APP_PROFILE","local")
+    monkeypatch.setattr(service,"_load_pending_webhooks",lambda:[])
+    monkeypatch.setattr(service,"_load_trade_contexts",lambda:[])
+    monkeypatch.setattr(service,"_pepperstone_local_tracker_rows",lambda:[])
+    monkeypatch.setattr(service.script_manager,"get",lambda _:SimpleNamespace(is_running=False))
+    monkeypatch.setattr(service.time,"time_ns",lambda:10000*1000000)
+    async def scenario(account,test):
+        store=TrendlinePlanStore(tmp_path/(account+str(test))/"plans.json")
+        p=store.create({**_payload("bybit",test_trade=test),"account":account,"instrument":"XRPUSDT"},now_ms=1000)
+        p=(store.authorize_live_and_arm if account=="live" else store.arm)(p["plan_id"],now_ms=1500)
+        store.claim_trigger(p["plan_id"],{"trigger_timestamp_ms":2000,"trigger_price":"1.0878","trigger_kind":"touch"},now_ms=2000)
+        order_id="911a80ce-c8c1-4055-84bf-ca2c92a28f98"
+        store.begin_submission(p["plan_id"],execution_key=p["execution_key"],submission_refs={"calculation_context_id":"exact-context","order_link_id":p["execution_key"]},now_ms=2001)
+        original=store.resolve_claim(p["plan_id"],status="submitted",outcome={"outcome":"executed","order_id":order_id},now_ms=2002)
+        context=dict(broker="bybit",account=account,category="linear",instrument="XRPUSDT",side="Buy",order_id=order_id,order_link_id=p["execution_key"],calculation_context_id="exact-context",status="ACTIVE",position_idx=0,settlement_currency="USDT")
+        monkeypatch.setattr(service,"TRENDLINE_PLAN_STORE",store)
+        monitor=SimpleNamespace(status=lambda:{"running":False},eligible=lambda _:False)
+        monkeypatch.setattr(service,"TRENDLINE_EXECUTOR",monitor)
+        monkeypatch.setattr(service,"_load_calculator_trade_contexts",lambda:[context])
+        monkeypatch.setattr(service,"_OPEN_ORDERS_CACHE",{"version":7,"payload":None})
+        owner=SimpleNamespace(loop=__import__('asyncio').get_running_loop(),revision=0,job=None,closed=False,reference_cache={})
+        job=service._OpenOrdersJob(owner,[],"fixture",7);owner.job=job
+        config=dict(base_url="fixture-"+account,api_key="fixture",api_secret="fixture")
+        for kind in ("orders","positions"):
+            key=kind
+            job.sources[key]=dict(key=key,core=True,meta=dict(broker="Bybit",account=account,category="linear",settlement_coin="USDT",source_type=kind),state="complete",run=1,last_success=service._open_orders_now(),last_success_at="1970-01-01T00:00:10+00:00",attempts=1,next_retry=0,errors=[],warnings=[],items=[],previous=[],config=config)
+        opener=dict(orderId=order_id,orderLinkId=p["execution_key"],symbol="XRPUSDT",side="Buy",positionIdx=0,orderStatus="Filled",cumExecQty="903.2",createdTime="1000")
+        closer=dict(orderId="different-stop-close",orderLinkId="broker-stop",symbol="XRPUSDT",positionIdx=0,side="Sell",orderStatus="Filled")
+        history={order_id:opener,"different-stop-close":closer}
+        fills=[dict(execId="open-fill",orderId=order_id,symbol="XRPUSDT",side="Buy",execType="Trade",execQty="903.2",closedSize="0",execTime="2000",seq=1),dict(execId="stop-fill",orderId=closer["orderId"],symbol="XRPUSDT",side="Sell",execType="Trade",execQty="903.2",closedSize="903.2",execTime="3000",seq=2)]
+        calls=[]
+        async def broker(**kw):
+            assert kw['base_url']=="fixture-"+account
+            calls.append(kw['path'])
+            if kw['path']=='/v5/order/history':
+                assert kw['params']['orderId'] in history
+                rows=[history[kw['params']['orderId']]]
+            else:
+                assert kw['path']=='/v5/execution/list' and kw['params']['symbol']=='XRPUSDT'
+                rows=fills
+            return {'retCode':0,'result':{'category':'linear','list':copy.deepcopy(rows),'nextPageCursor':''}}
+        monkeypatch.setattr(service,"_bybit_signed_get",broker)
+        native=dict(broker="Bybit",account=account,category="linear",instrument="XRPUSDT",side="Buy",type="Position",id="native-xrp",position_idx=0,size="903.2",status="Open",raw_refs={"order_ids_complete":True,"order_ids":[order_id]})
+        ake=dict(broker="Bybit",account=account,category="linear",instrument="AKEUSDT",side="Buy",type="Position",id="open-ake",position_idx=0,size="100",status="Open")
+        try:
+            proof=service._trendline_full_close_proof(original,context,history,fills)
+            assert proof and proof['closing_order_id']!=order_id
+            assert service._trendline_full_close_proof(original,context,{**history,order_id:{**opener,'orderLinkId':'unrelated'}},fills) is None
+            partial=copy.deepcopy(fills);partial[-1].update(execQty='400',closedSize='400')
+            assert service._trendline_full_close_proof(original,context,history,partial) is None
+            wrong=copy.deepcopy(history);wrong[closer['orderId']]['positionIdx']=1
+            assert service._trendline_full_close_proof(original,context,wrong,fills) is None
+            aggregate=copy.deepcopy(fills);aggregate.insert(1,dict(fills[0],execId='extra',orderId='extra-open',execTime='2500'))
+            assert service._trendline_full_close_proof(original,context,{**history,'extra-open':dict(opener,orderId='extra-open')},aggregate) is None
+            for state in ('pending','failed','blocked'):
+                job.sources['orders']['state']=state
+                assert service._trendline_scope_coverage(job.sources,original,context) is None
+            job.sources['orders']['state']='complete'
+            for key,value in (('account','other'),('category','inverse'),('settlement_coin','USDC')):
+                old=job.sources['orders']['meta'][key];job.sources['orders']['meta'][key]=value
+                assert service._trendline_scope_coverage(job.sources,original,context) is None
+                job.sources['orders']['meta'][key]=old
+            job.sources['orders']['warnings']=[{'message':'partial'}]
+            assert service._trendline_scope_coverage(job.sources,original,context) is None
+            job.sources['orders']['warnings']=[]
+            job.sources['orders']['last_success']-=181
+            assert service._trendline_scope_coverage(job.sources,original,context) is None
+            job.sources['orders']['last_success']=service._open_orders_now()
+            assert service._trendline_exposure_conflicts([native],original,context)
+            assert not service._trendline_exposure_conflicts([dict(native,position_idx=1)],original,context)
+            assert service._trendline_exposure_conflicts([dict(native,type='Order',id=order_id)],original,context)
+            if not test:
+                job.sources['positions']['items']=[native,ake]
+                job.publish();assert len(job.payload['items'])==2
+                assert any(r.get('trendline_plan_id')==p['plan_id'] and not r['trendline_local'] for r in job.payload['items'])
+                job.schedule_trendline_closures();assert not calls
+            # Also covers close before the first dashboard match.
+            job.sources['positions']['items']=[ake]
+            job.publish();assert any(r.get('status')=='Submitted; awaiting broker visibility' for r in job.payload['items'])
+            with monkeypatch.context() as patch:
+                patch.setattr(store,'record_broker_closure',lambda *a,**k:(_ for _ in ()).throw(TrendlinePlanPersistenceError('fixture disk failure')))
+                job.schedule_trendline_closures();job.schedule_trendline_closures()
+                await __import__('asyncio').gather(*job.auxiliary.values())
+            assert len(calls)==3 and not store.get(p['plan_id']).get('broker_closure')
+            job.sources['orders']['run']+=1
+            job.schedule_trendline_closures();await __import__('asyncio').gather(*job.auxiliary.values())
+            closed=TrendlinePlanStore(store.path).get(p['plan_id'])
+            assert closed['broker_closure']==proof and len(calls)==6
+            for field in ('trigger_claim','execution_key','execution_result','submission_refs','test_trade'):
+                assert closed[field]==original[field]
+            assert [r['instrument'] for r in job.payload['items']]==['AKEUSDT']
+            assert job.payload['source_counts']['live_broker_positions']==1 and owner.job is job and job.version==7
+            job.publish();assert [r['instrument'] for r in job.payload['items']]==['AKEUSDT']
+            before=store.path.read_bytes()
+            store.record_broker_closure(p['plan_id'],expected_revision=original['revision'],execution_key=p['execution_key'],order_id=order_id,proof=proof)
+            assert before==store.path.read_bytes()
+            for changed in ({**proof,'closing_order_id':'competing'},{**proof,'order_id':'other'}):
+                with pytest.raises(TrendlinePlanError):store.record_broker_closure(p['plan_id'],expected_revision=original['revision'],execution_key=p['execution_key'],order_id=order_id,proof=changed)
+            stale=dict(native,source_last_success_at='1970-01-01T00:00:02.500+00:00')
+            projection=lambda rows:service._trendline_dashboard_rows(rows,plans=[closed],executor=monitor,contexts=[context])
+            assert projection([stale,ake])==[ake]
+            assert len(projection([dict(native,source_last_success_at='1970-01-01T00:00:11+00:00'),ake]))==2
+            replacement=dict(native,id='replacement',raw_refs={'order_ids_complete':True,'order_ids':['unrelated-new-order']})
+            assert projection([replacement,ake])==[replacement,ake]
+        finally:
+            await job.close()
+    async def run():
+        for account in ('demo','live'):
+            for test in (False,True):await scenario(account,test)
+    _run_fixture_loop(run())

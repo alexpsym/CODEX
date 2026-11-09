@@ -45,6 +45,7 @@ _IMMUTABLE_FIELDS = {
     "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result", "live_authorization",
     "display_snapshot", "submission_refs",
     "execution_policy", "dashboard_dismissal",
+    "broker_closure",
 }
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
@@ -277,6 +278,21 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     }
     claim = _normalise_claim(record.get("trigger_claim"), execution_key)
     execution_result = _normalise_execution_result(record.get("execution_result"))
+    closure = record.get("broker_closure")
+    if closure is not None:
+        if (not isinstance(closure, Mapping) or record.get("broker") != "bybit" or status != "submitted"
+                or not execution_result or execution_result.get("outcome") != "executed"
+                or closure.get("order_id") != execution_result.get("order_id")
+                or closure.get("order_link_id") != execution_key or closure.get("account") != record.get("account")
+                or closure.get("instrument") != record.get("instrument") or closure.get("category") != "linear"
+                or closure.get("kind") != "bybit_full_execution_ledger"
+                or closure.get("settlement_currency") not in {"USDT", "USDC"}
+                or type(closure.get("position_idx")) is not int or closure["position_idx"] not in {0, 1, 2}):
+            raise TrendlinePlanError("Invalid exact broker closure proof.")
+        closure = {key: closure[key] for key in ("kind", "account", "instrument", "category", "settlement_currency", "position_idx", "order_id", "order_link_id")}
+        closure.update(closed_at_ms=_int_ms(record["broker_closure"].get("closed_at_ms"), "closure.closed_at_ms"),
+                       closing_order_id=_text(record["broker_closure"].get("closing_order_id"), "closure.closing_order_id")[:128],
+                       opening_quantity=_decimal_string(record["broker_closure"].get("opening_quantity"), "closure.opening_quantity", positive=True))
     policy = record.get("execution_policy")
     if policy not in (None, "bybit-broker-v1"):
         raise TrendlinePlanError("Unsupported trendline execution policy.")
@@ -340,6 +356,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "display_snapshot": display_snapshot,
         "submission_refs": _submission_references(record.get("submission_refs")),
         "execution_policy": policy,
+        "broker_closure": closure,
         "dashboard_dismissal": dismissal,
     }
 
@@ -721,6 +738,24 @@ class TrendlinePlanStore:
         return (plan.get("status") == "submitted" and plan.get("test_trade") is True
                 and plan.get("trigger_claim") is not None
                 and (plan.get("execution_result") or {}).get("outcome") == "simulated")
+
+    def record_broker_closure(self, plan_id: str, *, expected_revision: int, execution_key: str, order_id: str, proof: Mapping[str, object]) -> Dict[str, object]:
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None or plan["execution_key"] != execution_key or (plan.get("execution_result") or {}).get("order_id") != order_id:
+                raise TrendlinePlanError("Broker closure execution identity changed.")
+            if plan.get("broker_closure") == proof:
+                return copy.deepcopy(plan)
+            if type(expected_revision) is not int or plan["revision"] != expected_revision or plan.get("broker_closure") is not None:
+                raise TrendlinePlanError("Broker closure revision/proof changed.")
+            updated = copy.deepcopy(plan)
+            updated.update(broker_closure=dict(proof), revision=plan["revision"] + 1,
+                           updated_at_ms=max(plan["updated_at_ms"], utc_epoch_ms()))
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
 
     def dismiss_dashboard(self, plan_id: str, *, broker: str, account: str, display_id: str, expected_revision: int, now_ms: Optional[int] = None) -> Dict[str, object]:
         """Persist only a completed local result's display preference, never delete history."""
