@@ -388,12 +388,21 @@ async def _trendline_executor_submit(plan: Mapping[str, object], calculation: Ma
         raise DefiniteSubmissionFailure()
     payload = {**_trendline_calculator_payload(plan), "action": plan["action"], "quantity": calculation.get("quantity"), "entry_price": calculation.get("entry_price"), "stop_loss_price": calculation.get("stop_price"), "take_profit_price": calculation.get("target_price"), "calculation_context_id": calculation.get("calculation_context_id"), "quote_created_at_ms": calculation.get("quote_created_at_ms")}
     request_state: Dict[str, object] = {"posted": False, "client_order_id": execution_key}
+    inherited = None
+    if plan.get("classification_overrides"):
+        if plan.get("status") != "submitting" or plan.get("execution_key") != execution_key or not calculation.get("calculation_context_id"):
+            raise DefiniteSubmissionFailure("Invalid claimed classification binding")
+        inherited = {"plan_id": plan["plan_id"], "execution_key": execution_key, "plan_revision": plan["revision"],
+            "metadata_version": plan["classification_version"], "overrides": dict(plan["classification_overrides"]),
+            "calculation_context_id": calculation["calculation_context_id"],
+            "scope": {"broker": plan["broker"], "account": plan["account"], "category": "linear" if plan["broker"] == "bybit" else "forex",
+                      "instrument": plan["instrument"], "side": plan["action"]}}
     try:
         if plan["broker"] == "bybit":
-            result = await _place_bybit_order(payload, request_id=execution_key, invalidate_cache=True, _request_state=request_state)
+            result = await _place_bybit_order(payload, request_id=execution_key, invalidate_cache=True, _request_state=request_state, **({"_initial_classifications": inherited} if inherited else {}))
             order_id = (result.get("order") or {}).get("orderId")
         else:
-            result = await _place_oanda_order(payload, request_id=execution_key, _request_state=request_state)
+            result = await _place_oanda_order(payload, request_id=execution_key, _request_state=request_state, **({"_initial_classifications": inherited} if inherited else {}))
             if result.get("orderRejectTransaction") or result.get("orderCancelTransaction"):
                 raise DefiniteSubmissionFailure()
             order_id = _extract_oanda_order_id(result)
@@ -22862,6 +22871,7 @@ def _upsert_calculator_trade_context(
     require_durable: bool = True,
     invalidate_cache: bool = True,
     accepted_entry: bool = False,
+    _initial_classifications=None,
 ) -> Dict[str, object]:
     try:
         if accepted_entry and payload.get("order_id"):
@@ -22872,7 +22882,7 @@ def _upsert_calculator_trade_context(
                 key: payload.get(key) for key in ("broker", "account", "account_id", "category",
                     "instrument", "asset", "side", "order_id", "order_link_id", "trade_id",
                     "open_time", "created_at", "is_test_trade", "raw_refs")}
-        saved = _upsert_trade_context(payload)
+        saved = _upsert_trade_context(payload, _initial_classifications=_initial_classifications)
         if accepted_entry and saved.get("early_trade_folder_request"):
             _schedule_early_trade_folders()
         if invalidate_cache:
@@ -23092,7 +23102,7 @@ def _merge_bybit_demo_calc_context_into_row(row: Dict[str, object], ctx: Dict[st
 
 
 @_context_transaction
-def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
+def _upsert_trade_context(payload: Dict[str, object], *, _initial_classifications=None) -> Dict[str, object]:
     items = _load_trade_contexts()
     now_iso = _utc_now_iso()
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
@@ -23198,7 +23208,7 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
                 continue  # Only the revision-checked local-fill transaction owns this saved fill/basis.
             if k == "local_tracking_removed_at" and merged.get(k):
                 continue  # Local removal is permanent across calculator replay/update.
-            if k in {"classification_overrides", "classification_version"}:
+            if k in {"classification_overrides", "classification_version", "classification_inheritance"}:
                 continue  # Only the version-checked metadata route owns this overlay.
             if k == "early_trade_folder_request" and merged.get(k):
                 continue
@@ -23227,6 +23237,32 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     else:
         items.append(merged_payload)
 
+    if _initial_classifications is not None:
+        inherited = _initial_classifications
+        # This keyword travels only through the internal claimed submit path,
+        # never through an API payload or the immutable calculator intent.
+        scope = inherited["scope"]
+        accepted_scope = {**scope, **inherited["accepted_scope"]}
+        for field in ("account_id", "position_idx"):
+            if merged_payload.get(field) is None and accepted_scope.get(field) is not None:
+                merged_payload[field] = accepted_scope[field]  # Trusted adapter's accepted scope, never a client hint.
+        if (not valid_order_reference(merged_payload.get("order_id"))
+                or merged_payload.get("order_id") != inherited.get("accepted_order_id")
+                or any(str(merged_payload.get(k) if merged_payload.get(k) is not None else "").lower() != str(v if v is not None else "").lower() for k, v in accepted_scope.items())
+                or merged_payload.get("calculation_context_id") != inherited["calculation_context_id"]
+                or (scope["broker"] == "bybit" and merged_payload.get("order_link_id") != inherited["execution_key"])):
+            raise ValueError("Inherited classifications require the exact accepted Trendline context")
+        marker = {key: inherited[key] for key in ("plan_id", "execution_key", "plan_revision", "metadata_version", "calculation_context_id")}
+        marker["accepted_order_id"] = inherited["accepted_order_id"]
+        marker["accepted_scope"] = dict(accepted_scope)
+        previous = merged_payload.get("classification_inheritance")
+        if previous and previous != marker:
+            raise ValueError("Conflicting Trendline classification inheritance")
+        if not previous:
+            # Later broker edits, including clears, win even during recovery.
+            merged_payload["classification_overrides"] = {**inherited["overrides"], **merged_payload.get("classification_overrides", {})}
+            merged_payload["classification_version"] = int(merged_payload.get("classification_version") or 0) + 1
+            merged_payload["classification_inheritance"] = marker
     pruned = _prune_trade_contexts(items)
     _save_trade_contexts(pruned)
     return merged_payload
@@ -23263,6 +23299,24 @@ _CLASSIFICATION_FIELDS = {
     "is_test_trade": _normalize_test_trade_flag,
     "webhook_classification": lambda value: _normalize_yes_no_criterion(value, "webhook classification"),
 }
+
+
+def _trendline_classification_target(plan):
+    if (plan["status"] not in {"armed", "disabled"} or plan.get("trigger_claim") is not None
+            or plan.get("expiry_at_ms") is not None and (time.time_ns() // 1_000_000) >= plan["expiry_at_ms"]):
+        return None
+    identity = {key: plan[key] for key in ("plan_id", "broker", "account", "execution_key", "revision", "status")}
+    return "trendline-plan:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def _trendline_classification_view(plan):
+    values = {"timeframe": plan["timeframe"], **plan["order_metadata"], "webhook_classification": None,
+              **plan.get("classification_overrides", {})}
+    target = _trendline_classification_target(plan)
+    from render.trendline_plans import PLAN_CLASSIFICATION_FIELDS
+    return {"classification_target": target, "classification_target_kind": "trendline_plan",
+            "classification_version": plan.get("classification_version", 0), "classification_values": values,
+            "classification_capabilities": {field: bool(target and field in PLAN_CLASSIFICATION_FIELDS) for field in _CLASSIFICATION_FIELDS}}
 
 
 def _classification_writable_context(row, context):
@@ -23870,6 +23924,34 @@ async def save_open_order_classification(payload: Dict[str, object]) -> Dict[str
     service = _OPEN_ORDERS_SERVICES.get(asyncio.get_running_loop())
     job = service.job if service else None
     snapshot = job.payload if job and job.authoritative else _OPEN_ORDERS_CACHE.get("payload")
+    if str(payload.get("target") or "").startswith("trendline-plan:"):
+        _trendline_plans_require_local()
+        from render.trendline_plans import PLAN_CLASSIFICATION_FIELDS
+        if set(normalized) - PLAN_CLASSIFICATION_FIELDS:
+            raise HTTPException(status_code=400, detail="Execution Test/webhook and risk settings are readouts on a plan; only annotation fields may change")
+        matches = [plan for plan in TRENDLINE_PLAN_STORE.load()["plans"].values() if _trendline_classification_target(plan) == payload["target"]]
+        if len(matches) != 1:
+            raise HTTPException(status_code=409, detail="Plan target changed or was claimed; Reload the current row. Draft was not saved.")
+        plan = matches[0]
+        try:
+            saved = TRENDLINE_PLAN_STORE.update_classifications(plan["plan_id"], normalized, version=payload["version"],
+                expected_revision=plan["revision"], execution_key=plan["execution_key"], broker=plan["broker"], account=plan["account"], now_ms=(time.time_ns() // 1_000_000))
+        except TrendlinePlanError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        current = TRENDLINE_PLAN_STORE.get(plan["plan_id"])
+        rows = _trendline_dashboard_rows([], plans=[current], contexts=[])
+        item = rows[0] if rows else None
+        if job and job.authoritative:
+            job.publish()
+        elif snapshot:
+            for index, row in enumerate(snapshot.get("items", [])):
+                if row.get("trendline_local") and row.get("trendline_plan_id") == plan["plan_id"] and item is not None:
+                    snapshot["items"][index] = item
+            snapshot["progress_revision"] = int(snapshot.get("progress_revision") or 0) + 1
+        return {"ok": True, "version": saved["classification_version"], "values": _trendline_classification_view(saved)["classification_values"],
+                "item": item, "saved_target": payload["target"],
+                "publication": {"version": job.version if job and job.authoritative else _OPEN_ORDERS_CACHE.get("version"),
+                                "progress_revision": (job.payload if job and job.authoritative else snapshot or {}).get("progress_revision", 0)}}
     from tools.master_journal_workbook import _trade_allocation_lock
     with _trade_allocation_lock(), _TRADE_CONTEXTS_LOCK:
         candidates = []
@@ -24110,6 +24192,9 @@ def _enrich_open_item_with_trade_context(
         item.pop("classification_unavailable", None)
     else:
         item["classification_unavailable"] = item.get("context_link_reason") or "Exact accepted entry linkage unavailable"
+    item["classification_target_kind"] = "broker"
+    item["classification_plan_origin"] = copy.deepcopy((accepted or {}).get("classification_inheritance"))
+    item["classification_capabilities"] = {field: bool(item.get("classification_target")) for field in _CLASSIFICATION_FIELDS}
     return item
 
 
@@ -25144,7 +25229,7 @@ class BybitExpiryOutcomeWarning(RuntimeError):
 
 
 async def _place_bybit_order(
-    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None, _expiry_spec=None
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None, _expiry_spec=None, _initial_classifications=None
 ) -> Dict[str, object]:
     request_open_time_iso = _utc_now_iso()
     expiry_requested = _parse_bybit_order_expiry(_expiry_spec) is not None
@@ -25579,6 +25664,9 @@ async def _place_bybit_order(
         )
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
+    if _initial_classifications is not None:
+        _initial_classifications = dict(_initial_classifications, accepted_order_id=str(order_id or ""),
+            accepted_scope={"account_id": None, "position_idx": body.get("positionIdx")})
     expiry_binding_warning = None
     if expiry_record:
         if not order_id:
@@ -25646,6 +25734,7 @@ async def _place_bybit_order(
             "raw_refs": folder_lifecycle_refs,
         },
             invalidate_cache=False,
+            _initial_classifications=_initial_classifications,
             accepted_entry=folder_is_entry and bool(order_id) and not bool(body.get("reduceOnly")) and not bool(body.get("closeOnTrigger")),
         )
     except Exception as exc:
@@ -25907,6 +25996,7 @@ async def _place_bybit_order(
                     },
                     require_durable=True,
                     invalidate_cache=False,
+                    _initial_classifications=_initial_classifications,
                 )
             except Exception:
                 secondary_ctx_update_failed = True
@@ -26045,7 +26135,7 @@ async def _place_bybit_order(
 
 
 async def _place_oanda_order(
-    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None, _initial_classifications=None
 ) -> Dict[str, object]:
     symbol = str(payload.get("symbol", "")).upper()
     action = str(payload.get("action", "")).lower()
@@ -26380,6 +26470,9 @@ async def _place_oanda_order(
             trade_id = trade_opened.get("tradeID")
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    if _initial_classifications is not None:
+        _initial_classifications = dict(_initial_classifications, accepted_order_id=str(order_id or ""),
+            accepted_scope={"account_id": cfg["account_id"], "position_idx": None})
     post_submit_warnings: List[str] = []
     context_save_error: Optional[str] = None
     context_persist_ok = True
@@ -26428,6 +26521,7 @@ async def _place_oanda_order(
                 "open_time": _utc_now_iso(),
             },
             invalidate_cache=False,
+            _initial_classifications=_initial_classifications,
             accepted_entry=bool(order_id) and not result.get("orderRejectTransaction")
                 and not result.get("orderCancelTransaction") and (not isinstance(fill_tx, dict) or bool(trade_id)),
         )
@@ -30912,7 +31006,7 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
-    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "broker_closure", "risk_update"}.intersection(payload):
+    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "broker_closure", "risk_update", "classification_overrides", "classification_version", "classification_updated_at_ms"}.intersection(payload):
         raise TrendlinePlanError("Display and submission records are server-owned.")
     forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
@@ -39127,6 +39221,11 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
                    planned_entry_price=snapshot.get("entry_price"), planned_stop_price=snapshot.get("stop_price"),
                    planned_target_price=snapshot.get("target_price"), classification_target=None,
                    classification_unavailable="No confirmed broker object", **plan["order_metadata"])
+        annotations = _trendline_classification_view(plan)
+        row.update(annotations)
+        row.update({key: value for key, value in annotations["classification_values"].items()})
+        # Execution Test and webhook mode/status remain readouts, not annotation overrides.
+        row["is_test_trade"] = "Yes" if plan["test_trade"] else "No"
         candidates = []
         if broker_submission_required(plan) and result.get("outcome") != "simulated" and state in {"submitting", "submitted", "uncertain"}:
             for index, native in enumerate(items):
@@ -39182,8 +39281,14 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
             accepted = _lookup_trade_context_for_open_item(dict(native), contexts=contexts)
             if accepted is not None:
                 _enrich_open_item_with_trade_context(merged, accepted)
-            elif not merged.get("context_linked"):
-                merged["is_test_trade"] = row["is_test_trade"]
+            else:
+                merged["classification_target"] = native.get("classification_target")
+                merged["classification_target_kind"] = "broker"
+                merged["classification_capabilities"] = native.get("classification_capabilities") or {field: bool(native.get("classification_target")) for field in _CLASSIFICATION_FIELDS}
+                merged["classification_values"] = native.get("classification_values") or {}
+                merged["classification_version"] = int(native.get("classification_version") or 0)
+                if not merged.get("context_linked"):
+                    merged["is_test_trade"] = row["is_test_trade"]
             merged.update(display_id=row["display_id"], trendline_plan_id=row["trendline_plan_id"], trendline_local=False,
                           quantity_is_estimate=False, dashboard_dismissible=False)
             rows.append(merged)

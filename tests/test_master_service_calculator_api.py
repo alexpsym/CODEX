@@ -4773,3 +4773,107 @@ def test_trendline_price_r_canonical_bracket_and_submission(tmp_path, monkeypatc
         legacy=store.create({**_payload('bybit'),'instrument':'XRPUSDT'},now_ms=now);assert legacy['target_basis']=='net_r'
         assert 'target_basis' in service._trendline_calculator_payload(p)
     _run_fixture_loop(run())
+
+
+
+def test_placeholder_metadata_canonical_submit_and_native_override(tmp_path,monkeypatch):
+    from test_trendline_executor import _payload,_run_fixture_loop
+    from render.trendline_executor import TrendlinePlanExecutor
+    from render.trendline_plans import live_execution_authorized
+    from types import SimpleNamespace
+    import copy
+    import tools.master_journal_workbook as workbook
+    service=master_service;upsert=service._upsert_calculator_trade_context;intent=service._accepted_calculator_intent;json_save=service._save_json_file
+    state=_mock_pending_limit_replay(monkeypatch,symbol='XRPUSDT',tick='0.0001',last='1.1006')
+    monkeypatch.setattr(service,'_upsert_calculator_trade_context',upsert);monkeypatch.setattr(service,'_accepted_calculator_intent',intent)
+    monkeypatch.setattr(service,'TRADE_CONTEXTS_PATH',tmp_path/'accepted.json');monkeypatch.setattr(service,'_TRADE_CONTEXTS_CACHE',{})
+    def isolated_save(path,payload,*a,**kw):
+        assert Path(path).resolve()==(tmp_path/'accepted.json').resolve(),'No runtime/journal writes'
+        return json_save(path,payload,*a,**kw)
+    monkeypatch.setattr(service,'_save_json_file',isolated_save)
+    monkeypatch.setattr(service,'_calc_context_uses_repo_local',lambda:False);monkeypatch.setattr(service,'_load_bybit_demo_calc_contexts',lambda:{'items':copy.deepcopy(state['contexts'])})
+    monkeypatch.setattr(service,'_schedule_early_trade_folders',lambda:None);monkeypatch.setattr(workbook,'_trade_allocation_state_path',lambda:tmp_path/'allocations.json')
+    monkeypatch.setattr(service,'APP_PROFILE','local');monkeypatch.setattr(service,'_OPEN_ORDERS_SERVICES',{});monkeypatch.setattr(service,'_OPEN_ORDERS_CACHE',{'version':7,'payload':None})
+    now=10000;monkeypatch.setattr(service.time,'time',lambda:now/1000);monkeypatch.setattr(service.time,'time_ns',lambda:now*1000000)
+    monkeypatch.setattr(service,'_OANDA_AUD_USD_CACHE',{'value':1,'ts':10})
+    original=service._resolve_bybit_calculator_symbol_fast
+    async def resolve(*a,**k):
+        symbol,meta,debug=await original(*a,**k);return symbol,{**meta,'status':'Trading'},debug
+    monkeypatch.setattr(service,'_resolve_bybit_calculator_symbol_fast',resolve)
+    async def ticker(*a,**k):return {'retCode':0,'time':now,'result':{'list':[{'symbol':'XRPUSDT','bid1Price':'1.1006','ask1Price':'1.1007','lastPrice':state['last']}]}}
+    async def cached(*a,**k):return {'payload':await ticker()}
+    monkeypatch.setattr(service,'_bybit_get_async',ticker);monkeypatch.setattr(service,'_fetch_bybit_ticker_cached',cached)
+    monkeypatch.setattr(service,'_BYBIT_TIME_OFFSET_CACHE',{service._normalize_bybit_base_url('https://bybit.invalid'):{'synced_at':now,'offset_ms':0,'rtt_ms':2}})
+    async def post(**kw):
+        assert kw['path']=='/v5/order/create';state['posts'].append(copy.deepcopy(kw['body']))
+        return {'retCode':0,'result':{'orderId':'accepted-'+str(len(state['posts'])),'orderLinkId':kw['body']['orderLinkId']}}
+    monkeypatch.setattr(service,'_bybit_signed_post',post)
+    def position():
+        b=state['posts'][-1];return {'symbol':'XRPUSDT','size':b['qty'],'side':b['side'],'positionIdx':0,'avgPrice':'1.1009','takeProfit':b['takeProfit'],'stopLoss':b['stopLoss']}
+    async def opened(**kw):return position()
+    async def positions(**kw):return [position()]
+    async def forbidden(**kw):raise AssertionError('No protective amendment')
+    monkeypatch.setattr(service,'_wait_for_position_entry',opened);monkeypatch.setattr(service,'_fetch_bybit_positions',positions);monkeypatch.setattr(service,'_set_bybit_trading_stop',forbidden)
+    captured=[]
+    def recording(payload,**kw):
+        if kw.get('_initial_classifications'):captured.append((copy.deepcopy(payload),copy.deepcopy(kw)))
+        return upsert(payload,**kw)
+    monkeypatch.setattr(service,'_upsert_calculator_trade_context',recording)
+    store=service.TrendlinePlanStore(tmp_path/'plans.json');calls=[]
+    async def quote(p):return {'instrument':'XRPUSDT','timestamp_ms':now,'bid':'1.1006','ask':'1.1007','tick_size':'.0001','clock':await service._trendline_bybit_clock('https://bybit.invalid')}
+    async def calculation(p,q):
+        calls.append(p['revision'])
+        if len(calls)==1:
+            store.update_classifications(p['plan_id'],{'setup':'Pullback'},version=1,expected_revision=p['revision'],execution_key=p['execution_key'],broker='bybit',account='demo',now_ms=now)
+            await e.update_risk(p['plan_id'],{'stop_loss_ticks':25,'rr_target':'3'},revision=p['revision'],generation=e.generation)
+        try:
+            return await service._trendline_fresh_calculation(p,q)
+        except Exception as exc:
+            print("FIXTURE_CALCULATION_FAILURE", repr(exc), getattr(exc, "detail", None), flush=True)
+            raise
+    e=TrendlinePlanExecutor(store,quote,calculation,service._trendline_executor_submit,live_execution_authorized,now_ms=lambda:now)
+    async def idle():await e._stop.wait()
+    monkeypatch.setattr(e,'_run',idle)
+    async def run():
+        p=store.create({**_payload('bybit',test_trade=True),'instrument':'XRPUSDT','action':'sell','risk_mode':'percent','risk_value':'1','target_basis':'price_r','anchors':[{'timestamp_ms':1000,'price':'1.1006'},{'timestamp_ms':2000,'price':'1.1006'}],'timeframe':'1m','order_metadata':{'pattern':'channel'}},now_ms=1000)
+        p=await e.arm(p['plan_id'],revision=p['revision'],generation=e.generation)
+        store.update_classifications(p['plan_id'],{'timeframe':'5m','pattern':None,'ema':'9'},version=0,expected_revision=p['revision'],execution_key=p['execution_key'],broker='bybit',account='demo',now_ms=now)
+        try:
+            await e.cycle();final=store.get(p['plan_id']);assert final['status']=='submitted' and len(state['posts'])==1 and len(calls)==2,(final['status'],len(calls),e.latest_evaluations)
+            assert final['classification_version']==2 and final['stop_loss_ticks']==25 and final['timeframe']=='1m' and final['test_trade'] is True
+            body=state['posts'][0];assert body['stopLoss']=='1.1031' and body['takeProfit']=='1.0931' and body['orderLinkId']==p['execution_key']
+            ctx=next(c for c in service._load_trade_contexts() if c.get('order_id')=='accepted-1')
+            assert ctx['classification_overrides']=={'timeframe':'5m','pattern':None,'ema':'9','setup':'Pullback'}
+            assert ctx['timeframe'] in ('1m','1MIN') and ctx['is_test_trade'] is True and ctx['classification_inheritance']['metadata_version']==2
+            native=dict(broker='Bybit',account='demo',category='linear',instrument='XRPUSDT',side='Sell',type='Order',id='accepted-1',order_link_id=p['execution_key'],position_idx=0,status='New',size=body['qty'],entry_price='1.1009')
+            monitor=SimpleNamespace(status=lambda:{'running':False},eligible=lambda _:False)
+            def rows(native):return service._trendline_dashboard_rows([native],plans=[store.get(p['plan_id'])],executor=monitor,contexts=service._load_trade_contexts())
+            orderrow=rows(native)[0];assert orderrow['classification_values']['ema']=='9' and orderrow['classification_values']['pattern'] is None and orderrow['timeframe']=='5MIN'
+            positionrow=rows(dict(native,type='Position',id=0,raw_refs={'order_ids_complete':True,'order_ids':['accepted-1'],'lifecycle_started_at_ms':9000}))[0]
+            assert positionrow['display_id']==orderrow['display_id'] and positionrow['entry_price']=='1.1009' and positionrow['classification_values']['ema']=='9'
+            service._OPEN_ORDERS_CACHE['payload']={'items':[positionrow],'progress_revision':1}
+            result=await service.save_open_order_classification({'target':positionrow['classification_target'],'version':ctx['classification_version'],'changes':{'ema':''}})
+            assert result['values']['ema']==''
+            payload,kw=captured[0];upsert(payload,**kw)
+            service._TRADE_CONTEXTS_CACHE.clear();latest=next(c for c in service._load_trade_contexts() if c.get('order_id')=='accepted-1')
+            assert latest['classification_overrides']['ema']=='' and latest['classification_version']==result['version']
+            for change in ({'account':'live'},{'order_id':'unrelated'},{'order_link_id':'unrelated'},{'position_idx':1},{'account_id':'unrelated'}):
+                with pytest.raises(ValueError):upsert({**payload,**change},**kw)
+            await e.cycle();assert len(state['posts'])==1
+            # A metadata persistence error after acknowledgement must not replay the broker order.
+            p2=store.create({**_payload('bybit',test_trade=True),'instrument':'XRPUSDT','action':'sell','risk_mode':'percent','risk_value':'1','target_basis':'price_r','anchors':p['anchors']},now_ms=1000)
+            p2=await e.arm(p2['plan_id'],revision=p2['revision'],generation=e.generation)
+            store.update_classifications(p2['plan_id'],{'ema':'20'},version=0,expected_revision=p2['revision'],execution_key=p2['execution_key'],broker='bybit',account='demo',now_ms=now)
+            save_contexts=service._save_trade_contexts
+            def fail_inheritance(items):
+                if any(c.get('order_id')=='accepted-2' and c.get('classification_inheritance') for c in items):raise OSError('fixture metadata write failure')
+                return save_contexts(items)
+            with monkeypatch.context() as patch:
+                patch.setattr(service,'_save_trade_contexts',fail_inheritance)
+                await e.cycle();assert store.get(p2['plan_id'])['status']=='submitted'
+                await e.cycle();assert len(state['posts'])==2
+            payload2,kw2=next((a,b) for a,b in reversed(captured) if a.get('order_id')=='accepted-2')
+            upsert(payload2,**kw2);recovered=next(c for c in service._load_trade_contexts() if c.get('order_id')=='accepted-2')
+            assert recovered['classification_overrides']['ema']=='20' and len(state['posts'])==2
+        finally:await e.stop()
+    _run_fixture_loop(run())

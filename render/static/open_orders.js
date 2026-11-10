@@ -451,9 +451,10 @@
   const fieldValue = (item,field) => choiceValue(field,Object.prototype.hasOwnProperty.call(item.classification_values||{},field)?item.classification_values[field]:item[field]);
   const displayChoice = (field,value) => !value?'\u2014':field==='timeframe'?(timeframeLabels[value]||value):field==='pattern'?value[0].toUpperCase()+value.slice(1):value;
   const button = (label, action) => {const el=document.createElement('button');el.type='button';el.className='action-btn';el.textContent=label;el.addEventListener('click',action);return el;};
+  const classificationAllowed = (item,field) => Boolean(item?.classification_target) && (!item.classification_capabilities || item.classification_capabilities[field]===true);
   const updateCellAvailability = (entry,state) => {
     const draft=state.draft;if(!draft)return;
-    const available=entry.present&&Boolean(entry.item.classification_target);
+    const available=entry.present&&classificationAllowed(entry.item,state.field);
     if(draft.target!==entry.item.classification_target){draft.conflict=true;draft.message="Broker object changed. Draft retained; Reload before saving.";}
     if(!available)draft.message='Entry is no longer available. Draft retained; Cancel to discard.';
     state.select.disabled=!available||entry.saving===state.field;
@@ -483,7 +484,7 @@
       state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
     }
     state.valueButton.textContent=displayChoice(state.field,fieldValue(entry.item,state.field));
-    state.valueButton.disabled=!entry.present||!entry.item.classification_target;
+    state.valueButton.disabled=!entry.present||!classificationAllowed(entry.item,state.field);
     state.valueButton.title=entry.item.classification_unavailable||'Edit '+classificationLabels[state.field];
     state.feedback.textContent=state.savedUntil>Date.now()?'Saved':'';
   };
@@ -494,26 +495,47 @@
   };
   const saveClassificationCell = async(entry,state) => {
     const draft=state.draft;
-    if(!draft||entry.saving||!entry.present||!entry.item.classification_target||draft.conflict||!draft.dirty)return;
+    if(!draft||entry.saving||!entry.present||!classificationAllowed(entry.item,state.field)||draft.conflict||!draft.dirty)return;
     const selected=state.select.value;
     const value=state.field==='is_test_trade'?(selected===''?null:selected==='Yes'):selected;
     entry.saving=state.field;draft.message='Saving...';synchronizeDrafts(entry);
     const requestedTarget=entry.item.classification_target,requestedObject=brokerObjectKey(entry.item);
+    const planTarget=entry.item.classification_target_kind==='trendline_plan',planId=entry.item.trendline_plan_id;
+    const committed=()=>{state.draft=null;state.valueButton=null;state.savedUntil=Date.now()+2500;
+      render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+      broadcastStateChange({action:'classification',broker:entry.item.broker,account:entry.item.account});};
     try{
       const response=await fetch('/api/open-orders/classification',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({target:entry.item.classification_target,version:draft.version,changes:{[state.field]:value}})});
       const data=await response.json();if(!response.ok){if(response.status===409)draft.conflict=true;throw new Error(parseApiError(data,response));}
-      if(entry.item.classification_target!==requestedTarget||brokerObjectKey(entry.item)!==requestedObject){draft.conflict=true;throw new Error('Broker object changed. Draft retained; Reload before saving.');}
+      if(data.publication&&Number(data.publication.version)===knownVersion)knownRevision=Math.max(knownRevision,Number(data.publication.progress_revision||0));
+      if(entry.item.classification_target!==requestedTarget||brokerObjectKey(entry.item)!==requestedObject){
+        if(planTarget&&data.ok===true&&data.saved_target===requestedTarget){committed();return;}
+        draft.conflict=true;throw new Error('Broker object changed. Draft retained; Reload before saving.');
+      }
       // A delayed earlier publication/acknowledgment cannot replace newer metadata.
       if(Number(data.version)>=Number(entry.item.classification_version||0))entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};
       state.draft=null;state.valueButton=null;state.savedUntil=Date.now()+2500;
       const updated=(window.__openOrdersItems||[]).map(item=>classificationKey(item)===entry.key?entry.item:item);
       render(updated,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
-    }catch(error){draft.message=safeDiagnostic(error.message||error);}
+      broadcastStateChange({action:'classification',broker:entry.item.broker,account:entry.item.account});
+    }catch(error){
+      if(planTarget){
+        // One fresh authoritative read resolves a lost acknowledgement; no save retry.
+        if(refreshInFlight)await refreshInFlight;
+        await refresh('progress');
+        const current=entry.item,origin=current.classification_plan_origin;
+        const same=current.classification_target===requestedTarget&&Number(current.classification_version)>draft.version;
+        const inherited=origin?.plan_id===planId&&Number(origin.metadata_version)>draft.version;
+        if(!refreshNeedsRecovery&&(same||inherited)&&fieldValue(current,state.field)===selected){committed();return;}
+        if(current.classification_target!==requestedTarget)draft.conflict=true;
+      }
+      draft.message=safeDiagnostic(error.message||error);
+    }
     finally{entry.saving=null;synchronizeDrafts(entry);}
   };
   const openClassificationCell = (entry,state) => {
-    if(state.draft||!entry.present||!entry.item.classification_target)return;
+    if(state.draft||!entry.present||!classificationAllowed(entry.item,state.field))return;
     const base=fieldValue(entry.item,state.field);
     state.draft={base,target:entry.item.classification_target,version:Number(entry.item.classification_version||0),conflict:false,dirty:false,message:''};state.savedUntil=0;
     state.td.innerHTML='';state.valueButton=null;
@@ -599,6 +621,7 @@
         if(payload.refresh_superseded)return;
         const renderedVersion=Number(payload.version);
         if(knownVersion!==null&&Number.isFinite(renderedVersion)&&renderedVersion<knownVersion)return;
+        if(knownVersion===renderedVersion&&Number(payload.progress_revision||0)<knownRevision)return;
         if(Number.isFinite(renderedVersion))knownVersion=renderedVersion;
         knownRevision=Number(payload.progress_revision||0);
         hasSnapshot=true;refreshNeedsRecovery=false;

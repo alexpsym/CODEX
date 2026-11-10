@@ -7031,3 +7031,102 @@ def test_trendline_settings_sequence_handoff_and_classification(tmp_path, monkey
         finally:
             release.set();await job.close()
     _run_fixture_loop(scenario())
+
+
+
+def test_placeholder_classification_route_transaction_and_claim(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from test_trendline_executor import _payload,_run_fixture_loop
+    from render.trendline_plans import TrendlinePlanStore,TrendlinePlanError,TrendlinePlanPersistenceError
+    service=master_service;clock=[10000]
+    monkeypatch.setattr(service,'APP_PROFILE','local');monkeypatch.setattr(service.time,'time_ns',lambda:clock[0]*1000000)
+    monkeypatch.setattr(service,'_OPEN_ORDERS_SERVICES',{});monkeypatch.setattr(service,'_OPEN_ORDERS_CACHE',{'version':7,'payload':{'items':[],'progress_revision':1}})
+    monkeypatch.setattr(service,'_load_calculator_trade_contexts',lambda:[])
+    store=TrendlinePlanStore(tmp_path/'plans.json');monkeypatch.setattr(service,'TRENDLINE_PLAN_STORE',store)
+    monitor=SimpleNamespace(status=lambda:{'running':False},eligible=lambda _:False);monkeypatch.setattr(service,'TRENDLINE_EXECUTOR',monitor)
+    p=store.authorize_live_and_arm(store.create({**_payload('bybit',test_trade=True),'account':'live'},now_ms=1000)['plan_id'],now_ms=2000)
+    other=store.arm(store.create(_payload('bybit'),now_ms=1000)['plan_id'],now_ms=2000)
+    def row(plan):return service._trendline_dashboard_rows([],plans=[plan],contexts=[])[0]
+    async def save(target,version,changes):return await service.save_open_order_classification({'target':target,'version':version,'changes':changes})
+    async def run():
+        before=store.get(p['plan_id']);r=row(before);assert r['status']=='Paused' and r['classification_target_kind']=='trendline_plan'
+        assert r['classification_capabilities']['ema'] and not r['classification_capabilities']['is_test_trade']
+        result=await save(r['classification_target'],0,{'timeframe':'5m','ema':'9','pattern':'Channel','webhook_classification':'No'})
+        updated=store.get(p['plan_id']);assert updated['classification_version']==1 and updated['classification_overrides']['ema']=='9'
+        for key,value in before.items():
+            if key not in {'classification_overrides','classification_version','classification_updated_at_ms'}:assert updated[key]==value,key
+        assert updated['timeframe']==before['timeframe'] and updated['live_authorization']==before['live_authorization']
+        assert store.get(other['plan_id'])==other
+        result=await save(r['classification_target'],1,{'ema':'','pattern':None})
+        restored=TrendlinePlanStore(store.path).get(p['plan_id']);assert restored['classification_overrides']['ema']=='' and restored['classification_overrides']['pattern']==''
+        assert row(restored)['classification_values']['ema']=='' and result['values']['timeframe']=='5m'
+        for target,version,changes in [(r['classification_target'],0,{'ema':'20'}),('trendline-plan:forged',2,{'ema':'20'}),(r['classification_target'],2,{'is_test_trade':False}),(r['classification_target'],2,{'stop_loss_ticks':25})]:
+            with pytest.raises(service.HTTPException):await save(target,version,changes)
+        raw=store.path.read_bytes()
+        with monkeypatch.context() as patch:
+            patch.setattr(store,'_write',lambda _:(_ for _ in ()).throw(TrendlinePlanPersistenceError('fixture write failure')))
+            with pytest.raises(service.HTTPException):await save(r['classification_target'],2,{'ema':'20'})
+        assert store.path.read_bytes()==raw
+        with pytest.raises(TrendlinePlanError):store.update_classifications(p['plan_id'],{'ema':'20'},version=2,expected_revision=p['revision'],execution_key=p['execution_key'],broker='bybit',account='demo',now_ms=clock[0])
+        # Metadata plus a valid risk edit remains a risk-only change; authorization rebinds only for risk.
+        revised=store.update_armed_risk(p['plan_id'],{'rr_target':'3'},expected_revision=restored['revision'],confirm_live=True,now_ms=clock[0])
+        assert service.TrendlinePlanExecutor._risk_only_change(before,revised)
+        with pytest.raises(service.HTTPException):await save(r['classification_target'],2,{'ema':'20'})
+        current=row(revised);await save(current['classification_target'],2,{'setup':'Pullback'})
+        claim=store.claim_trigger(p['plan_id'],{'trigger_timestamp_ms':10000,'trigger_price':'100','trigger_kind':'touch'},now_ms=10000,expected_revision=revised['revision'],expected_execution_key=p['execution_key'])
+        assert claim['plan']['classification_version']==3 and claim['plan']['classification_overrides']['setup']=='Pullback'
+        with pytest.raises(service.HTTPException):await save(current['classification_target'],3,{'ema':'20'})
+        exp=store.arm(store.create({**_payload('bybit'),'expiry_at_ms':11000},now_ms=1000)['plan_id'],now_ms=2000);target=row(exp)['classification_target'];clock[0]=12000
+        with pytest.raises(service.HTTPException):await save(target,0,{'ema':'9'})
+        for key in ('classification_overrides','classification_version','classification_updated_at_ms'):
+            with pytest.raises(TrendlinePlanError):service._trendline_plan_payload({key:{}})
+            with pytest.raises(TrendlinePlanError):store.create({**_payload('bybit'),key:{}},now_ms=1000)
+    _run_fixture_loop(run())
+
+
+
+def test_placeholder_classifications_mounted_handoff_and_ambiguous_save():
+    import ast,inspect
+    source=ast.parse(inspect.getsource(test_trendline_dashboard_browser_preserves_row_and_draft))
+    harness=next(n.value.value for n in ast.walk(source) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='harness' for t in n.targets))
+    prefix=harness[:harness.index(' await flush();const hooks')].rsplit('(async()=>{',1)[0]
+    harness=prefix+r"""
+(async()=>{
+ await flush();const hooks=window.__openOrdersTestHooks;
+ const caps={timeframe:true,setup:true,pattern:true,ema:true,vwap:true,aths_atls:true,round_number:true,webhook_classification:true,is_test_trade:false};
+ const base={...row,display_id:'trendline:bybit:demo:editable',trendline_plan_id:'editable',execution_key:'key',plan_revision:2,type:'Trendline plan',id:null,status:'Paused',trendline_local:true,classification_target:'trendline-plan:one',classification_target_kind:'trendline_plan',classification_version:0,classification_values:{timeframe:'1m',ema:null,pattern:null},classification_capabilities:caps};
+ let current={...base};snapshot={version:1,progress_revision:2,items:[current],errors:[],warnings:[],pending:true};let phase='hold',releaseSave,posts=0,gets=0;
+ const publishCurrent=p=>{current={...current,...p};snapshot={...snapshot,progress_revision:snapshot.progress_revision+1,items:[current]};};
+ global.fetch=async(url,opts={})=>{
+  if(opts.method!=='POST'){gets++;return reply(url.includes('/version')?{version:1,progress_revision:snapshot.progress_revision}:snapshot);}
+  assert.strictEqual(url,'/api/open-orders/classification');posts++;const body=JSON.parse(opts.body);
+  if(body.target.startsWith('trendline-plan:')){
+   assert(!('is_test_trade' in body.changes));
+   const saved={...current,classification_version:body.version+1,classification_values:{...current.classification_values,...body.changes}};
+   if(phase==='ambiguous'){publishCurrent(saved);throw Error('Lost acknowledgement');}
+   if(phase==='reject')return reply({detail:'Plan claimed; Reload'},409);
+   await new Promise(r=>releaseSave=r);
+   return reply({ok:true,version:saved.classification_version,values:saved.classification_values,item:saved,saved_target:body.target,publication:{version:1,progress_revision:3}});
+  }
+  assert.strictEqual(body.target,'broker-one');publishCurrent({classification_version:body.version+1,classification_values:{...current.classification_values,...body.changes}});
+  return reply({ok:true,version:current.classification_version,values:current.classification_values,item:current});
+ };
+ await hooks.refresh('progress');const tr=tbody.children[0];assert(!find(tr.children[39],'Close'));assert(idle(cell(tr,'Test')).disabled);
+ const ema=cell(tr,'EMA');idle(ema).click();change(select(ema),'9');find(ema,'Cancel').click();assert.strictEqual(posts,0);
+ idle(ema).click();change(select(ema),'9');const input=select(ema);input.focus();const saving=find(ema,'Save').click();find(ema,'Save').click();assert.strictEqual(posts,1);
+ publishCurrent({type:'Position',id:'position-one',status:'OPEN',trendline_local:false,classification_target:'broker-one',classification_target_kind:'broker',classification_capabilities:null,classification_version:1,classification_values:{timeframe:'1m',ema:'9',pattern:null},classification_plan_origin:{plan_id:'editable',metadata_version:1},entry_price:'1.1009',size:'791.5'});
+ await hooks.refresh('progress');assert.strictEqual(tbody.children[0],tr);assert.strictEqual(select(ema),input);assert.strictEqual(document.activeElement,input);assert(find(ema,'Save').disabled);assert(find(tr.children[39],'Close'));
+ releaseSave();await saving;assert.strictEqual(tbody.children[0],tr);assert.strictEqual(hooks.classificationRows.get(base.display_id).item.classification_target,'broker-one');assert.strictEqual(idle(ema).textContent,'9');
+ const good=snapshot;snapshot={...snapshot,progress_revision:2,items:[base]};await hooks.refresh('progress');assert.strictEqual(hooks.classificationRows.get(base.display_id).item.type,'Position');snapshot=good;
+ idle(ema).click();change(select(ema),'20');await find(ema,'Save').click();await hooks.refresh('progress');assert.strictEqual(idle(ema).textContent,'20');
+ idle(ema).click();change(select(ema),'');await find(ema,'Save').click();await hooks.refresh('progress');assert.strictEqual(idle(ema).textContent,'\u2014');
+ // An ambiguous plan acknowledgement is read once; no duplicate mutation.
+ phase='ambiguous';publishCurrent({...base,display_id:'trendline:bybit:demo:other',trendline_plan_id:'other',classification_target:'trendline-plan:other',classification_version:0});await hooks.refresh('progress');const second=tbody.children[0],pattern=cell(second,'Pattern');idle(pattern).click();change(select(pattern),'channel');const count=posts,reads=gets;await find(pattern,'Save').click();assert.strictEqual(posts,count+1);assert.strictEqual(gets,reads+1);assert.strictEqual(idle(pattern).textContent,'Channel');
+ // An unsaved draft cannot silently cross from local authority to a native target.
+ idle(pattern).click();change(select(pattern),'range');const draft=select(pattern);draft.focus();publishCurrent({type:'Order',id:'other-order',trendline_local:false,classification_target:'broker-other',classification_target_kind:'broker',classification_capabilities:null});await hooks.refresh('progress');assert.strictEqual(select(pattern),draft);assert.strictEqual(document.activeElement,draft);assert(find(pattern,'Save').disabled);find(pattern,'Cancel').click();console.log('placeholder editor contracts passed');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    headers=re.findall(r'<th>(.*?)</th>',master_service.OPEN_ORDERS_TEMPLATE)
+    result=subprocess.run([shutil.which('node') or r'C:\Program Files\nodejs\node.exe','-e',harness,str(ROOT/'render/static/open_orders.js'),json.dumps(headers)],capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+    assert 'placeholder editor contracts passed' in result.stdout

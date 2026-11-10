@@ -47,8 +47,10 @@ _IMMUTABLE_FIELDS = {
     "display_snapshot", "submission_refs",
     "execution_policy", "dashboard_dismissal",
     "broker_closure",
-    "risk_update",
+    "risk_update", "classification_overrides", "classification_version", "classification_updated_at_ms",
 }
+PLAN_CLASSIFICATION_FIELDS = frozenset({"timeframe", "setup", "pattern", "ema", "vwap", "aths_atls", "round_number", "webhook_classification"})
+
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
 )
@@ -376,8 +378,19 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "execution_policy": policy,
         "broker_closure": closure,
         "risk_update": risk_update,
+        "classification_overrides": _plan_classification_values(record.get("classification_overrides", {})),
+        "classification_version": _positive_int(record.get("classification_version", 0), "classification_version", allow_zero=True),
+        "classification_updated_at_ms": None if record.get("classification_updated_at_ms") is None else _int_ms(record["classification_updated_at_ms"], "classification_updated_at_ms"),
         "dashboard_dismissal": dismissal,
     }
+
+
+def _plan_classification_values(values):
+    if not isinstance(values, Mapping) or set(values) - PLAN_CLASSIFICATION_FIELDS:
+        raise TrendlinePlanError("Only supported plan classification annotations may change.")
+    if any(value is not None and (not isinstance(value, str) or len(value) > 128) for value in values.values()):
+        raise TrendlinePlanError("Classification values must be bounded normalized text or an explicit clear.")
+    return copy.deepcopy(dict(values))
 
 
 def _bounded_ms(value: object, field: str, maximum: int) -> int:
@@ -736,6 +749,28 @@ class TrendlinePlanStore:
             updated["display_snapshot"] = dict(display_snapshot, plan_id=plan_id, plan_revision=updated["revision"]) if display_snapshot is not None else None
             canonical = validate_plan(updated)
             registry["plans"][canonical["plan_id"]] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
+
+    def update_classifications(self, plan_id, changes, *, version, expected_revision, execution_key, broker, account, now_ms):
+        values = _plan_classification_values(changes)
+        if not values:
+            raise TrendlinePlanError("Supply at least one classification annotation.")
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if (plan is None or type(version) is not int or plan["classification_version"] != version
+                    or type(expected_revision) is not int or plan["revision"] != expected_revision
+                    or plan["execution_key"] != execution_key or plan["broker"] != broker or plan["account"] != account
+                    or plan["status"] not in {"armed", "disabled"} or plan["trigger_claim"] is not None
+                    or (plan["expiry_at_ms"] is not None and now_ms >= plan["expiry_at_ms"])):
+                raise TrendlinePlanError("Plan classification target/version changed or is no longer unclaimed. Reload this row; edit was not saved.")
+            updated = copy.deepcopy(plan)
+            updated["classification_overrides"].update(values)
+            updated["classification_version"] += 1
+            updated["classification_updated_at_ms"] = _int_ms(now_ms, "classification_updated_at_ms")
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
             self._write(registry)
             return copy.deepcopy(canonical)
 
