@@ -39,6 +39,30 @@
     return safeDiagnostic(`${response.status} ${response.statusText}`, fallback);
   };
   const formatTimestamp=(value)=>{ if(!value) return '—'; const n=Number(value); if(!Number.isNaN(n)){const ms=n<1_000_000_000_000?n*1000:n; const d=new Date(ms); if(!Number.isNaN(d.getTime())) return d.toLocaleString();} const d=new Date(value); return Number.isNaN(d.getTime())?String(value):d.toLocaleString();};
+  // Display-only: retain raw opened_at as the collector's creation/history bound.
+  const bybitOpenedFormatter=new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Brisbane',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+  const brokerEpochMs=value=>{
+    if(typeof value!=='number'&&(typeof value!=='string'||!/^\d+$/.test(value)))return null;
+    const n=Number(value);return Number.isSafeInteger(n)&&n>0&&Number.isFinite(new Date(n).getTime())?n:null;
+  };
+  const formatOpened=item=>{
+    if(String(item.broker||'').toLowerCase()!=='bybit')return formatTimestamp(item.opened_at);
+    const kind=String(item.type||'').toLowerCase();
+    if(item.trendline_local||item.local_tracking||!['position','order'].includes(kind))return '\u2014';
+    const created=brokerEpochMs(item.opened_at),updated=brokerEpochMs(item.position_updated_at??item._price_broker?.updatedTime);
+    const source=typeof item.source_last_success_at==='string'&&/(?:Z|[+-]\d{2}:\d{2})$/.test(item.source_last_success_at)?Date.parse(item.source_last_success_at):NaN;
+    const upper=[updated,Number.isFinite(source)&&source>0?source:null].filter(n=>n!==null);
+    const valid=n=>n!==null&&(!created||n>=created)&&upper.every(bound=>n<=bound);
+    let opened=null;
+    if(kind==='order')opened=valid(created)?created:null;
+    else if(upper.length){
+      const current=brokerEpochMs(item.position_open_time),refs=item.raw_refs||{};
+      const proved=refs.order_ids_complete===true&&Array.isArray(refs.order_ids)&&refs.order_ids.length?brokerEpochMs(refs.lifecycle_started_at_ms):null;
+      // Same-row proof can precede broker openTime; it must not contradict it.
+      opened=valid(proved)&&(!valid(current)||proved<=current)?proved:valid(current)?current:null;
+    }
+    return opened===null?'\u2014':bybitOpenedFormatter.format(new Date(opened));
+  };
   const sanitizeSourceText=(value)=>String(value??'').replace(/https?:\/\/\S+/gi,'[redacted URL]').replace(/\b(api[_-]?key|api[_-]?secret|secret|signature|x-bapi-api-key|x-bapi-sign)\s*["']?\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^"',\s;&}]+)/gi,'$1$2[redacted]').replace(/\s+/g,' ').trim();
   const safeEndpoint=(value)=>{const raw=String(value??'').trim(); if(!raw) return ''; return sanitizeSourceText(raw.replace(/^https?:\/\/[^/]+/i,'').split(/[?#]/,1)[0]||'unknown');};
   const safeDiagnostic=(value,fallback='')=>{const safe=sanitizeSourceText(value); return (safe||fallback).slice(0,300);};
@@ -556,7 +580,7 @@
     state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
     updateCellAvailability(entry,state);select.focus?.();
   };
-  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?item.manual_fill_price:(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
+  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?item.manual_fill_price:(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatOpened(item),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
     items=items.filter(item=>!(item.trendline_local===true&&trendlineDismissals.has(rowKey(item))));
     items=items.map(item=>{const expiry=expiryStatusRecords.get(item.order_expiry?.id);

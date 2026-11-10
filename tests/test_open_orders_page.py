@@ -7130,3 +7130,57 @@ def test_placeholder_classifications_mounted_handoff_and_ambiguous_save():
     result=subprocess.run([shutil.which('node') or r'C:\Program Files\nodejs\node.exe','-e',harness,str(ROOT/'render/static/open_orders.js'),json.dumps(headers)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
     assert 'placeholder editor contracts passed' in result.stdout
+
+
+
+def test_bybit_opened_current_cycle_in_mounted_brisbane_cell():
+    import ast,inspect
+    source=ast.parse(inspect.getsource(test_trendline_dashboard_browser_preserves_row_and_draft))
+    original=next(n.value.value for n in ast.walk(source) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='harness' for t in n.targets))
+    prefix=original[:original.index(' await flush();const hooks')].rsplit('(async()=>{',1)[0]
+    harness=prefix+r"""
+(async()=>{
+ await flush();assert.strictEqual(Intl.DateTimeFormat().resolvedOptions().timeZone,'America/New_York');
+ const hooks=window.__openOrdersTestHooks,opened=tr=>cell(tr,'Opened').textContent;
+ const snapshotTime='2026-11-11T00:00:00Z';
+ const base={...row,broker:'Bybit',account:'demo',category:'linear',instrument:'AKEUSDT',type:'Position',id:'ake-position',side:'Buy',size:'100',entry_price:'1',current_price:'1.1',status:'OPEN',position_idx:0,opened_at:'1794216947244',position_open_time:'1794267809000',position_updated_at:'1794269000000',source_last_success_at:snapshotTime,raw_refs:{order_ids_complete:true,order_ids:['ake-opener'],lifecycle_started_at_ms:1794267808751}};
+ const raw=JSON.stringify(base);hooks.render([base]);let tr=tbody.children[0];assert.strictEqual(opened(tr),'10/11/2026, 09:43:28');assert.strictEqual(JSON.stringify(base),raw);assert(find(tr.children[39],'Close'));
+ const ema=cell(tr,'EMA');idle(ema).click();const focused=select(ema);change(focused,'20');focused.focus();hooks.render([{...base,current_price:'1.2'}]);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(select(ema),focused);assert.strictEqual(document.activeElement,focused);find(ema,'Cancel').click();
+ // Broker openTime fallback is not represented as a proved first fill.
+ const xrp={...base,instrument:'XRPUSDT',id:'xrp-position',opened_at:1794218448504,position_open_time:1794268897625,raw_refs:{order_ids_complete:false}};
+ hooks.render([base,xrp]);assert.strictEqual(opened(tbody.children[0]),'10/11/2026, 09:43:28');assert.strictEqual(opened(tbody.children[1]),'10/11/2026, 10:01:37');
+ const planned={...xrp,display_id:'trendline:bybit:demo:plan',trendline_plan_id:'plan',trendline_local:true,type:'Trendline plan',id:null,status:'Armed',classification_target:null};
+ hooks.render([planned]);tr=tbody.children[0];assert.strictEqual(opened(tr),'\u2014');assert.strictEqual(tr.children[39].children.length,0);
+ const promoted={...xrp,display_id:planned.display_id,trendline_plan_id:'plan',trendline_local:false,classification_target:'native-target'};
+ hooks.render([promoted]);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(opened(tr),'10/11/2026, 10:01:37');assert(find(tr.children[39],'Close'));
+ // Same-slot reopen keeps row identity but cannot retain the earlier opening time.
+ const reopened={...promoted,position_open_time:1794269400000,position_updated_at:1794269500000,raw_refs:{},classification_target:'new-cycle-target'};
+ hooks.render([reopened]);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(opened(tr),'10/11/2026, 10:10:00');
+ hooks.render([{...reopened,position_open_time:null}]);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(opened(tr),'\u2014');
+ // Opening proof arrives through normal enrichment, independent of funding.
+ hooks.render([{...reopened,position_open_time:1794269400500,raw_refs:{order_ids_complete:true,order_ids:['new-opener'],lifecycle_started_at_ms:1794269399750},funding_paid:null}]);assert.strictEqual(opened(tr),'10/11/2026, 10:09:59');
+ const pending={...base,type:'Order',id:'pending-order',opened_at:'1794268897625',position_open_time:1794267808751,raw_refs:base.raw_refs};
+ hooks.render([pending]);tr=tbody.children[0];assert.strictEqual(opened(tr),'10/11/2026, 10:01:37');assert(find(tr.children[39],'Cancel'));
+ const invalid=[null,undefined,'',0,'0',-1,1.5,'NaN',Infinity,Number.MAX_SAFE_INTEGER,9007199254740992,true,'2026-11-10T00:01:00Z','1794268897',1794269500001];
+ for(const value of invalid){hooks.render([{...xrp,position_open_time:value,position_updated_at:1794269500000}]);assert.strictEqual(opened(tbody.children[0]),'\u2014',String(value));}
+ hooks.render([{...xrp,position_open_time:1794268897625,position_updated_at:null,source_last_success_at:null}]);assert.strictEqual(opened(tbody.children[0]),'\u2014');
+ hooks.render([{...xrp,position_open_time:1794268897625,position_updated_at:1794218448503}]);assert.strictEqual(opened(tbody.children[0]),'\u2014');
+ hooks.render([{...xrp,position_open_time:1794268897625,source_last_success_at:'2026-11-08T00:00:00Z'}]);assert.strictEqual(opened(tbody.children[0]),'\u2014');
+ // A malformed/future proof cannot replace valid native openTime.
+ hooks.render([{...xrp,raw_refs:{order_ids_complete:true,order_ids:['wrong-proof'],lifecycle_started_at_ms:1794269500001}}]);assert.strictEqual(opened(tbody.children[0]),'10/11/2026, 10:01:37');
+ // A genuinely old still-open cycle remains old; explicit zone handles midnight/date rollover.
+ hooks.render([{...base,opened_at:Date.UTC(2018,0,1),position_open_time:Date.UTC(2019,0,1,0,0,1),raw_refs:{order_ids_complete:true,order_ids:['older'],lifecycle_started_at_ms:Date.UTC(2019,0,1)}}]);assert.strictEqual(opened(tbody.children[0]),'01/01/2019, 10:00:00');
+ hooks.render([{...xrp,position_open_time:Date.UTC(2026,10,9,14,0,0)}]);assert.strictEqual(opened(tbody.children[0]),'10/11/2026, 00:00:00');
+ // Retained snapshots keep their stale presentation and diagnostic timestamp rules.
+ hooks.render([{...base,source_stale:true,stale_reason:'Retained prior broker snapshot'}]);tr=tbody.children[0];assert.strictEqual(tr.className,'stale-row');assert.strictEqual(tr.title,'Retained prior broker snapshot');assert.strictEqual(opened(tr),'10/11/2026, 09:43:28');
+ const other={...base,broker:'OANDA',category:'forex',instrument:'EUR_USD',id:'fx',opened_at:'2026-11-10T00:01:37.625Z',raw_refs:{}};
+ hooks.render([other]);assert.strictEqual(opened(tbody.children[0]),new Date(other.opened_at).toLocaleString());
+ console.log('Bybit Opened mounted cell assertions passed');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    # Existing test harness runs only synthetic publications; TZ is child-scoped.
+    env=dict(os.environ,TZ='America/New_York')
+    headers=re.findall(r'<th>(.*?)</th>',master_service.OPEN_ORDERS_TEMPLATE)
+    result=subprocess.run([shutil.which('node') or r'C:\Program Files\nodejs\node.exe','-e',harness,str(ROOT/'render/static/open_orders.js'),json.dumps(headers)],env=env,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+    assert 'Bybit Opened mounted cell assertions passed' in result.stdout
