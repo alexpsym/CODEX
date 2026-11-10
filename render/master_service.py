@@ -20076,7 +20076,7 @@ def _bybit_open_position_provenance_key(position):
     # Prices, stops and display metadata are not execution/lifecycle identity.
     fields = ("broker", "account", "account_id", "category", "instrument", "side",
               "position_idx", "settlement_currency", "size", "opened_at",
-              "position_open_time", "execution_seq", "order_id", "order_link_id")
+              "position_open_time", "position_updated_at", "execution_seq", "order_id", "order_link_id")
     values = tuple(str(position.get(key) if position.get(key) is not None else "") for key in fields)
     # Older payloads without a sequence/openTime cannot safely cache across updates.
     if str(position.get("execution_seq")) in {"None", "", "-1"} and not (_to_float(position.get("position_open_time")) or 0):
@@ -20118,7 +20118,82 @@ def _bybit_position_execution_proof(position, executions):
     matching = [row for row in events if str(row.get("seq")) == seq
                 and int(_to_float(row.get("execTime")) or 0) == latest_time]
     if anchored and not matching:
-        return None, [], False, "Position/execution sequence not reconciled"
+        # seq also advances on settings transactions. A mismatch alone cannot
+        # anchor inventory; independently require the complete creation ledger
+        # through this exact broker snapshot, never an order-filtered read.
+        coverage = position.get("_execution_coverage") or {}
+        digest = hashlib.sha256(json.dumps(executions, sort_keys=True, default=str).encode()).hexdigest()
+        created = int(_to_float(position.get("opened_at")) or 0)
+        updated = int(_to_float(position.get("position_updated_at")) or 0)
+        version = _OPEN_ORDERS_COLLECTION_VERSION.get()
+        if (coverage.get("complete") is not True or coverage.get("position_key") != list(_bybit_open_position_provenance_key(position))
+                or coverage.get("digest") != digest or not created or not updated
+                or coverage.get("start_ms", created + 1) > created or coverage.get("end_ms", 0) < updated
+                or coverage.get("collection_version") != version
+                or position.get("source_stale") or position.get("source_pending")
+                or not _open_orders_authoritative()):
+            return None, [], False, "Settings sequence requires complete current-snapshot execution coverage"
+        try:
+            for raw in executions:
+                if (not isinstance(raw, Mapping) or raw.get("execType") not in {"Trade", "Funding"}
+                        or not created <= int(raw.get("execTime")) <= updated):
+                    raise ValueError("Incomplete or unsupported current-snapshot execution record")
+            if int(seq) <= max(int(str(row.get("seq") or 0)) for row in events):
+                raise ValueError("Position sequence predates execution coverage")
+            raw_idx = position.get("position_idx", position.get("positionIdx"))
+            if (type(raw_idx) is bool or raw_idx not in (0, "0", 1, "1", 2, "2")
+                    or position.get("account") not in {"demo", "live"} or position.get("category") != "linear"
+                    or position.get("settlement_currency") not in {"USDT", "USDC"}
+                    or not symbol.endswith(position["settlement_currency"])
+                    or (idx == 1 and side != "buy") or (idx == 2 and side != "sell")):
+                raise ValueError("Position slot/side/scope mismatch")
+            if open_time and not created <= open_time <= updated:
+                raise ValueError("Current openTime outside broker lifecycle bounds")
+            ledger = Decimal("0")
+            cycle, opening, cycle_start = [], [], None
+            ordering = {}
+            ids = set()
+            for row in rows:
+                stamp = int(row.get("execTime"))
+                if not created <= stamp <= updated:
+                    raise ValueError("Execution outside covered position snapshot")
+                if row.get("positionIdx") not in (None, "", idx, str(idx)):
+                    raise ValueError("Execution position slot mismatch")
+                if row.get("category") not in (None, "", position.get("category")) or row.get("settleCoin") not in (None, "", position.get("settlement_currency")):
+                    raise ValueError("Execution scope mismatch")
+                identity = str(row.get("execId") or "")
+                order = str(row.get("orderId") or "")
+                direction = str(row.get("side") or "").lower()
+                qty = Decimal(str(row.get("execQty")))
+                if not identity or identity in ids or not order or direction not in {"buy", "sell"} or not qty.is_finite() or qty <= 0:
+                    raise ValueError("Malformed complete execution lineage")
+                ids.add(identity)
+                group = (stamp, int(str(row.get("seq") or 0)))
+                previous = ordering.setdefault(group, (direction, order))
+                if previous != (direction, order):
+                    raise ValueError("Ambiguous same-time execution ordering")
+                signed = qty if direction == "buy" else -qty
+                reduced = min(abs(ledger), qty) if ledger * signed < 0 else Decimal("0")
+                raw_closed = row.get("closedSize")
+                # Documented blank opening quantity is safe only at proven flat.
+                closed = Decimal("0") if raw_closed == "" and ledger == 0 else Decimal(str(raw_closed))
+                if not closed.is_finite() or closed != reduced:
+                    raise ValueError("Complete ledger closed quantity mismatch")
+                before, ledger = ledger, ledger + signed
+                if before == 0 or before * ledger < 0:
+                    cycle, opening, cycle_start = [], [], stamp
+                cycle.append(row)
+                if qty > reduced:
+                    opening.append(row)
+                if ledger == 0:
+                    cycle, opening, cycle_start = [], [], None
+            if ledger != Decimal(str(position.get("size"))).copy_abs() * (1 if side == "buy" else -1) or not cycle_start or not opening:
+                raise ValueError("Complete inventory does not match current exposure")
+            if open_time and cycle_start > open_time:
+                raise ValueError("Current cycle starts after broker openTime")
+            return cycle_start, opening, True, "Complete creation ledger reconciles settings sequence"
+        except (ValueError, TypeError, ArithmeticError):
+            return None, [], False, "Settings sequence inventory/lifecycle not reconciled"
     # Funding updates the broker position sequence but does not open/increase it.
     # Its inventory must reconcile before it can anchor the current trade ledger.
     if anchored and any(row.get("execType") == "Funding"
@@ -20168,7 +20243,9 @@ def _bybit_position_calculator_refs(position, executions, lifecycle):
     start, opening, complete, reason = _bybit_position_execution_proof(position, executions)
     return {"order_ids": sorted({str(row["orderId"]) for row in opening if row.get("orderId")}),
             "order_ids_complete": bool(complete and start == lifecycle),
-            "execution_provenance_reason": reason}
+            "execution_provenance_reason": reason,
+            "lifecycle_started_at_ms": start if complete else None,
+            "order_link_ids": {str(row["orderId"]): str(row["orderLinkId"]) for row in opening if row.get("orderId") and row.get("orderLinkId")}}
 
 
 async def _fetch_bybit_current_position_executions(position, *, base_url, api_key, api_secret, end_time):
@@ -20181,6 +20258,8 @@ async def _fetch_bybit_current_position_executions(position, *, base_url, api_ke
         earliest = open_time
     if earliest <= 0:
         raise ValueError("Position creation/open timestamp unavailable; lifecycle unknown")
+    position.pop("_execution_coverage", None)
+    covered_start = None
     end = end_time
     anchored = sequence_anchor or open_time > 0
     deduped = {}
@@ -20191,8 +20270,21 @@ async def _fetch_bybit_current_position_executions(position, *, base_url, api_ke
             category=str(position.get("category") or ""), start_time=start, end_time=end,
             symbol=str(position.get("instrument") or ""))
         for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Malformed scoped Bybit execution record; lineage unknown")
             if isinstance(row, dict):
-                deduped[_bybit_execution_dedupe_key(row)] = row
+                key = _bybit_execution_dedupe_key(row)
+                if key in deduped and deduped[key] != row:
+                    raise ValueError("Conflicting duplicate Bybit execution identity")
+                if str(row.get("symbol") or "").upper() != str(position.get("instrument") or "").upper():
+                    raise ValueError("Bybit execution response scope mismatch")
+                deduped[key] = row
+        covered_start = start
+        if _open_orders_authoritative():
+            position["_execution_coverage"] = {"complete": True, "start_ms": covered_start, "end_ms": end_time,
+                "position_key": list(_bybit_open_position_provenance_key(position)),
+                "collection_version": _OPEN_ORDERS_COLLECTION_VERSION.get(),
+                "digest": hashlib.sha256(json.dumps(list(deduped.values()), sort_keys=True, default=str).encode()).hexdigest()}
         if not anchored and start > earliest:
             end = start - 1
             continue
@@ -20202,7 +20294,7 @@ async def _fetch_bybit_current_position_executions(position, *, base_url, api_ke
             break
         # A missing current sequence or inconsistent quantities cannot be repaired
         # by reading older executions after this latest page already has trades.
-        if reason in {"Position/execution sequence not reconciled", "Execution closed quantity not reconciled",
+        if reason in {"Position/execution sequence not reconciled", "Settings sequence requires complete current-snapshot execution coverage", "Settings sequence inventory/lifecycle not reconciled", "Execution closed quantity not reconciled",
                       "Malformed scoped trade execution"}:
             break
         end = start - 1
@@ -20319,7 +20411,14 @@ async def _enrich_bybit_open_position_funding_impl(
             scoped = [position for position in current_positions if str(position.get("category") or "") == category]
             for position in scoped:
                 identity = _bybit_open_position_provenance_key(position)
-                executions = execution_cache.get(identity)
+                cached = execution_cache.get(identity)
+                if isinstance(cached, dict):
+                    executions = cached["executions"]
+                    position["_execution_coverage"] = copy.deepcopy(cached.get("coverage"))
+                    if cached.get("coverage") and cached["coverage"].get("collection_version") != _OPEN_ORDERS_COLLECTION_VERSION.get():
+                        executions = None
+                else:
+                    executions = cached
                 if executions is None:
                     executions = await _fetch_bybit_current_position_executions(position,
                         base_url=base_url, api_key=api_key, api_secret=api_secret, end_time=now_ms)
@@ -20329,7 +20428,7 @@ async def _enrich_bybit_open_position_funding_impl(
                 if lifecycle:
                     lifecycle_starts[id(position)] = lifecycle
                     if _open_orders_authoritative() and position["raw_refs"]["order_ids_complete"]:
-                        execution_cache[identity] = executions
+                        execution_cache[identity] = {"executions": executions, "coverage": copy.deepcopy(position.get("_execution_coverage"))}
                 _enrich_open_item_with_trade_context(position)
                 metadata_warning = _open_item_context_warning(position)
                 if metadata_warning:
@@ -23190,6 +23289,9 @@ def _classification_writable_context(row, context):
 def _classification_target(row, context):
     # Stable across prices/publications, deliberately changes on order -> position.
     identity = {key: row.get(key) for key in ("broker", "account", "account_id", "category", "instrument", "side", "type", "id", "position_idx")}
+    if str(row.get("broker")).lower() == "bybit" and str(row.get("type")).lower() == "position":
+        refs = row.get("raw_refs") or {}
+        identity["lifecycle"] = {"start": refs.get("lifecycle_started_at_ms"), "orders": sorted(map(str, refs.get("order_ids") or []))}
     identity["accepted"] = {key: context.get(key) for key in ("order_id", "trade_id", "calculation_context_id", "context_id")}
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
@@ -23808,7 +23910,7 @@ async def save_open_order_classification(payload: Dict[str, object]) -> Dict[str
     return {"ok": True, "version": version + 1, "values": effective["classification_values"], "item": effective}
 
 
-def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
+def _lookup_trade_context_for_open_item(item: Dict[str, object], contexts=None) -> Optional[Dict[str, object]]:
     refs = item.get("raw_refs") if isinstance(item.get("raw_refs"), dict) else {}
     item_type = str(item.get("type") or "").lower()
     identifiers = {
@@ -23824,7 +23926,7 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     if refs.get("order_ids_complete") is False:
         item["context_link_reason"] = refs.get("execution_provenance_reason") or "Execution provenance incomplete"
         return None
-    contexts = [ctx for ctx in _load_trade_contexts()
+    contexts = [ctx for ctx in (_load_trade_contexts() if contexts is None else contexts)
                 if all(str(ctx.get(field) or "").strip().lower() == str(item.get(field) or "").strip().lower()
                        for field in ("broker", "account", "category", "instrument"))
                 and _context_scope_compatible(item, ctx)]
@@ -23837,6 +23939,9 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
             continue
         exact = any(str(candidate.get(key) or "").strip() == value for key, value in identifiers.items())
         linked_orders = order_ids & {str(candidate.get("order_id") or "")}
+        proven_link = (refs.get("order_link_ids") or {}).get(str(candidate.get("order_id") or ""))
+        if proven_link and candidate.get("order_link_id") and proven_link != candidate["order_link_id"]:
+            continue
         if exact or linked_orders:
             matched.append(ctx)
             covered.update(linked_orders)
@@ -23888,8 +23993,9 @@ def _enrich_open_item_with_trade_context(
         item.update(_calculated_take_profit_ticks(ctx))
         item["target_mode"] = ctx.get("target_mode")
         target_mode = str(ctx.get("target_mode") or "").strip().lower()
+        item["target_basis"] = ctx.get("target_basis", "net_r")
         item["target_mode_display"] = (
-            "Risk/Reward" if target_mode == "rr" else "Ticks" if target_mode == "ticks" else None
+            (("Price R" if item["target_basis"] == "price_r" else "Net R") if broker_norm == "bybit" else "Risk/Reward") if target_mode == "rr" else "Ticks" if target_mode == "ticks" else None
         )
         item["risk_mode"] = ctx.get("risk_mode")
         risk_mode = str(ctx.get("risk_mode") or "").strip().lower()
@@ -39015,7 +39121,8 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
                    asset="crypto" if plan["broker"] == "bybit" else "fx", order_type=plan["order_intent"],
                    timeframe=plan["timeframe"], is_test_trade="Yes" if plan["test_trade"] else "No",
                    risk_mode_display=plan["risk_mode"], risk_value_display=plan["risk_value"],
-                   stop_loss_ticks=plan["stop_loss_ticks"], risk_reward=plan["rr_target"], target_mode_display="R",
+                   stop_loss_ticks=plan["stop_loss_ticks"], risk_reward=plan["rr_target"], target_mode="rr",
+                   target_basis=plan.get("target_basis", "net_r"), target_mode_display=("Price R" if plan.get("target_basis") == "price_r" else "Net R") if plan["broker"] == "bybit" else "R",
                    size=snapshot.get("quantity"), quantity_is_estimate=True,
                    planned_entry_price=snapshot.get("entry_price"), planned_stop_price=snapshot.get("stop_price"),
                    planned_target_price=snapshot.get("target_price"), classification_target=None,
@@ -39039,6 +39146,8 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
                     if plan["broker"] == "bybit":
                         raw = native.get("raw_refs") or {}
                         proven = bool(refs.get("order_id")) and raw.get("order_ids_complete") is True and set(map(str, raw.get("order_ids") or [])) == {str(refs["order_id"])}
+                        if (raw.get("order_link_ids") or {}).get(str(refs.get("order_id"))) not in (None, "", refs["order_link_id"]):
+                            proven = False
                     else:
                         proven = bool(refs.get("trade_id")) and str(native.get("trade_id") or native.get("id")) == str(refs["trade_id"])
                 if proven:
@@ -39067,10 +39176,16 @@ def _trendline_dashboard_rows(items, *, plans=None, executor=None, contexts=None
             index = candidates[0]
             native = items[index]
             merged = dict(row, **native)
+            for field in ("stop_loss_ticks", "take_profit_ticks", "risk_reward", "risk_mode_display", "risk_value_display", "timeframe", "target_mode_display"):
+                if not _context_value_known(merged.get(field)):
+                    merged[field] = row.get(field)
+            accepted = _lookup_trade_context_for_open_item(dict(native), contexts=contexts)
+            if accepted is not None:
+                _enrich_open_item_with_trade_context(merged, accepted)
+            elif not merged.get("context_linked"):
+                merged["is_test_trade"] = row["is_test_trade"]
             merged.update(display_id=row["display_id"], trendline_plan_id=row["trendline_plan_id"], trendline_local=False,
-                          quantity_is_estimate=False, dashboard_dismissible=False, is_test_trade=row["is_test_trade"])
-            if isinstance(merged.get("classification_values"), dict):
-                merged["classification_values"] = dict(merged["classification_values"], is_test_trade=row["is_test_trade"] == "Yes")
+                          quantity_is_estimate=False, dashboard_dismissible=False)
             rows.append(merged)
             consumed.add(index)
         else:

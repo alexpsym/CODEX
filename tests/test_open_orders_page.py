@@ -6716,6 +6716,12 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
  const position={...order,type:'Position',id:'real-position',status:'Open',classification_target:'position-target'};
  hooks.render([position]);assert.strictEqual(tbody.children.length,1);assert.strictEqual(tbody.children[0],tr);assert.strictEqual(select(timeframe),draft);assert.strictEqual(document.activeElement,draft);assert(find(timeframe,'Save').disabled);assert(find(tr.children[39],'Close'));
  assert.notStrictEqual(hooks.brokerObjectKey(order),hooks.brokerObjectKey(position));assert.strictEqual(hooks.rowKey(order),hooks.rowKey(position));
+ hooks.render([{...position,classification_target:'cycle-one',classification_values:{...row.classification_values,ema:null}}]);
+ const emaCell=cell(tr,'EMA');idle(emaCell).click();const unset=select(emaCell);assert.strictEqual(unset.value,'');change(unset,'9');unset.focus();
+ hooks.render([{...position,classification_target:'cycle-two',classification_values:{...row.classification_values,ema:null}}]);
+ assert.strictEqual(select(emaCell),unset);assert.strictEqual(document.activeElement,unset);assert(find(emaCell,'Save').disabled);
+ find(emaCell,'Cancel').click();
+
 
  const historical={...base,display_id:'trendline:bybit:demo:history',trendline_plan_id:'history',plan_revision:7,status:'Simulated',dashboard_dismissible:true};
  const other={...base,display_id:'trendline:bybit:demo:other',trendline_plan_id:'other',status:'Armed'};
@@ -6890,3 +6896,138 @@ def test_trendline_exact_full_close_reconciliation(tmp_path, monkeypatch):
         for account in ('demo','live'):
             for test in (False,True):await scenario(account,test)
     _run_fixture_loop(run())
+
+
+
+def test_trendline_settings_sequence_handoff_and_classification(tmp_path, monkeypatch):
+    """XRP references/size from supplied incident; ALL clocks/fills are synthetic."""
+    import copy
+    from types import SimpleNamespace
+    from test_trendline_executor import _payload, _run_fixture_loop
+    from render.trendline_plans import TrendlinePlanStore
+    import tools.master_journal_workbook as workbook
+    service=master_service
+    monkeypatch.setattr(service,'APP_PROFILE','local')
+    monkeypatch.setattr(service,'TRADE_CONTEXTS_PATH',tmp_path/'accepted.json')
+    monkeypatch.setattr(service,'_TRADE_CONTEXTS_CACHE',{})
+    monkeypatch.setattr(service,'_calc_context_uses_repo_local',lambda:False)
+    monkeypatch.setattr(service,'_schedule_dropbox_upload_state_backup',lambda:None)
+    monkeypatch.setattr(workbook,'_trade_allocation_state_path',lambda:tmp_path/'allocation.json')
+    for name in ('_load_pending_webhooks','_load_bounce_traders','_pepperstone_local_tracker_rows'):
+        monkeypatch.setattr(service,name,lambda:[])
+    monkeypatch.setattr(service.script_manager,'get',lambda _:SimpleNamespace(is_running=False))
+    monkeypatch.setattr(service.time,'time',lambda:10.)
+    monkeypatch.setattr(service.time,'time_ns',lambda:10000000000)
+    monkeypatch.setattr(service,'_OPEN_ORDERS_CACHE',{'version':42,'payload':None})
+    monkeypatch.setattr(service,'_OPEN_ORDERS_LAST_GOOD_ITEMS',{})
+    monkeypatch.setattr(service,'_OPEN_ORDERS_SERVICES',{})
+    def forbidden(*a,**kw):raise AssertionError('No external broker/workbook operation')
+    monkeypatch.setattr(service,'_bybit_signed_post',forbidden)
+    monkeypatch.setattr(service.httpx.AsyncClient,'request',forbidden)
+    store=TrendlinePlanStore(tmp_path/'plans.json')
+    order='37a826ad-5539-48d4-afd4-94b57be1fae8'
+    p=store.create({**_payload('bybit',test_trade=True),'instrument':'XRPUSDT','action':'sell','stop_loss_ticks':25,'rr_target':'3','target_basis':'price_r'},now_ms=1000)
+    p=store.arm(p['plan_id'],now_ms=1500)
+    store.claim_trigger(p['plan_id'],{'trigger_timestamp_ms':2000,'trigger_price':'1.1006','trigger_kind':'touch'},now_ms=2000)
+    store.begin_submission(p['plan_id'],execution_key=p['execution_key'],submission_refs={'calculation_context_id':'accepted-xrp','order_link_id':p['execution_key'],'position_idx':0},now_ms=2001)
+    p=store.resolve_claim(p['plan_id'],status='submitted',outcome={'outcome':'executed','order_id':order},now_ms=2002)
+    buy=store.arm(store.create({**_payload('bybit'),'instrument':'XRPUSDT'},now_ms=1000)['plan_id'],now_ms=1500)
+    old=store.arm(store.create({**_payload('bybit'),'instrument':'XRPUSDT'},now_ms=1000)['plan_id'],now_ms=1500)
+    store.claim_trigger(old['plan_id'],{'trigger_timestamp_ms':2000,'trigger_price':'1','trigger_kind':'touch'},now_ms=2000)
+    store.begin_submission(old['plan_id'],execution_key=old['execution_key'],submission_refs={'calculation_context_id':'old-closed'},now_ms=2001)
+    store.resolve_claim(old['plan_id'],status='submitted',outcome={'outcome':'executed','order_id':'old-903'},now_ms=2002)
+    ctx=dict(broker='bybit',account='demo',category='linear',instrument='XRPUSDT',side='Sell',position_idx=0,settlement_currency='USDT',order_id=order,order_link_id=p['execution_key'],calculation_context_id='accepted-xrp',status='ACTIVE',order_type='market',stop_loss_ticks='25',take_profit_ticks='75',target_mode='rr',target_basis='price_r',risk_reward='3',risk_mode='percent',risk_value='1',timeframe='1m',is_test_trade=True,planned_entry_price='1.1006',planned_stop_price='1.1031',planned_target_price='1.0931',calculator_distance_tick_size='.0001',setup=None,pattern=None,ema=None,vwap=None,aths_atls=None,round_number=None)
+    oldctx=dict(ctx,side='Buy',order_id='old-903',order_link_id=old['execution_key'],calculation_context_id='old-closed',status='CLOSED')
+    service._save_trade_contexts([ctx,oldctx])
+    monitor=SimpleNamespace(status=lambda:{'running':True},eligible=lambda pid:pid==buy['plan_id'])
+    monkeypatch.setattr(service,'TRENDLINE_PLAN_STORE',store);monkeypatch.setattr(service,'TRENDLINE_EXECUTOR',monitor)
+    position=dict(broker='Bybit',account='demo',category='linear',instrument='XRPUSDT',side='Sell',type='Position',id=0,position_idx=0,settlement_currency='USDT',size='791.5',entry_price='1.1009',current_price='1.1005',stop_loss='1.1031',take_profit='1.0931',status='OPEN',opened_at='1000',position_open_time='4002',position_updated_at='5000',execution_seq='99',timeframe=None,stop_loss_ticks=None,risk_reward=None)
+    ake=dict(position,instrument='AKEUSDT',size='100',id='ake',side='Buy')
+    fills=[dict(symbol='XRPUSDT',positionIdx=0,execType='Trade',execId='old-open',orderId='old-903',side='Buy',execQty='903.2',closedSize='0',execTime='2000',seq=40),dict(symbol='XRPUSDT',positionIdx=0,execType='Trade',execId='old-close',orderId='old-stop',side='Sell',execQty='903.2',closedSize='903.2',execTime='3000',seq=41)]
+    fills += [dict(symbol='XRPUSDT',positionIdx=0,execType='Trade',execId='new-'+str(i),orderId=order,orderLinkId=p['execution_key'],side='Sell',execQty=qty,closedSize='0',execTime=str(4000+i),seq=50+i) for i,qty in enumerate(['395.7','395.8'])]
+    mode=['complete'];calls=[]
+    async def read(**kw):
+        assert kw['path']=='/v5/execution/list' and kw['base_url']=='fixture-demo'
+        params=kw['params'];assert params['symbol']=='XRPUSDT' and params['category']=='linear' and 'orderId' not in params and 'orderLinkId' not in params
+        assert int(params['startTime'])==1000 and int(params['endTime'])==10000
+        calls.append(copy.deepcopy(params));rows=copy.deepcopy(fills)
+        if mode[0]=='conflicting':rows.append(dict(rows[-1],execQty='999'))
+        if mode[0]=='aggregate':rows[-1]['orderId']='other-entry'
+        if mode[0]=='wrong-slot':
+            for r in rows:r['positionIdx']=1
+        if mode[0]=='missing-close':rows=[r for r in rows if r['execId']!='old-close']
+        if mode[0]=='closed-size':rows[-1]['closedSize']='1'
+        if mode[0]=='missing-closed':rows[0].pop('closedSize')
+        if mode[0]=='unsupported':rows[-1]['execType']='AdlTrade'
+        if mode[0]=='future-snapshot':rows[-1]['execTime']='5001'
+        if mode[0]=='ambiguous':rows[-1].update(execTime=rows[-2]['execTime'],seq=rows[-2]['seq'],side='Buy')
+        if mode[0]=='repeated':return {'retCode':0,'result':{'list':rows,'nextPageCursor':'repeat'}}
+        if mode[0]=='missing-list':return {'retCode':0,'result':{'nextPageCursor':''}}
+        return {'retCode':0,'result':{'list':rows[2:] if not params.get('cursor') else rows[:2],'nextPageCursor':'older' if not params.get('cursor') else ''}}
+    monkeypatch.setattr(service,'_bybit_signed_get',read)
+    async def scenario():
+        # Real signed-read adapter pagination feeds the canonical proof; no fabricated complete flag.
+        token=service._OPEN_ORDERS_READ_SCOPE.set(True)
+        try:
+            native=copy.deepcopy(position);executions=await service._fetch_bybit_current_position_executions(native,base_url='fixture-demo',api_key='fixture',api_secret='fixture',end_time=10000)
+            proof=service._bybit_position_execution_proof(native,executions)
+            assert proof[0]==4000 and proof[2] and {r['orderId'] for r in proof[1]}=={order}
+            assert len(calls)==2
+            for change in ({'_execution_coverage':{}},{'source_stale':True},{'source_pending':True},{'account':'live'},{'position_idx':1},{'position_updated_at':'5001'},{'position_open_time':'3999'},{'size':'800'}):
+                assert not service._bybit_position_execution_proof(dict(native,**change),executions)[2],change
+            for invalid in ('conflicting','wrong-slot','missing-close','closed-size','missing-closed','unsupported','future-snapshot','ambiguous','repeated','missing-list'):
+                mode[0]=invalid;candidate=copy.deepcopy(position)
+                try:rows=await service._fetch_bybit_current_position_executions(candidate,base_url='fixture-demo',api_key='fixture',api_secret='fixture',end_time=10000)
+                except ValueError:continue
+                assert not service._bybit_position_execution_proof(candidate,rows)[2],invalid
+            mode[0]='aggregate';candidate=copy.deepcopy(position)
+            rows=await service._fetch_bybit_current_position_executions(candidate,base_url='fixture-demo',api_key='fixture',api_secret='fixture',end_time=10000)
+            lifecycle=service._bybit_position_execution_proof(candidate,rows)[0]
+            candidate['raw_refs']=service._bybit_position_calculator_refs(candidate,rows,lifecycle)
+            assert service._lookup_trade_context_for_open_item(candidate) is None
+            mode[0]='complete'
+        finally:service._OPEN_ORDERS_READ_SCOPE.reset(token)
+        owner=SimpleNamespace(loop=asyncio.get_running_loop(),revision=0,job=None,closed=False,reference_cache={})
+        job=service._OpenOrdersJob(owner,[],'fixture',42);owner.job=job
+        service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()]=owner
+        source=dict(key='positions',core=True,meta=dict(broker='Bybit',account='demo',category='linear',source_type='positions',settlement_coin='USDT'),state='complete',run=1,last_success=service._open_orders_now(),last_success_at='1970-01-01T00:00:10Z',attempts=1,next_retry=0,errors=[],warnings=[],items=[copy.deepcopy(position),ake],previous=[])
+        job.sources['positions']=source;job.publish();assert len(job.payload['items'])==4
+        initial=next(r for r in job.payload['items'] if r.get('trendline_plan_id')==p['plan_id']);key=initial['display_id']
+        release=asyncio.Event();waiting=asyncio.Event()
+        async def funding(**kw):waiting.set();await release.wait();return []
+        monkeypatch.setattr(service,'_fetch_bybit_open_funding_transactions_cached',funding)
+        async def enrich():
+            rows=[copy.deepcopy(position)]
+            warnings=await service._enrich_bybit_open_position_funding(rows,base_url='fixture-demo',api_key='fixture',api_secret='fixture',account_context='demo')
+            return {'items':rows,'errors':[],'warnings':warnings}
+        entry=job.add('funding',dict(broker='Bybit',account='demo',category='account',source_type='settled funding'),enrich,core=False)
+        try:
+            await waiting.wait();assert entry['state']=='pending'
+            items=job.payload['items'];assert len(items)==3 and job.version==42 and owner.job is job
+            row=next(r for r in items if r.get('trendline_plan_id')==p['plan_id'])
+            assert row['display_id']==key and not row['trendline_local'] and row['id']==0 and row['size']=='791.5'
+            for k in ('entry_price','current_price','stop_loss','take_profit'):assert row[k]==position[k]
+            assert row['stop_loss_ticks']=='25' and row['take_profit_ticks']=='75' and row['risk_reward']=='3' and row['target_mode_display']=='Price R' and row['risk_value_display']=='1%'
+            assert row['planned_entry_price']=='1.1006' and row['classification_target'] and row['classification_values']['ema'] is None and row['is_test_trade']=='Yes'
+            assert row.get('funding_paid') is None and any(r.get('id')=='ake' for r in items)
+            assert any(r.get('trendline_plan_id')==buy['plan_id'] and r['status']=='Armed' for r in items)
+            assert not any(r.get('trendline_plan_id')==old['plan_id'] for r in items)
+            target=row['classification_target'];before=owner.revision
+            saved=await service.save_open_order_classification({'target':target,'version':0,'changes':{'ema':'9'}})
+            assert saved['version']==1 and saved['values']['ema']=='9' and owner.revision>before and job.version==42
+            service._TRADE_CONTEXTS_CACHE.clear();accepted=next(c for c in service._load_trade_contexts() if c['order_id']==order)
+            assert accepted['classification_overrides']['ema']=='9' and accepted['stop_loss_ticks']=='25' and accepted['target_basis']=='price_r'
+            with pytest.raises(service.HTTPException) as stale:await service.save_open_order_classification({'target':target,'version':0,'changes':{'ema':'20'}})
+            assert stale.value.status_code==409
+            # Same native index on a different current cycle must invalidate a cell draft.
+            changed=copy.deepcopy(row);changed['raw_refs']['lifecycle_started_at_ms']=6000
+            assert service._classification_target(changed,accepted)!=target
+            owner.job=None;service._OPEN_ORDERS_CACHE['payload']={'items':[changed]}
+            with pytest.raises(service.HTTPException) as moved:await service.save_open_order_classification({'target':target,'version':1,'changes':{'ema':'20'}})
+            assert moved.value.status_code==409
+            owner.job=job
+            revision=owner.revision;entry['run']+=1
+            release.set();await entry['task'];assert owner.revision==revision  # superseded run cannot publish
+        finally:
+            release.set();await job.close()
+    _run_fixture_loop(scenario())
