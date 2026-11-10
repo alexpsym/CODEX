@@ -4706,3 +4706,70 @@ def test_armed_risk_update_transaction_route_and_projection(tmp_path, monkeypatc
             assert not calls
         finally:await e.stop()
     _run_fixture_loop(scenario())
+
+
+
+def test_trendline_price_r_canonical_bracket_and_submission(tmp_path, monkeypatch):
+    from test_trendline_executor import _payload, _run_fixture_loop
+    from decimal import Decimal as D
+    service=master_service
+    state=_mock_pending_limit_replay(monkeypatch,symbol='XRPUSDT',tick='0.0001',last='1.1006')
+    original_resolve=service._resolve_bybit_calculator_symbol_fast
+    async def valid_instrument(*a,**k):
+        symbol,meta,debug=await original_resolve(*a,**k);return symbol,{**meta,'status':'Trading'},debug
+    monkeypatch.setattr(service,'_resolve_bybit_calculator_symbol_fast',valid_instrument)
+    now=1794268800000
+    monkeypatch.setattr(service.time,'time',lambda:now/1000)
+    monkeypatch.setattr(service.time,'time_ns',lambda:now*1000000)
+    monkeypatch.setattr(service,'_OANDA_AUD_USD_CACHE',{'value':1,'ts':now/1000})
+    async def ticker(*a,**k):
+        return {'retCode':0,'time':now,'result':{'list':[{'symbol':'XRPUSDT','bid1Price':'1.1006','ask1Price':'1.1007','lastPrice':state['last']}]}}
+    monkeypatch.setattr(service,'_bybit_get_async',ticker)
+    async def cached(*a,**k):return {'payload':await ticker()}
+    monkeypatch.setattr(service,'_fetch_bybit_ticker_cached',cached)
+    async def clock(*a):return {'offset_ms':0,'uncertainty_ms':1,'synced_at_ms':now,'rtt_ms':2,'base_url':'https://bybit.invalid'}
+    # Existing clock cache contract, same exact adapter/final quote, no network.
+    monkeypatch.setattr(service,'_BYBIT_TIME_OFFSET_CACHE',{service._normalize_bybit_base_url('https://bybit.invalid'):{'synced_at':now,'offset_ms':0,'rtt_ms':2}})
+    # Canonical post-create protection readback is not a new order/amendment.
+    # Simulate the already-attached bracket; any attempt to move it is forbidden.
+    def position():
+        body=state['posts'][-1]
+        return {'symbol':'XRPUSDT','size':body['qty'],'side':body['side'],'positionIdx':0,
+                'avgPrice':'1.1009','takeProfit':body['takeProfit'],'stopLoss':body['stopLoss']}
+    async def opened(**kw):return position()
+    async def positions(**kw):return [position()]
+    async def no_amend(**kw):raise AssertionError('Price R must retain create-time protection')
+    monkeypatch.setattr(service,'_wait_for_position_entry',opened)
+    monkeypatch.setattr(service,'_fetch_bybit_positions',positions)
+    monkeypatch.setattr(service,'_set_bybit_trading_stop',no_amend)
+    store=service.TrendlinePlanStore(tmp_path/'plans.json')
+    async def run():
+        for side,order,entry in [('sell','market',None),('buy','market',None),('sell','limit','1.11'),('buy','limit','1.09')]:
+            p=store.create({**_payload('bybit',test_trade=True),'instrument':'XRPUSDT','action':side,'order_intent':order,'limit_entry_price':entry,'risk_mode':'percent','risk_value':'1','stop_loss_ticks':10,'rr_target':'2','target_basis':'price_r'},now_ms=now-100)
+            p=store.arm(p['plan_id'],now_ms=now-90)
+            p=store.update_armed_risk(p['plan_id'],{'stop_loss_ticks':25,'rr_target':'3'},expected_revision=p['revision'],confirm_live=False,now_ms=now-80)
+            q=await service._trendline_fresh_calculation(p)
+            assert q['target_basis']=='price_r' and q['requested_price_r']=='3'
+            ref=D(entry or ('1.1006' if side=='sell' else '1.1007'));direction=D(1 if side=='buy' else -1)
+            assert D(q['entry_price'])==ref
+            assert D(q['stop_price'])==ref-direction*D('.0025')
+            assert D(q['target_price'])==ref+direction*D('.0075')
+            assert D(q['rr'])==3 and q['requested_rr_net'] is None
+            context=state['contexts'][-1];assert context['target_basis']=='price_r' and D(context['take_profit_ticks'])==75 and D(context['risk_reward'])==3
+            legacy={**p,'target_basis':'net_r'}
+            ordinary=json.loads((await service._calculator_quote_impl(service._trendline_calculator_payload(legacy))).body)
+            assert D(ordinary['quantity'])==D(q['quantity']) and ordinary['target_price']!=q['target_price']
+            if side=='sell' and order=='market':assert ordinary['target_price']=='1.0874'
+            claim=store.claim_trigger(p['plan_id'],{'trigger_timestamp_ms':now,'trigger_price':str(ref),'trigger_kind':'entered_band'},now_ms=now,expected_revision=p['revision'],expected_execution_key=p['execution_key'])
+            claimed=store.begin_submission(p['plan_id'],execution_key=p['execution_key'],now_ms=now)
+            result=await service._trendline_executor_submit(claimed,q,p['execution_key']);assert result['accepted']
+            body=state['posts'][-1];assert D(body['stopLoss'])==D(q['stop_price']) and D(body['takeProfit'])==D(q['target_price'])
+            assert body['orderLinkId']==p['execution_key'] and body['side']==side.title()
+            # LastPrice moving through TP rejects instead of extending Price R.
+            if order=='market':
+                state['last']=q['target_price'];before=len(state['posts'])
+                with pytest.raises(service.DefiniteSubmissionFailure):await service._trendline_executor_submit(claimed,q,p['execution_key'])
+                assert len(state['posts'])==before;state['last']='1.1006'
+        legacy=store.create({**_payload('bybit'),'instrument':'XRPUSDT'},now_ms=now);assert legacy['target_basis']=='net_r'
+        assert 'target_basis' in service._trendline_calculator_payload(p)
+    _run_fixture_loop(run())

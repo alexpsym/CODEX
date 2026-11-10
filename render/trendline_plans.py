@@ -329,6 +329,8 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         raise TrendlinePlanError("Only claimed/submitting/submitted/failed/uncertain plans may have a trigger_claim.")
     if claim is None and status in _CLAIMED_STATUSES:
         raise TrendlinePlanError("Claimed/submitting/submitted/failed/uncertain plans require trigger_claim.")
+    if record.get("target_basis") == "price_r" and record.get("broker") != "bybit":
+        raise TrendlinePlanError("Price R is scoped to Bybit Trendline plans.")
     order_intent = _enum(record.get("order_intent"), "order_intent", _ORDER_INTENTS)
     limit_raw = record.get("limit_entry_price")
     limit_entry_price = None if limit_raw in (None, "") else _decimal_string(limit_raw, "limit_entry_price", positive=True)
@@ -360,6 +362,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "risk_value": _decimal_string(record.get("risk_value"), "risk_value", positive=True),
         "stop_loss_ticks": _positive_int(record.get("stop_loss_ticks"), "stop_loss_ticks"),
         "rr_target": _decimal_string(record.get("rr_target"), "rr_target", positive=True),
+        "target_basis": _enum(record.get("target_basis", "net_r"), "target_basis", {"net_r", "price_r"}),
         "timeframe": _text(record.get("timeframe"), "timeframe"),
         "order_metadata": _normalise_order_metadata(record.get("order_metadata")),
         "status": status,
@@ -738,9 +741,11 @@ class TrendlinePlanStore:
 
     def update_armed_risk(self, plan_id: str, changes: Mapping[str, object], *, expected_revision: int, confirm_live: bool, now_ms: int) -> Dict[str, object]:
         """Narrow settings transaction; the executor separately owns active eligibility."""
-        if not isinstance(changes, Mapping) or not changes or set(changes) - {"stop_loss_ticks", "rr_target"}:
+        if not isinstance(changes, Mapping) or not changes or set(changes) - {"stop_loss_ticks", "rr_target", "target_basis"}:
             raise TrendlinePlanError("Supply stop_loss_ticks and/or rr_target only.")
         values = dict(changes)
+        if "target_basis" in values:
+            values["target_basis"] = _enum(values["target_basis"], "target_basis", {"net_r", "price_r"})
         if "stop_loss_ticks" in values:
             raw = values["stop_loss_ticks"]
             if isinstance(raw, str) and re.fullmatch(r"[0-9]+", raw.strip()):
@@ -763,6 +768,8 @@ class TrendlinePlanStore:
             live = requires_live_confirmation(plan)
             if live and confirm_live is not True:
                 raise TrendlinePlanError("Explicit Live confirmation required for revised stop and target.")
+            if values.get("target_basis") == "price_r" and plan["broker"] != "bybit":
+                raise TrendlinePlanError("Price R is scoped to Bybit Trendline plans.")
             updated = copy.deepcopy(plan)
             updated.update(values)
             updated.update(revision=plan["revision"] + 1, updated_at_ms=now, display_snapshot=None,

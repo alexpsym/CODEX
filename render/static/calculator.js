@@ -990,13 +990,14 @@
       trigger_mode: $('trendline-trigger-mode').value, cross_direction: $('trendline-cross-direction').value,
       trigger_price_basis: $('trendline-price-basis').value, tolerance_ticks: Number($('trendline-tolerance-ticks').value),
       risk_mode: state.risk_mode, risk_value: $('calc-risk').value, stop_loss_ticks: $('calc-sl-ticks').value,
-      rr_target: $('calc-rr').value, timeframe: state.timeframe,
+      target_basis: (state.asset==='crypto' ? ($('trendline-target-basis')?.value || 'price_r') : 'net_r'), rr_target: $('calc-rr').value, timeframe: state.timeframe,
       setup: state.setup, pattern: state.pattern, ema: state.ema, vwap: state.vwap, aths_atls: state.aths_atls, round_number: state.round_number,
     };
     if (expiry !== undefined) payload.expiry_at_ms = expiry;
     return payload;
   }
   function resetTrendlineForm() {
+    if($('trendline-target-basis'))$('trendline-target-basis').value='price_r';
     clearAnchorImport();
     state.trendlineEditId = ''; state.trendlineRestoreMissing=[]; state.trendlineDetachedExpiry=null;
     ['trendline-anchor-1-time','trendline-anchor-2-time','trendline-anchor-1-price','trendline-anchor-2-price'].forEach((id) => { const el=$(id); if(el) { el.value=''; delete el.dataset.anchorEpoch; delete el.dataset.anchorLocal; } });
@@ -1017,7 +1018,7 @@
     const riskUnit=plan.risk_mode==='fixed_aud'?' AUD':plan.risk_mode==='percent'?' %':'';
     const entries=[['Broker/account',`${text(plan.broker)} / ${text(plan.account)}`],['Instrument/side/timeframe',`${text(plan.instrument)} / ${text(plan.action)} / ${text(plan.timeframe)}`],
       ['Arm execution',plan.broker==='bybit'?`Actual Bybit ${text(plan.account)} broker order; Test Yes is classification`:plan.test_trade?'OANDA Test simulation':'Actual OANDA broker order'],['Test mode',typeof plan.test_trade==='boolean'?(plan.test_trade?'Yes':'No'):'Not recorded'],['Order',`${text(plan.order_intent)} | Limit price: ${text(plan.limit_entry_price)}`],
-      ['Risk',`${text(plan.risk_mode)} | ${text(plan.risk_value)}${riskUnit}`],['Stop ticks / target R',`${text(plan.stop_loss_ticks)} / ${text(plan.rr_target)} R`],
+      ['Risk',`${text(plan.risk_mode)} | ${text(plan.risk_value)}${riskUnit}`],['Target basis',plan.target_basis==='price_r'?'Price R':'Net R (legacy/default)'],['Stop ticks / target R',`${text(plan.stop_loss_ticks)} / ${text(plan.rr_target)} R`],
       ['Trigger',`${text(plan.trigger_mode)} / ${text(plan.cross_direction)} / ${text(plan.trigger_price_basis)} | Tolerance: ${text(plan.tolerance_ticks)} ticks`],
       ['Extension',typeof plan.right_extension==='boolean'?(plan.right_extension?'On':'Off'):'Not recorded'],
       ['Expiry',plan.expiry_at_ms===null?'Lifetime':date(plan.expiry_at_ms)]];
@@ -1043,7 +1044,7 @@
     const active=plan?.status==='armed'&&plan.monitoring_eligible===true;
     const current=plan?.revision===edit.revision&&plan?.monitor_generation===edit.generation;
     edit.save.disabled=edit.pending||!active||!current;
-    edit.cancel.disabled=edit.pending;edit.stop.disabled=edit.pending;edit.rr.disabled=edit.pending;
+    if(edit.basis)edit.basis.disabled=edit.pending;edit.cancel.disabled=edit.pending;edit.stop.disabled=edit.pending;edit.rr.disabled=edit.pending;
     edit.status.textContent=edit.pending?'Saving changes...':!active?'Plan is no longer monitoring; edit did not take effect. Attempted values retained.':!current?'Plan changed; edit did not take effect. Attempted values retained; Cancel edit and reopen current settings.':edit.message||'';
   }
   function renderTrendlinePlans() {
@@ -1074,6 +1075,7 @@
     const input=(label,value,step)=>{const el=document.createElement('label');el.textContent=label+' ';const field=document.createElement('input');field.type='number';field.step=step;field.min=step==='1'?'1':'0';field.value=String(value);field.setAttribute('aria-label',label);el.appendChild(field);node.appendChild(el);return field;};
     const edit={planId:plan.plan_id,revision:plan.revision,generation:plan.monitor_generation,baseStop:plan.stop_loss_ticks,baseR:plan.rr_target,node,pending:false,message:''};
     edit.stop=input('Stop-loss ticks',plan.stop_loss_ticks,'1');edit.rr=input('Target R',plan.rr_target,'any');
+    if(plan.broker==='bybit'){edit.basis=document.createElement('select');edit.basis.setAttribute('aria-label','Target basis');edit.basis.innerHTML='<option value="net_r">Net R (legacy)</option><option value="price_r">Price R (price distance)</option>';edit.basis.value=plan.target_basis||'net_r';node.appendChild(edit.basis);}
     edit.save=document.createElement('button');edit.save.type='button';edit.save.textContent='Save changes';edit.save.addEventListener('click',saveTrendlineRiskEdit);node.appendChild(edit.save);
     edit.cancel=document.createElement('button');edit.cancel.type='button';edit.cancel.textContent='Cancel edit';edit.cancel.addEventListener('click',()=>{if(edit.pending)return;edit.node.remove();state.trendlineRiskEdit=null;renderTrendlinePlans();});node.appendChild(edit.cancel);
     edit.status=document.createElement('span');edit.status.className='muted';edit.status.setAttribute('role','status');node.appendChild(edit.status);
@@ -1092,12 +1094,13 @@
     const desiredStop=edit.stop.value,desiredR=edit.rr.value,changes={};
     if(desiredStop!==String(edit.baseStop))changes.stop_loss_ticks=desiredStop;
     if(desiredR!==String(edit.baseR))changes.rr_target=desiredR;
+    if(edit.basis&&edit.basis.value!==(plan.target_basis||'net_r'))changes.target_basis=edit.basis.value;
     if(!Object.keys(changes).length){edit.message='No changes to save.';updateRiskEditor();return;}
     const live=plan.account==='live'&&(plan.broker==='bybit'||!plan.test_trade);
-    if(live&&(typeof confirm!=='function'||!confirm(`Authorize revised ${plan.broker} Live ${plan.instrument} ${plan.action} plan: stop ${desiredStop} ticks, target ${desiredR} R, for actual broker execution?`)))return;
+    if(live&&(typeof confirm!=='function'||!confirm(`Authorize revised ${plan.broker} Live ${plan.instrument} ${plan.action} plan: stop ${desiredStop} ticks, target ${desiredR} ${edit.basis?.value||plan.target_basis||'net_r'}, for actual broker execution?`)))return;
     edit.pending=true;state.trendlineMutationPending=true;++state.trendlineListRequestSeq;updateRiskEditor();
     let confirmed=null,errorText='';
-    const applied=p=>p?.plan_id===edit.planId&&p.risk_update?.from_revision===edit.revision&&p.risk_update?.saved_revision===edit.revision+1&&String(p.stop_loss_ticks).replace(/^0+/,'')===String(desiredStop).trim().replace(/^0+/,'')&&riskDecimalKey(p.rr_target)!==null&&riskDecimalKey(p.rr_target)===riskDecimalKey(desiredR);
+    const applied=p=>p?.plan_id===edit.planId&&(p.target_basis||'net_r')===(edit.basis?.value||plan.target_basis||'net_r')&&p.risk_update?.from_revision===edit.revision&&p.risk_update?.saved_revision===edit.revision+1&&String(p.stop_loss_ticks).replace(/^0+/,'')===String(desiredStop).trim().replace(/^0+/,'')&&riskDecimalKey(p.rr_target)!==null&&riskDecimalKey(p.rr_target)===riskDecimalKey(desiredR);
     try{
       const data=await request(`/api/trendline-plans/${encodeURIComponent(edit.planId)}/risk`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({...changes,revision:edit.revision,monitor_generation:edit.generation,...(live?{confirm_live_execution:true}:{})})});
       if(data.ok!==true||!applied(data.plan))throw new Error('Save acknowledgement did not confirm these revised values.');confirmed=data.plan;
@@ -1141,6 +1144,7 @@
     state.timeframe=plan.timeframe??''; state.resolvedSymbol=plan.instrument??'';
     state.resolvedVenue=state.broker==='bybit'?'Bybit':state.broker==='oanda'?'OANDA':'';
     $('calc-symbol').value=state.resolvedSymbol; canonicalEl.textContent='Saved instrument: '+(state.resolvedSymbol||'Not recorded');
+    if($('trendline-target-basis'))$('trendline-target-basis').value=plan.target_basis||'net_r';
     $('calc-risk').value=plan.risk_value??''; $('calc-sl-ticks').value=plan.stop_loss_ticks??''; $('calc-rr').value=plan.rr_target??'';
     $('calc-limit').value=plan.limit_entry_price??'';
     if($('calc-target-mode')) $('calc-target-mode').value='rr';
@@ -1207,12 +1211,14 @@
       return;
     }
     const liveArm=action==='arm' && plan?.account==='live' && (plan?.broker==='bybit' || !plan?.test_trade);
-    if(liveArm && (typeof confirm!=='function' || !confirm(`Authorize this ${plan.broker} Live ${plan.instrument} ${plan.action} plan to submit an actual broker order${plan.broker==='bybit'?', including Test Yes':''}?`))) return;
+    if(liveArm && (typeof confirm!=='function' || !confirm(`Authorize this ${plan.broker} Live ${plan.instrument} ${plan.action} plan (${plan.target_basis||'net_r'} target basis) to submit an actual broker order${plan.broker==='bybit'?', including Test Yes':''}?`))) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
     try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,action==='arm'?{revision:plan.revision,monitor_generation:plan.monitor_generation,...(liveArm?{confirm_live_execution:true}:{})}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); notifyOpenOrdersStateChanged({action:"trendline"}); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); await refreshTrendlinePlans(); } finally { state.trendlineMutationPending=false; }
   }
   function initializeTrendlinePlans() {
     const panel=trendlinePanel(); if(!panel) return;
+    const basis=document.createElement('label');basis.textContent='Bybit Trendline target basis ';const select=document.createElement('select');select.id='trendline-target-basis';select.innerHTML='<option value="price_r">Price R (price distance)</option><option value="net_r">Net R (all-in costs)</option>';basis.appendChild(select);panel.appendChild(basis);
+    select.value='price_r';
     panel.style.display='none'; resetTrendlineForm();
     anchorFormIds.forEach(id=>$(id)?.addEventListener('input',()=>{
       delete $(id).dataset.anchorEpoch;delete $(id).dataset.anchorLocal;

@@ -287,6 +287,8 @@ def _trendline_calculator_payload(plan: Mapping[str, object]) -> Dict[str, objec
         "order_type": plan["order_intent"], "risk_mode": plan["risk_mode"], "risk_value": plan["risk_value"],
         "entry_price": plan.get("limit_entry_price") if plan["order_intent"] == "limit" else None,
         "stop_loss_ticks": plan["stop_loss_ticks"], "risk_reward": plan["rr_target"], "target_mode": "rr",
+        "target_basis": plan.get("target_basis", "net_r"),
+        "level_anchor_mode": "planned_entry" if plan.get("target_basis") == "price_r" else "actual_fill",
         "timeframe": plan["timeframe"], "test_trade": plan["test_trade"] if plan["broker"] == "bybit" else False, "webhook": "no", **dict(plan["order_metadata"]),
     }
 
@@ -22532,7 +22534,7 @@ def _save_calculator_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_trade_contexts(items)
 
 _CALCULATOR_INTENT_FIELDS = (
-    "order_type", "risk_mode", "risk_value", "stop_loss_ticks", "target_mode",
+    "order_type", "risk_mode", "risk_value", "stop_loss_ticks", "target_mode", "target_basis",
     "take_profit_ticks", "risk_reward", "timeframe", "is_test_trade", "setup", "pattern",
     "ema", "vwap", "aths_atls", "round_number", "planned_entry_price",
     "planned_stop_price", "planned_target_price", "quote_created_at_ms",
@@ -25325,7 +25327,7 @@ async def _place_bybit_order(
         take_dec = Decimal(str(body.get("takeProfit"))) if body.get("takeProfit") is not None else None
         try:
             safe_entry, safe_sl, safe_tp, safe_diag = _make_bybit_levels_submit_safe(
-                symbol=symbol, side=action, order_type=order_type, entry_price=entry_dec, stop_loss=stop_dec, take_profit=take_dec, last_price=last_price, tick_size=tick_size_dec, source_context=src_ctx
+                symbol=symbol, side=action, order_type=order_type, entry_price=entry_dec, stop_loss=stop_dec, take_profit=take_dec, last_price=last_price, tick_size=tick_size_dec, source_context=src_ctx, preserve_target=payload.get("target_basis") == "price_r"
             )
             if safe_tp is not None:
                 body["takeProfit"] = _fmt_dec(safe_tp)
@@ -25528,6 +25530,7 @@ async def _place_bybit_order(
             "stop_loss_ticks": intent.get("stop_loss_ticks"),
             "take_profit_ticks": intent.get("take_profit_ticks"),
             "target_mode": intent.get("target_mode"),
+            "target_basis": intent.get("target_basis", "net_r"),
             "risk_reward": intent.get("risk_reward"),
             "planned_entry_price": planned_entry_price,
             "planned_stop_price": planned_stop_price,
@@ -25790,6 +25793,7 @@ async def _place_bybit_order(
                 "stop_loss_ticks": intent.get("stop_loss_ticks"),
                 "take_profit_ticks": intent.get("take_profit_ticks"),
                 "target_mode": intent.get("target_mode"),
+            "target_basis": intent.get("target_basis", "net_r"),
                 "risk_reward": intent.get("risk_reward"),
                 "planned_entry_price": intent.get("planned_entry_price"),
                     "planned_stop_price": intent.get("planned_stop_price"),
@@ -30367,6 +30371,7 @@ def _make_bybit_levels_submit_safe(
     last_price: Decimal,
     tick_size: Decimal,
     source_context: str,
+    preserve_target: bool = False,
 ) -> Tuple[Decimal, Optional[Decimal], Optional[Decimal], Dict[str, object]]:
     snapped_entry = _snap_to_increment(entry_price, tick_size) or entry_price
     snapped_sl = (_snap_to_increment(stop_loss, tick_size) if stop_loss is not None else None)
@@ -30375,7 +30380,7 @@ def _make_bybit_levels_submit_safe(
     # Pending linear orders carry preset TP/SL, applied when the entry fills.
     # Do not apply an active-position LastPrice trigger boundary to that plan.
     # https://bybit-exchange.github.io/docs/v5/order/create-order
-    if snapped_tp is not None and str(order_type).lower() != "limit":
+    if snapped_tp is not None and str(order_type).lower() != "limit" and not preserve_target:
         adjusted_tp, adj = _adjust_bybit_take_profit_for_last_price(
             symbol=symbol, side=side, entry_price=snapped_entry, take_profit=snapped_tp, last_price=last_price, tick_size=tick_size
         )
@@ -30877,6 +30882,7 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
         "risk_value": payload.get("risk_value"),
         "stop_loss_ticks": stop_loss_ticks,
         "rr_target": payload.get("rr_target") or payload.get("risk_reward"),
+        "target_basis": payload.get("target_basis", "net_r"),
         "timeframe": payload.get("timeframe"),
         "order_metadata": {
             "setup": payload.get("setup"), "pattern": payload.get("pattern"),
@@ -30902,6 +30908,8 @@ def _trendline_saved_display(payload, plan):
         if any(str(ctx.get(a) or "").lower() != str(plan.get(b) or "").lower() for a, b in pairs.items()):
             continue
         if str(ctx.get("category") or "").lower() != ("linear" if plan["broker"] == "bybit" else "forex"):
+            continue
+        if ctx.get("target_basis", "net_r") != plan.get("target_basis", "net_r"):
             continue
         if ctx.get("is_test_trade") is not plan["test_trade"]:
             continue
@@ -31020,9 +31028,9 @@ async def trendline_plan_update_risk(plan_id: str, payload: Dict[str, object] = 
     _trendline_plans_require_local()
     try:
         controls = {"revision", "monitor_generation", "confirm_live_execution"}
-        if set(payload) - controls - {"stop_loss_ticks", "rr_target"}:
+        if set(payload) - controls - {"stop_loss_ticks", "rr_target", "target_basis"}:
             raise TrendlinePlanError("Only stop_loss_ticks and rr_target may be edited while monitoring.")
-        changes = {key: payload[key] for key in ("stop_loss_ticks", "rr_target") if key in payload}
+        changes = {key: payload[key] for key in ("stop_loss_ticks", "rr_target", "target_basis") if key in payload}
         plan = await TRENDLINE_EXECUTOR.update_risk(plan_id, changes, revision=payload.get("revision"),
             generation=payload.get("monitor_generation"), confirm_live=payload.get("confirm_live_execution") is True)
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
@@ -31731,7 +31739,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             requested_rr_net = None
             effective_rr_net = None
             fee_buffer_r = None
-            if target_mode == "rr" and rr_requested is not None:
+            price_r = _include_trendline_snapshot and payload.get("target_basis") == "price_r"
+            if target_mode == "rr" and rr_requested is not None and not price_r:
                 desired_net_reward = loss_per_unit * rr_requested
                 target_distance = stop_distance * rr_requested
                 for _ in range(4):
@@ -31746,7 +31755,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 effective_rr_net = net_reward_per_unit / loss_per_unit if loss_per_unit > 0 else Decimal("0")
                 fee_buffer_r = fee_buffer / loss_per_unit if loss_per_unit > 0 else Decimal("0")
             else:
-                target_distance = (tp_ticks or Decimal("0")) * tick_size
+                target_distance = stop_distance * rr_requested if price_r else (tp_ticks or Decimal("0")) * tick_size
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
 
             qty_raw = risk_usdt / loss_per_unit
@@ -31770,6 +31779,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
 
             total_loss_usdt = qty * loss_per_unit
             reward_usdt = qty * max(Decimal("0"), target_distance - spread_quote - (entry * open_fee) - (abs(tp) * close_fee))
+            if price_r:
+                tp_ticks = stop_ticks * rr_requested
             snapped_entry = _snap_to_increment(entry, tick_size) or entry
             snapped_sl = _snap_to_increment(sl, tick_size) or sl
             requested_target_before_adjustment = _snap_to_increment(tp, tick_size) or tp
@@ -31777,7 +31788,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             take_profit_adjustment = None
             # A pending limit's attached TP is relative to its future entry,
             # not an already-active position's current trigger price.
-            if order_type != "limit":
+            if order_type != "limit" and not price_r:
                 snapped_tp, take_profit_adjustment = _adjust_bybit_take_profit_for_last_price(
                     symbol=resolved_symbol,
                     side=side,
@@ -31793,7 +31804,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             rr_value = (abs(snapped_tp - snapped_entry) / abs(snapped_entry - snapped_sl)) if abs(snapped_entry - snapped_sl) > 0 else Decimal('0')
             reward_usdt = qty * max(Decimal('0'), effective_target_distance - spread_quote - (snapped_entry * open_fee) - (abs(snapped_tp) * close_fee))
             effective_rr_net_value = None
-            if requested_rr_net is not None:
+            if requested_rr_net is not None or price_r:
                 net_reward_per_unit = effective_target_distance - (spread_quote + (snapped_entry * open_fee) + (abs(snapped_tp) * close_fee))
                 effective_rr_net_value = net_reward_per_unit / loss_per_unit if loss_per_unit > 0 else Decimal('0')
             try:
@@ -31842,6 +31853,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 "quote_valid_for_submit": True,
                 "submit_validity_boundary": (("take_profit_price < limit entry" if side == "sell" else "take_profit_price > limit entry") if order_type == "limit" else ("take_profit_price < latest LastPrice" if side == "sell" else "take_profit_price > latest LastPrice")),
                 "target_mode": target_mode,
+                "target_basis": "price_r" if price_r else "net_r",
+                "requested_price_r": _fmt_dec(rr_requested) if price_r else None,
                 "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
                 "effective_rr_net": _fmt_dec_by_precision(effective_rr_net_value if effective_rr_net_value is not None else effective_rr_net, Decimal("0.01")) if (effective_rr_net_value is not None or effective_rr_net is not None) else None,
                 "take_profit_adjusted": bool(take_profit_adjustment),
@@ -31870,6 +31883,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 "side": side,
                 "order_type": order_type,
                 "target_mode": target_mode,
+                "target_basis": "price_r" if price_r else "net_r",
+                "requested_price_r": _fmt_dec(rr_requested) if price_r else None,
                 "risk_mode": risk_mode,
                 "risk_value": _fmt_dec(risk_val),
                 "stop_loss_ticks": _fmt_dec(stop_ticks),
@@ -31963,6 +31978,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "risk_value": _fmt_dec(risk_val),
                     "stop_loss_ticks": _fmt_dec(stop_ticks),
                     "target_mode": target_mode,
+                "target_basis": "price_r" if price_r else "net_r",
+                "requested_price_r": _fmt_dec(rr_requested) if price_r else None,
                     "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
                     "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
                     "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
@@ -31999,6 +32016,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "risk_value": _fmt_dec(risk_val),
                         "stop_loss_ticks": _fmt_dec(stop_ticks),
                         "target_mode": target_mode,
+                "target_basis": "price_r" if price_r else "net_r",
+                "requested_price_r": _fmt_dec(rr_requested) if price_r else None,
                         "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
                         "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
                         "planned_entry_price": _fmt_dec(snapped_entry),

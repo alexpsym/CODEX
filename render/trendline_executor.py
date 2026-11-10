@@ -208,7 +208,7 @@ class TrendlinePlanExecutor:
 
     @staticmethod
     def _risk_only_change(before, after):
-        ignored = {"stop_loss_ticks", "rr_target", "revision", "updated_at_ms", "lifecycle", "live_authorization", "display_snapshot", "risk_update"}
+        ignored = {"target_basis", "stop_loss_ticks", "rr_target", "revision", "updated_at_ms", "lifecycle", "live_authorization", "display_snapshot", "risk_update"}
         return (after["revision"] > before["revision"] and after.get("lifecycle", {}).get("last_transition") == "risk_updated"
                 and {k: v for k, v in before.items() if k not in ignored} == {k: v for k, v in after.items() if k not in ignored})
 
