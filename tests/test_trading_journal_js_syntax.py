@@ -353,59 +353,112 @@ def test_trading_journal_actions_drag_drop_and_elapsed_timer_hooks_present() -> 
 
 
 def test_trading_journal_actions_lock_failure_keeps_retry_and_clears_import_state() -> None:
-    node = shutil.which("node")
-    assert node, "node is required for JS runtime smoke test"
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     harness = r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[1], 'utf8');
-const listeners = {};
+const listeners = {}, elements = {}, controls = {};
 function element(id) {
-  return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } };
+  return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: (...buttons) => { for (const button of buttons) controls[button.id] = button; }, addEventListener: function(type, fn) { listeners[this.id + ':' + type] = fn; } };
 }
-const elements = {
-  'open-journal-btn': element('open-journal-btn'),
-  'import-journal-btn': element('import-journal-btn'),
-  'journal-file-input': element('journal-file-input'),
-  'journal-import-drop-zone': element('journal-import-drop-zone'),
-  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
-  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
-  'journal-account-mode': element('journal-account-mode'),
-  'journal-actions-status': element('journal-actions-status'),
-};
+for (const id of ['open-journal-btn','import-journal-btn','journal-resync-btn','journal-file-input','journal-import-drop-zone','crypto-monthly-pnl-btn','bybit-demo-balance-adjustment-btn','journal-account-mode','journal-actions-status']) elements[id] = element(id);
 elements['journal-account-mode'].value = 'demo';
-const file = { name: 'oanda_demo.csv', slice: () => ({ text: async () => 'TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n' }) };
-class FormData { append(k, v) { this[k] = v; } }
-let intervalCleared = 0;
-let timeoutCleared = 0;
+const bybitHeader = 'Contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Transaction Time,Final Balance,Transaction ID';
+const file = { name: 'bybit_demo.csv', slice: () => ({ text: async () => bybitHeader }) };
+const replacement = { name: 'replacement.csv', slice: () => ({ text: async () => bybitHeader }) };
+class FormData { append(key, value) { this[key] = value; } }
+const intervals = new Map();
+let intervalId = 0, timeoutId = 0, intervalsCleared = 0, timeoutsCleared = 0;
+let postCount = 0, resolveSecondPost, resolveLateStatus;
+const posts = [];
+const response = (payload, ok = false) => ({ ok, json: async () => payload });
 const context = {
   console,
   document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
   FormData,
   Date: { now: (() => { let n = 0; return () => { n += 1000; return n; }; })() },
-  setInterval: () => 11,
-  clearInterval: () => { intervalCleared += 1; },
-  setTimeout: () => 22,
-  clearTimeout: () => { timeoutCleared += 1; },
-  fetch: async () => ({ ok: false, json: async () => ({ ok: false, code: 'EXCEL_WORKBOOK_OPEN', message: 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', errors: ['workbook_locked'], import_timings: { parse: 1, workbook_sync: 2 } }) }),
+  setInterval: (fn, delay) => { const id = ++intervalId; intervals.set(id, { fn, delay }); return id; },
+  clearInterval: (id) => { if (intervals.delete(id)) intervalsCleared += 1; },
+  setTimeout: () => ++timeoutId,
+  clearTimeout: () => { timeoutsCleared += 1; },
+  fetch: async (url, options = {}) => {
+    if (url === '/api/trading-journal/import/status') {
+      return await new Promise((resolve) => { resolveLateStatus = resolve; });
+    }
+    if (url !== '/api/trading-journal/import-file' || options.method !== 'POST') throw new Error('unexpected request ' + url);
+    postCount += 1;
+    posts.push({ file: options.body.file, mode: options.body.account_mode });
+    if (postCount === 1) return response({ ok: false, code: 'MASTER_JOURNAL_SYNC_IN_PROGRESS', active_caller: 'resync', active_elapsed_seconds: 12.34, sync_caller: 'import' });
+    if (postCount === 2) return await new Promise((resolve) => { resolveSecondPost = resolve; });
+    if (postCount === 3) return response({ ok: false, code: 'WORKBOOK_IN_USE', message: 'Trading Journal.xlsx is in use by another process. Retry when it is available.', errors: ['workbook_locked'] });
+    if (postCount === 4) return response({ ok: true, message: 'Import complete.', rows_parsed: 4, rows_upserted: 4, master_journal_path: 'Trading Journal.xlsx' }, true);
+    throw new Error('unexpected extra import POST');
+  },
 };
-context.window = context;
-context.globalThis = context;
-vm.createContext(context);
-vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
-elements['journal-file-input'].files = [file];
+context.window = context; context.globalThis = context; vm.createContext(context); vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+const assert = (value, message) => { if (!value) throw new Error(message); };
+const status = () => elements['journal-actions-status'].textContent;
+const retry = () => controls['journal-retry-resume-btn'];
+const cancel = () => controls['journal-retry-cancel-btn'];
+const enabled = (value) => { for (const id of ['open-journal-btn','import-journal-btn','journal-resync-btn']) assert(elements[id].disabled === !value, id + ' enabled=' + value); };
 (async () => {
+  elements['journal-file-input'].files = [file];
   await listeners['journal-file-input:change']();
-  const status = elements['journal-actions-status'].textContent;
-  if (!status.includes('Import failed: Trading Journal.xlsx appears')) throw new Error('lock message missing: ' + status);
-  if (status.includes('Importing...') || status.includes('longer than expected')) throw new Error('stale import status remains: ' + status);
-  if (elements['open-journal-btn'].disabled !== true) throw new Error('open journal should remain disabled while retry is pending');
-  if (elements['import-journal-btn'].disabled !== true) throw new Error('import button should remain disabled while retry is pending');
-  if (intervalCleared < 1 || timeoutCleared < 1) throw new Error('timers not cleared');
-})();
-"""
-    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+  assert(postCount === 1 && posts[0].file === file && posts[0].mode === 'demo', 'first POST must use the selected file and Demo mode');
+  assert(status().includes('Resync') && status().includes('12s'), 'known active operation and valid elapsed time should be named: ' + status());
+  assert(retry().style.display === '' && cancel().style.display === '', 'sync conflict must expose Retry and Cancel');
+  assert(intervalsCleared === 2 && timeoutsCleared === 1, 'progress timers must stop on busy block');
 
+  elements['journal-file-input'].files = [replacement];
+  await listeners['journal-file-input:change']();
+  assert(status().includes('Cancel the pending retry'), 'replacement selection requires Cancel');
+  assert(postCount === 1, 'replacement selection while pending must not POST');
+  elements['journal-account-mode'].value = 'live';
+  const retryAttempt = listeners['journal-retry-resume-btn:click']();
+  for (let i = 0; i < 10 && postCount < 2; i += 1) await Promise.resolve();
+  assert(postCount === 2, 'one explicit Retry must send one POST');
+  assert(posts[1].file === file && posts[1].mode === 'demo', 'retry must retain exact file and captured Demo mode');
+  await listeners['journal-retry-resume-btn:click']();
+  assert(postCount === 2, 'duplicate Retry click during request must be suppressed');
+  assert(retry().disabled, 'Retry should be disabled while its request is in flight');
+
+  const poll = [...intervals.values()].find((timer) => timer.delay === 2000).fn;
+  const latePoll = poll();
+  for (let i = 0; i < 10 && !resolveLateStatus; i += 1) await Promise.resolve();
+  assert(typeof resolveLateStatus === 'function', 'status poll should be pending');
+  resolveSecondPost(response({ ok: false, code: 'MASTER_JOURNAL_SYNC_IN_PROGRESS', active_caller: '', sync_caller: 'must_not_be_shown' }));
+  await retryAttempt;
+  assert(status().includes('Trading Journal sync is busy') && !status().includes('must_not_be_shown'), 'unknown owner should use neutral busy status');
+  resolveLateStatus(response({ running: true, stage: 'late-stage', elapsed_seconds: 99 }, true));
+  await latePoll;
+  assert(!status().includes('late-stage'), 'late progress response must not overwrite blocked status');
+  assert(retry().style.display === '' && cancel().style.display === '', 'repeated busy response must preserve Retry and Cancel');
+  assert(intervalsCleared === 4 && timeoutsCleared === 2, 'progress timers must stop for each blocked attempt');
+  const beforeCancel = postCount;
+  await listeners['journal-retry-cancel-btn:click']();
+  assert(postCount === beforeCancel, 'Cancel must not POST');
+  assert(status() === 'Retry canceled.' && elements['journal-file-input'].value === '', 'Cancel must clear pending file and show status');
+  enabled(true);
+  assert(retry().style.display === 'none' && cancel().style.display === 'none', 'Cancel must clear retry controls');
+
+  elements['journal-account-mode'].value = 'live';
+  elements['journal-file-input'].files = [replacement];
+  await listeners['journal-file-input:change']();
+  assert(postCount === 3 && posts[2].file === replacement && posts[2].mode === 'live', 'replacement can be selected after Cancel');
+  assert(status().includes('in use by another process') && !/excel/i.test(status()), '423 sharing conflict must remain owner-neutral: ' + status());
+  const finishRetry = listeners['journal-retry-resume-btn:click']();
+  for (let i = 0; i < 10 && postCount < 4; i += 1) await Promise.resolve();
+  assert(postCount === 4 && posts[3].file === replacement && posts[3].mode === 'live', 'sharing retry must retain its selected file and mode');
+  await finishRetry;
+  assert(status().includes('Import complete.') && status().includes('Rows parsed: 4'), 'successful retry should show existing import result');
+  enabled(true);
+  assert(retry().style.display === 'none' && cancel().style.display === 'none', 'success must clear retry state');
+  assert(intervalsCleared === 8 && timeoutsCleared === 4, 'all attempt progress timers must be cleared');
+  assert(postCount === 4, 'exactly four POSTs across the explicit retry sequence');
+})().catch((err) => { console.error(err); process.exitCode = 1; });
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True, timeout=45)
 
 def test_trading_journal_actions_500_json_replaces_watchdog_and_reenables_open() -> None:
     node = shutil.which("node")

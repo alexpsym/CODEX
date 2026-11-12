@@ -25,6 +25,7 @@
   };
   const pendingRetry = { kind: '', run: null };
   let retryInFlight = false;
+  let importInFlight = false;
   let resyncInFlight = false;
   const makeFallbackButton = () => ({ id: '', textContent: '', style: { display: 'none' }, disabled: false, addEventListener: () => {} });
   const resumeBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
@@ -73,7 +74,7 @@
     // Legacy codes/markers/messages identify a retry category, never an owner.
     return message && !/\bexcel\b/i.test(message) ? message : 'Trading Journal.xlsx is in use by another process. Retry when it is available.';
   };
-  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (openBtn) openBtn.disabled = false; if (importBtn) importBtn.disabled = false; if (resyncBtn) resyncBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
+  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (openBtn) openBtn.disabled = false; if (importBtn) importBtn.disabled = false; if (resyncBtn) resyncBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; if (fileInput) fileInput.value = ''; };
   const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true; };
   resumeBtn.addEventListener('click', async () => {
     if (!pendingRetry.run || retryInFlight) return;
@@ -124,37 +125,45 @@
 
   importBtn?.addEventListener('click', () => fileInput?.click());
   const runImport = async (file, fixedAccountMode = null) => {
-    if (!file) return;
+    if (!file || importInFlight) return;
+    importInFlight = true;
     if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true;
-    if (importBtn) importBtn.disabled = true;
     if (dropZone) dropZone.classList.remove('drag-over');
     const importStartedAt = Date.now();
-    const updateImportTimer = () => setStatus(`Importing... elapsed ${formatElapsed(Date.now() - importStartedAt)}`);
-    updateImportTimer();
+    let attemptActive = true;
     let watchdog = null;
     let elapsedTimer = null;
     let statusPoll = null;
+    const stopImportProgress = () => {
+      attemptActive = false;
+      if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+      if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
+      if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+    };
+    const updateImportTimer = () => {
+      if (attemptActive) setStatus(`Importing... elapsed ${formatElapsed(Date.now() - importStartedAt)}`);
+    };
     const pollImportStatus = async () => {
       try {
         const res = await fetch('/api/trading-journal/import/status', { headers: { Accept: 'application/json' }, cache: 'no-store' });
         const payload = await res.json().catch(() => ({}));
+        if (!attemptActive) return;
         if (payload?.running && payload?.stage) {
           setStatus(`Importing... ${payload.stage} elapsed ${formatElapsed((payload.elapsed_seconds || 0) * 1000)}`);
         }
       } catch (_err) {}
     };
+    updateImportTimer();
     try {
       statusPoll = typeof window.setInterval === 'function' ? window.setInterval(pollImportStatus, 2000) : null;
       elapsedTimer = typeof window.setInterval === 'function' ? window.setInterval(updateImportTimer, 1000) : null;
       watchdog = window.setTimeout(() => {
-        setStatus(`Import is still running longer than expected. Waiting for backend result... elapsed ${formatElapsed(Date.now() - importStartedAt)}`, true);
+        if (attemptActive) setStatus(`Import is still running longer than expected. Waiting for backend result... elapsed ${formatElapsed(Date.now() - importStartedAt)}`, true);
       }, IMPORT_WATCHDOG_MS);
       const explicitMode = String((fixedAccountMode ?? accountModeSelect?.value) || '').trim().toLowerCase();
       const bybitLikely = await isLikelyBybitHistoryCsv(file);
       if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
-        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
-        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
-        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+        stopImportProgress();
         setStatus(BYBIT_AMBIGUITY_MSG, true);
         accountModeSelect?.focus?.();
         fileInput.value = '';
@@ -165,30 +174,28 @@
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
       if (payload?.requires_account_mode || (Array.isArray(payload?.errors) && payload.errors.includes('ambiguous_bybit_account'))) {
-        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
-        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
-        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+        stopImportProgress();
         setStatus(BYBIT_AMBIGUITY_MSG, true);
         accountModeSelect?.focus?.();
         return;
       }
+      if (isActiveSyncPayload(payload)) {
+        stopImportProgress();
+        setStatus(formatImportSyncBusyMessage(payload), true);
+        setPendingRetry('import', () => runImport(file, explicitMode));
+        return;
+      }
       if (isExcelLockPayload(payload)) {
-        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
-        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
-        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+        stopImportProgress();
         setStatus(`Import failed: ${workbookBusyMessage(payload)}`, true);
         setPendingRetry('import', () => runImport(file, explicitMode));
         return;
       }
       if (!res.ok || payload.ok !== true) {
-        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
-        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
-        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+        stopImportProgress();
         throw new Error(formatImportError(payload, 'Import failed.'));
       }
-      if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
-        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
-      if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+      stopImportProgress();
       const warnings = payload.warnings || [];
       const informationalMessages = Array.isArray(payload.informational_messages) ? payload.informational_messages : [];
       const inferred = payload.pnl_inferred_count ?? 0;
@@ -197,13 +204,12 @@
       notifyEquityDataChanged('import');
       clearPendingRetry();
     } catch (err) {
+      stopImportProgress();
       setStatus(err?.message || String(err), true);
       clearPendingRetry();
-    }
-    finally {
-      if (elapsedTimer && typeof window.clearInterval === 'function') window.clearInterval(elapsedTimer);
-      if (statusPoll && typeof window.clearInterval === 'function') window.clearInterval(statusPoll);
-      if (watchdog) window.clearTimeout(watchdog);
+    } finally {
+      stopImportProgress();
+      importInFlight = false;
       if (openBtn) openBtn.disabled = Boolean(pendingRetry.run);
       if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
       if (resyncBtn) resyncBtn.disabled = Boolean(pendingRetry.run);
@@ -219,6 +225,19 @@
   };
 
   const isActiveSyncPayload = (payload) => payload && (payload.code === 'MASTER_JOURNAL_SYNC_IN_PROGRESS' || payload.code === 'TRADING_JOURNAL_RESYNC_IN_PROGRESS');
+
+  const formatImportSyncBusyMessage = (payload) => {
+    const caller = String(payload?.active_caller || '').trim();
+    const owner = caller ? caller.split(/[_\s-]+/).filter(Boolean).map((part) => `${part[0].toUpperCase()}${part.slice(1)}`).join(' ') : '';
+    const elapsedRaw = payload?.active_elapsed_seconds;
+    const elapsedValue = Number(elapsedRaw);
+    const elapsed = elapsedRaw !== null && elapsedRaw !== undefined && Number.isFinite(elapsedValue) && elapsedValue >= 0
+      ? ` (${elapsedValue.toFixed(elapsedValue >= 10 ? 0 : 1)}s)`
+      : '';
+    return owner
+      ? `Import paused: Trading Journal sync is busy (${owner})${elapsed}. Retry when it clears.`
+      : 'Import paused: Trading Journal sync is busy. Retry when it clears.';
+  };
 
   const formatActiveSyncMessage = (payload) => {
     const caller = String(payload?.active_caller || payload?.sync_caller || 'unknown');
@@ -274,6 +293,10 @@
   dropZone?.addEventListener('drop', async (event) => {
     event.preventDefault();
     dropZone.classList.remove('drag-over');
+    if (pendingRetry.run || importInFlight) {
+      setStatus(pendingRetry.run ? 'Cancel the pending retry before choosing another file.' : 'Wait for the current import to finish before choosing another file.', true);
+      return;
+    }
     const file = event.dataTransfer?.files && event.dataTransfer.files[0];
     if (!file) return;
     if (!isAcceptedImportFile(file)) { setStatus('Unsupported file type. Drop .xlsx, .xlsm, .xls, .csv, .html, or .htm.', true); return; }
@@ -281,6 +304,11 @@
     await runImport(file, capturedMode);
   });
   fileInput?.addEventListener('change', async () => {
+    if (pendingRetry.run || importInFlight) {
+      setStatus(pendingRetry.run ? 'Cancel the pending retry before choosing another file.' : 'Wait for the current import to finish before choosing another file.', true);
+      fileInput.value = '';
+      return;
+    }
     const file = fileInput.files && fileInput.files[0];
     const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();
     await runImport(file, capturedMode);
