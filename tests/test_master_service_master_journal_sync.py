@@ -6497,3 +6497,247 @@ def test_saved_excel_resync_publication_and_newer_save_conflicts(tmp_path, monke
     version['n']+=1
     failed=ms._run_trading_journal_resync();assert not failed['ok'];assert path.read_bytes()==before
     assert not ms.TRADING_JOURNAL_RESYNC_LOCK.locked()
+
+
+def _publication_fixture_service(monkeypatch, root, *, delivery=False):
+    import types
+    import requests
+    attempts=[]
+    def external_forbidden(*a,**k):
+        attempts.append('request');raise AssertionError('External I/O is forbidden in publication fixtures')
+    monkeypatch.setattr(requests.sessions.Session,'request',external_forbidden)
+    ms=types.ModuleType('publication_'+root.name+('_delivery' if delivery else '_runtime'))
+    ms.__file__=str(MODULE_PATH);sys.modules[ms.__name__]=ms
+    override=os.environ.get('CODEX_PUBLICATION_SERVICE_CANDIDATE') if delivery else None
+    code=Path(override).read_text(encoding='utf-8') if override else MODULE_PATH.read_text(encoding='utf-8')
+    exec(compile(code,str(MODULE_PATH),'exec'),ms.__dict__)
+    ms._fixture_external_attempts=attempts
+    root.mkdir(parents=True,exist_ok=True)
+    for name,value in list(vars(ms).items()):
+        if (name.startswith('TRADING_JOURNAL_') or name.startswith('MONTHLY_AUD_')) and name.endswith('_PATH') and isinstance(value,Path):
+            monkeypatch.setattr(ms,name,root/(name.lower()+'.json'))
+    path=root/'journal'/'Trading Journal.xlsx';path.parent.mkdir(exist_ok=True)
+    monkeypatch.setattr(ms,'_master_journal_path',lambda:path)
+    monkeypatch.setattr(ms,'_journal_transaction_lock_path',lambda _p:root/'transaction.lock')
+    monkeypatch.setattr(ms,'TRADING_JOURNAL_LOCAL_DIR',path.parent)
+    monkeypatch.setattr(ms,'_master_journal_single_file_mode',lambda:True)
+    monkeypatch.setattr(ms,'_master_journal_lock_status',lambda _p:{'locked':False})
+    monkeypatch.setattr(ms,'_trade_context_source_fingerprint',lambda:[])
+    monkeypatch.setattr(ms,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(ms,'_sync_journal_excel_files_to_github',lambda *a,**k:{'github_sync_enabled':False,'github_sync_ok':True})
+    monkeypatch.setattr(ms,'_schedule_dropbox_upload_state_backup',lambda:None)
+    monkeypatch.setattr(ms,'_arm_trading_journal_derived_refresh_timer_locked',lambda *a,**k:None)
+    monkeypatch.setattr(ms,'_set_trading_journal_rows',lambda *a,**k:None)
+    assert path.resolve().is_relative_to(root.resolve())
+    assert ms._journal_transaction_lock_path(path).resolve().is_relative_to(root.resolve())
+    return ms,path
+
+def test_resync_publication_observed_footprint(tmp_path,monkeypatch):
+    import tools.master_journal_workbook as journal
+    capture=os.environ.get('CODEX_PUBLICATION_CAPTURE')
+    if not capture:pytest.skip('Requires an explicitly authorized private full-size regression input')
+    ms,path=_publication_fixture_service(monkeypatch,tmp_path/'measure')
+    path.write_bytes(Path(capture).read_bytes())
+    source=journal.read_master_journal_source(path)
+    rows=source['items'];snapshot=dict(source,stats=ms._compute_journal_stats_with_period_reports(rows,source.get('balances') or []))
+    bundle=journal._prepare_recommendation_chart_bundle(rows,path)
+    candidate=path.with_suffix('.update-candidate.tmp.xlsx');candidate.write_bytes(path.read_bytes())
+    record=dict(schema=1,canonical=str(path),candidate=str(candidate),phase='verified',
+        source_sha256=ms._publication_file_hash(path),candidate_sha256=ms._publication_file_hash(candidate),
+        source=ms._resync_source_fingerprint(path),snapshot=ms._json_safe(snapshot),
+        payload=dict(master_journal_ok=True),validation=dict(ok=True),
+        bundle=dict(files=bundle['files'],links=[[list(k),v] for k,v in bundle['links'].items()]))
+    footprint=ms._journal_publication_footprint(path,record)
+    out=os.environ.get('CODEX_PUBLICATION_FOOTPRINT')
+    if out:Path(out).write_text(json.dumps(footprint,indent=2))
+    print('MEASURED_PUBLICATION_BYTES',json.dumps(footprint,sort_keys=True))
+    # The real-sized valid record must fit the bounded publication admission.
+    ms._check_journal_publication_budget(path,record)
+
+def test_resync_publication_full_size_saved_journal(tmp_path,monkeypatch):
+    """Equivalent retained-publication footprint, not the timed-out real sheet scan."""
+    import copy,hashlib,zipfile,xml.etree.ElementTree as ET
+    from openpyxl.styles import Font,PatternFill
+    import tools.master_journal_workbook as journal
+    ms,path=_publication_fixture_service(monkeypatch,tmp_path/'equivalent',delivery=True)
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026)
+    monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    row=dict(id='equivalent-xrp',row_type='trade',account='BYBIT DEMO',account_label='BYBIT DEMO',symbol='XRPUSDT',asset_class='crypto',side='SELL',qty=10,entry_price=1.1,exit_price=1.09,net_profit=0.1,result_pct=1,r_multiple=1,open_time='2026-11-01T00:00:00+00:00',close_time='2026-11-01T01:00:00+00:00',currency='USDT',notes='generated initial')
+    snapshot=dict(items=[row],balances=[],stats=ms._compute_journal_stats_with_period_reports([row],[]))
+    print('EQUIVALENT_STAGE seed_saved_workbook',flush=True)
+    journal._counter_build(snapshot,path,publish_recommendation_assets=False)
+    journal._saved_journal_seed(path)
+    book=load_workbook(path);headers=journal._trade_log_header_map(book['Trade Log'])
+    book['Trade Log'].cell(4,headers['Notes']).value=None
+    styled=book['Trade Log'].cell(4,headers['Net P/L'])
+    styled.font=Font(name='Arial',size=21,bold=True,color='0000FF')
+    styled.fill=PatternFill(fill_type=None)
+    author=book.create_sheet('Alex authored');author['A1']='saved author content';author['B2']='=1-1'
+    author.row_dimensions[2].height=31;author.freeze_panes='B2'
+    book.save(path);book.close()
+    with zipfile.ZipFile(path) as package:
+        author_part=journal._worksheet_ooxml_part_name(package,'Alex authored')
+        parts={i.filename:(copy.copy(i),package.read(i.filename)) for i in package.infolist()}
+    ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    info,raw=parts[author_part];root=ET.fromstring(raw);cell=next(c for c in root.findall('.//'+ns+'c') if c.get('r')=='B2')
+    cached=cell.find(ns+'v')
+    if cached is None:cached=ET.SubElement(cell,ns+'v')
+    cached.text='0';parts[author_part]=(info,journal._saved_journal_xml(root,raw))
+    with zipfile.ZipFile(path,'w') as target:
+        for info,raw in parts.values():target.writestr(info,raw)
+    # Opaque authored content keeps the real measured workbook-byte component.
+    opaque='customXml/publication-footprint.xml';size=847484
+    padding=size-path.stat().st_size-76-2*len(opaque)
+    assert padding>len('<fixture></fixture>')
+    payload=('<fixture>'+'x'*(padding-len('<fixture></fixture>'))+'</fixture>').encode()
+    with zipfile.ZipFile(path,'a') as target:target.writestr(opaque,payload,compress_type=zipfile.ZIP_STORED)
+    assert path.stat().st_size==size
+    original=path.read_bytes()
+    with zipfile.ZipFile(path) as package:author_before=package.read(author_part)
+    rows=journal.read_master_journal_source(path)['items'];assert len(rows)==1
+    rows[0]['net_profit']=0.2
+    snapshot=dict(items=rows,balances=[],stats=ms._compute_journal_stats_with_period_reports(rows,[]))
+    calls={'snapshot':0,'writer':0};real_writer=ms.update_master_journal_workbook_data_only
+    def build(**kwargs):calls['snapshot']+=1;return copy.deepcopy(snapshot)
+    def writer(*a,**k):
+        calls['writer']+=1;print('EQUIVALENT_STAGE real_writer',flush=True)
+        result=real_writer(*a,**k)
+        result['diagnostics']['equivalent_footprint_evidence']=''
+        return result
+    monkeypatch.setattr(ms,'_build_trading_journal_view_snapshot',build)
+    monkeypatch.setattr(ms,'_get_trading_journal_rows',lambda:copy.deepcopy(rows))
+    monkeypatch.setattr(ms,'update_master_journal_workbook_data_only',writer)
+    real_prepare=journal._prepare_recommendation_chart_bundle
+    def prepare(*a,**k):
+        bundle=real_prepare(*a,**k);files=bundle['files'];current=sum(len(str(v).encode()) for v in files.values())
+        name=next(iter(files));extra=2544946-current;assert extra>=7
+        files[name]+='<!--'+'x'*(extra-7)+'-->'
+        assert sum(len(str(v).encode()) for v in files.values())==2544946
+        return bundle
+    monkeypatch.setattr(journal,'_prepare_recommendation_chart_bundle',prepare)
+    measured=[];phase_peaks=[];serialized=[];observed=[];admitted={'yes':False}
+    real_check=ms._check_journal_publication_budget;real_save=ms._save_json_file;real_replace=os.replace
+    pending=ms._pending_publication_path(path);fixture=path.parent.parent
+    def check(target,record):
+        if not measured and record.get('payload'):
+            diagnostic=record['payload']['master_journal_diagnostics']['writer_audit']
+            # Explicitly synthetic diagnostic volume, calibrated to the captured
+            # real record serializer measurement; no invented historical bytes.
+            base=ms._journal_publication_footprint(target,record)['components']['new_pending_metadata_bytes']
+            diagnostic['equivalent_footprint_evidence']='x'*(35945802-base)
+            footprint=ms._journal_publication_footprint(target,record)
+            assert footprint['components']['new_pending_metadata_bytes']==35945802
+            legacy=len(json.dumps(record).encode())+Path(record['candidate']).stat().st_size
+            with pytest.raises(RuntimeError,match='Prepared journal publication exceeds retained recovery budget'):
+                if legacy>25*1024*1024:raise RuntimeError('Prepared journal publication exceeds retained recovery budget')
+            limit=ms.JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES
+            monkeypatch.setattr(ms,'JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES',footprint['required_bytes']-1)
+            try:
+                with pytest.raises(ms.JournalPublicationBudgetExceeded):real_check(target,record)
+            finally:monkeypatch.setattr(ms,'JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES',limit)
+            assert path.read_bytes()==original and not Path(record['recovery']['root']).exists()
+            footprint['original_guard_required_bytes']=legacy;measured.append(footprint)
+            admitted['yes']=True
+        footprint=real_check(target,record);phase_peaks.append(footprint['projected_peak_bytes']);return footprint
+    def save(target,data):
+        result=real_save(target,data)
+        if target==pending:
+            expected=ms._journal_publication_footprint(path,data)['components']['new_pending_metadata_bytes']
+            assert target.stat().st_size==expected
+            serialized.append(dict(phase=data.get('phase'),bytes=expected))
+        return result
+    def replace(source,target,*a,**k):
+        candidate=Path(target).absolute()
+        if admitted['yes'] and fixture in candidate.parents:
+            # Exact isolated fixture tree only; sample before atomic replacement
+            # so both the old object and actual serializer temporary coexist.
+            total=0;stack=[fixture]
+            while stack:
+                folder=stack.pop()
+                for item in folder.iterdir():
+                    if item.is_symlink():raise AssertionError('Unexpected fixture link')
+                    if item.is_dir():stack.append(item)
+                    else:total+=item.stat().st_size
+            observed.append(total)
+        return real_replace(source,target,*a,**k)
+    monkeypatch.setattr(ms,'_check_journal_publication_budget',check)
+    monkeypatch.setattr(ms,'_save_json_file',save)
+    monkeypatch.setattr(os,'replace',replace)
+    print('EQUIVALENT_STAGE canonical_resync',flush=True)
+    first=ms._run_trading_journal_resync(max_seconds=270)
+    assert first.get('ok'),{k:first.get(k) for k in ['message','master_journal_error','status_code','publication_budget']}
+    assert calls=={'snapshot':1,'writer':1} and measured
+    assert max(observed)<=max(phase_peaks)<128*1024*1024
+    assert ms._read_pending_publication(path) is None and not ms.TRADING_JOURNAL_RESYNC_LOCK.locked()
+    book=load_workbook(path,data_only=False);ws=book['Trade Log']
+    assert ws.cell(4,headers['Net P/L']).value==0.2
+    assert ws.cell(4,headers['Notes']).value is None
+    assert ws.cell(4,headers['Net P/L']).font.size==21 and ws.cell(4,headers['Net P/L']).font.bold
+    assert ws.cell(4,headers['Net P/L']).fill.fill_type is None
+    assert book['Alex authored']['A1'].value=='saved author content' and book['Alex authored']['B2'].value=='=1-1'
+    assert book['Alex authored'].freeze_panes=='B2';book.close()
+    book=load_workbook(path,data_only=True);assert book['Alex authored']['B2'].value==0;book.close()
+    with zipfile.ZipFile(path) as package:
+        assert package.read(author_part)==author_before and package.read(opaque)==payload
+    assets=path.parent/(path.stem+'.assets')/'recommendations'
+    assert sum(p.stat().st_size for p in assets.glob('*.html'))==2544946
+    published=path.read_bytes();print('EQUIVALENT_STAGE repeat_fast_path',flush=True)
+    second=ms._run_trading_journal_resync(max_seconds=30)
+    assert second.get('ok'),second
+    assert not second['snapshot_build_ran'] and calls=={'snapshot':1,'writer':1} and path.read_bytes()==published
+    assert not ms._fixture_external_attempts
+    report=dict(equivalent=True,footprint=measured[0],observed_peak_bytes=max(observed),projected_peak_bytes=max(phase_peaks),serialized_phases=serialized)
+    output=os.environ.get('CODEX_PUBLICATION_FULL_FOOTPRINT')
+    if output:Path(output).write_text(json.dumps(report,indent=2))
+    print('EQUIVALENT_PUBLICATION_VERIFIED',json.dumps(report),flush=True)
+
+def test_resync_publication_bound_rollback_and_newer_save(tmp_path,monkeypatch):
+    import tools.master_journal_workbook as journal
+    import hashlib
+    real_publish=journal._publish_recommendation_chart_bundle
+    for mode in ('success','fail','newer'):
+        ms,path=_publication_fixture_service(monkeypatch,tmp_path/mode,delivery=True)
+        wb=Workbook();wb.active['A1']='saved original';wb.save(path);wb.close();original=path.read_bytes()
+        candidate=path.with_suffix('.update-candidate.tmp.xlsx');wb=load_workbook(path);wb.active['A1']='generated';wb.save(candidate);wb.close()
+        assets=path.parent/(path.stem+'.assets')/'recommendations';assets.mkdir(parents=True)
+        (assets/'chart.html').write_text('old');(assets/'retired.html').write_text('old extra')
+        record=dict(schema=1,canonical=str(path),candidate=str(candidate),candidate_bytes=candidate.stat().st_size,
+            source_sha256=ms._publication_file_hash(path),candidate_sha256=ms._publication_file_hash(candidate),
+            source=ms._resync_source_fingerprint(path),phase='verified',snapshot={},payload={'master_journal_ok':True},validation={'ok':True},
+            bundle={'files':{'chart.html':'new','fresh.html':'new file'},'links':[]})
+        record['recovery']=ms._journal_publication_recovery_plan(path,record)
+        footprint=ms._journal_publication_footprint(path,record)
+        monkeypatch.setattr(ms,'JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES',footprint['required_bytes']-1)
+        with pytest.raises(ms.JournalPublicationBudgetExceeded) as error:ms._check_journal_publication_budget(path,record)
+        assert str(error.value).find(str(footprint['required_bytes']))>=0
+        assert path.read_bytes()==original and not Path(record['recovery']['root']).exists()
+        monkeypatch.setattr(ms,'JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES',128*1024*1024)
+        monkeypatch.setattr(ms,'_fast_verify_trading_journal_workbook',lambda *a,**k:{'ok':True})
+        monkeypatch.setattr(ms,'_manual_save_set_known_fingerprint',lambda *a,**k:True)
+        monkeypatch.setattr(ms,'_save_resync_success_metadata',lambda *a,**k:True)
+        newest={}
+        def publish(bundle):
+            result=real_publish(bundle)
+            if mode=='newer':
+                book=load_workbook(path);book.active['A1']='newer Excel save';book.save(path);book.close();newest['bytes']=path.read_bytes()
+            if mode!='success':raise OSError('injected publication failure')
+            return result
+        monkeypatch.setattr(journal,'_publish_recommendation_chart_bundle',publish)
+        assert ms._reserve_master_journal_workbook_sync(path,'fixture','fixture') is None
+        try:
+            if mode=='success':assert ms._publish_verified_journal(path,record,sync_id='fixture',resumed=False)['ok']
+            else:
+                with pytest.raises(OSError,match='injected'):ms._publish_verified_journal(path,record,sync_id='fixture',resumed=False)
+        finally:ms._release_master_journal_workbook_sync()
+        if mode=='fail':
+            assert path.read_bytes()==original
+            assert (assets/'chart.html').read_text()=='old' and (assets/'retired.html').read_text()=='old extra'
+            assert not (assets/'fresh.html').exists() and ms._read_pending_publication(path) is None
+        elif mode=='newer':
+            assert path.read_bytes()==newest['bytes']
+            assert ms._retire_stale_journal_publication(path,record)
+            assert path.read_bytes()==newest['bytes'] and ms._read_pending_publication(path) is None
+        else:
+            book=load_workbook(path);assert book.active['A1'].value=='generated';book.close()
+        assert not ms._fixture_external_attempts

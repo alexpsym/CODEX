@@ -5179,7 +5179,12 @@ def _existing_workbook_trade_numbers(path: Path) -> Tuple[set[str], Dict[str, st
     by_row_id: Dict[str, str] = {}
     if not Path(path).exists():
         return values, by_row_id
-    wb = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+    source_handle = Path(path).open('rb')
+    try:
+        wb = load_workbook(source_handle, read_only=True, data_only=False, keep_links=False)
+    except BaseException:
+        source_handle.close()
+        raise
     try:
         ws = _get_trade_log_sheet(wb)
         headers = _trade_log_header_map(ws)
@@ -5205,7 +5210,8 @@ def _existing_workbook_trade_numbers(path: Path) -> Tuple[set[str], Dict[str, st
                 if row_id:
                     by_row_id[row_id] = number
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
     return values, by_row_id
 
 
@@ -9498,7 +9504,12 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
     out: Dict[str, Dict[str, Any]] = {}
     if not path.exists():
         return out
-    wb=load_workbook(path, data_only=True)
+    source_handle = Path(path).open('rb')
+    try:
+        wb=load_workbook(source_handle, data_only=True)
+    except BaseException:
+        source_handle.close()
+        raise
     try:
         try:
             ws=_get_all_trades_sheet(wb)
@@ -9548,7 +9559,8 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
                 edits['close_stopout'] = '' if r[i] is None else str(r[i])
             out[rid]=edits
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
     return out
 
 
@@ -16644,7 +16656,12 @@ def _repair_trade_log_row_ids_from_rows(ws, rows, diagnostics):
 def read_master_journal_source(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
-    wb = load_workbook(path, data_only=True, read_only=True)
+    source_handle = Path(path).open('rb')
+    try:
+        wb = load_workbook(source_handle, data_only=True, read_only=True)
+    except BaseException:
+        source_handle.close()
+        raise
     try:
         diagnostics={'repaired_corrupted_row_ids': []}
         balances = _read_stats2_account_balances(wb)
@@ -16833,7 +16850,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             },
         }
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
 
 
 _SPREADSHEETML_NAMESPACE = (

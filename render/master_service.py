@@ -42405,13 +42405,16 @@ def _trade_log_filter_coverage(ws) -> Dict[str, object]:
     return result
 
 
-def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "internal", sync_id: Optional[str] = None) -> Dict[str, object]:
+def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "internal", sync_id: Optional[str] = None, deadline: Optional[float] = None) -> Dict[str, object]:
     path = _master_journal_path()
     from tools.master_journal_workbook import _saved_journal_identity, verify_saved_journal_workbook
     _saved_edits_pin = (_saved_journal_identity(path), hashlib.sha256(path.read_bytes()).hexdigest()) if path.exists() else None
     _saved_edits_audit = {}
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
+    verified_candidate = False
+    writer_audit = {}
+    original_workbook_hash = _publication_file_hash(path) if path.exists() else None
     blocked_stage = 'snapshot_build'
     blocked_operation = 'prepare_candidate'
     validation_warnings: List[str] = []
@@ -42420,6 +42423,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
     _substage_t0 = time.perf_counter()
     def _start_substage(stage: str) -> None:
         nonlocal _substage_t0, blocked_stage
+        if deadline is not None and time.monotonic() >= deadline: raise TimeoutError("Resync stage deadline exceeded: " + stage)
         blocked_stage = stage
         _substage_t0 = time.perf_counter()
         _update_trading_journal_import_status(
@@ -42479,6 +42483,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
     for _stage in ("snapshot_build", "manual_override_read", "row_normalization", "statistics_recomputation", "snapshot_shrink_validation", "trade_number_assignment", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "recommendation_preflight", "final_replace", "enforce_single_file", "github_sync"):
         substage_timings.setdefault(_stage, 0.0)
     try:
+        if path.exists() and path.stat().st_size>JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES:
+            raise JournalPublicationBudgetExceeded(dict(required_bytes=path.stat().st_size,limit_bytes=JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES,phase='source_preflight',components={'original_workbook_bytes':path.stat().st_size}))
         if _master_journal_single_file_mode():
             enforce_pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_pre.get("ok"):
@@ -42625,6 +42631,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     )
                 if not bool((update_result or {}).get("ok")):
                     raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
+                writer_audit.update(_json_safe((update_result or {}).get("diagnostics") or {}))
                 _saved_edits_audit.update((update_result.get("diagnostics") or {}).get("saved_edits") or {})
                 candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
                 if not candidate_path:
@@ -43139,66 +43146,32 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 + "; diagnostics=" + str(recommendation_preflight.get("diagnostics") or {})
             )
         _finish_substage("recommendation_preflight")
-        if created_tmp:
-            _start_substage('final_replace')
-            blocked_operation = 'exclusive_access_probe'
-            lock_status = _master_journal_lock_status(path)
-            if lock_status.get("locked"):
-                _log_master_journal_access_block(lock_status, sync_id=sync_id, stage=blocked_stage, operation=blocked_operation)
-                payload = _excel_workbook_open_payload(extra={"master_journal_path": str(path), "master_journal_ok": False, "master_journal_exists": path.exists(), "lock_status": lock_status, "diagnostics": {"workbook_sync_substage_timings": dict(substage_timings)}})
-                payload.update(blocked_stage=blocked_stage, blocked_operation=blocked_operation, sync_id=sync_id)
-                payload["master_journal_error"] = payload["message"]
-                return payload
-            blocked_operation = 'replace_candidate'
-            if _saved_edits_pin is not None and (_saved_journal_identity(path), hashlib.sha256(path.read_bytes()).hexdigest()) != _saved_edits_pin:
-                raise RuntimeError('Workbook changed before publication; latest Excel save retained')
-            os.replace(tmp, path)
-            if _saved_edits_audit:
-                readback = verify_saved_journal_workbook(path, expected_snapshot=snapshot)
-                if not readback or not readback.get('ok'):
-                    raise RuntimeError('Installed saved-edit workbook verification failed: ' + str(readback))
-        _finish_substage("final_replace")
-        if not path.exists() or path.stat().st_size <= 0:
-            raise RuntimeError("Trading Journal.xlsx was not created.")
-        if _master_journal_single_file_mode():
-            enforce_post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
-            if not enforce_post.get("ok"):
-                raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
-        _finish_substage("enforce_single_file")
-        blocked_stage = 'publish_recommendation_assets'
-        blocked_operation = 'publish_assets'
-        recommendation_chart_asset_directory = (
-            _publish_recommendation_chart_bundle(recommendation_chart_bundle)
-        )
-        size = path.stat().st_size
-        payload = {
-            'master_journal_ok': True,
-            'master_journal_path': str(path),
-            'master_journal_exists': True,
-            'master_journal_size_bytes': int(size),
-            'master_journal_updated_at': _utc_now_iso(),
-            'source_trade_rows': len(source_trade_rows),
-            'source_rows_total': len(source_items),
-            'master_journal_diagnostics': {
-                'source_rows_total': len(source_items),
-                'source_trade_rows': len(source_trade_rows),
-                'source_balances': len(snapshot.get('balances') or []),
-                'recommendation_row_normalization': dict(
-                    recommendation_row_normalization
-                ),
-                'snapshot_shrink_guard': dict(snapshot_shrink_guard),
-                'workbook_sync_substage_timings': dict(substage_timings),
-                'recommendation_chart_asset_directory': str(
-                    recommendation_chart_asset_directory
-                ),
-            },
-        }
-        if validation_warnings:
-            payload['master_journal_warnings'] = list(validation_warnings)
-        if _master_journal_single_file_mode():
-            enforce_github = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
-            if not enforce_github.get("ok"):
-                raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
+        if not created_tmp:
+            raise RuntimeError('Resync publication requires its validated candidate')
+        if original_workbook_hash is not None and _publication_file_hash(path) != original_workbook_hash:
+            raise RuntimeError('Source workbook changed during generation; candidate not published')
+        prepared_payload = dict(master_journal_ok=True, master_journal_path=str(path), master_journal_exists=True,
+            master_journal_size_bytes=tmp.stat().st_size, source_trade_rows=len(source_trade_rows), source_rows_total=len(source_items),
+            master_journal_diagnostics=dict(writer_audit=writer_audit, source_rows_total=len(source_items), source_trade_rows=len(source_trade_rows), source_balances=len(snapshot.get('balances') or []), recommendation_row_normalization=dict(recommendation_row_normalization), snapshot_shrink_guard=dict(snapshot_shrink_guard), workbook_sync_substage_timings=dict(substage_timings)))
+        if validation_warnings: prepared_payload['master_journal_warnings'] = list(validation_warnings)
+        record = dict(schema=1, canonical=str(path), candidate=str(tmp), candidate_sha256=_publication_file_hash(tmp),
+            source_sha256=original_workbook_hash, source=_resync_source_fingerprint(path), phase='verified',
+            request_id=sync_id, created_at=_utc_now_iso(), validation=_json_safe(recommendation_preflight),
+            snapshot=_json_safe(
+                dict(items=snapshot.get('items') or [],balances=snapshot.get('balances') or [],
+                     publication_validation='saved_package_projection_v1')
+                if recommendation_preflight.get('diagnostics',{}).get('saved_package_projection_verified')
+                else snapshot), payload=prepared_payload,
+            bundle=dict(files=recommendation_chart_bundle['files'], links=[[list(k), v] for k, v in recommendation_chart_bundle['links'].items()]))
+        record['candidate_bytes']=tmp.stat().st_size
+        record['candidate_identity']=[tmp.stat().st_dev,tmp.stat().st_ino]
+        record['source_identity']=list(_saved_edits_pin[0]) if _saved_edits_pin is not None else None
+        record['recovery']=_journal_publication_recovery_plan(path,record)
+        _check_journal_publication_budget(path, record)
+        verified_candidate = True
+        _save_pending_publication(path, record)
+        payload = _publish_verified_journal(path, record, sync_id=sync_id or 'sync', resumed=False, deadline=deadline)
+        if not payload.get('ok'): return payload
         if defer_github_sync:
             payload.update({"github_sync_enabled": _trading_journal_github_sync_enabled(), "github_sync_ok": None, "github_sync_deferred": True})
         else:
@@ -43214,10 +43187,12 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         return payload
     except Exception as exc:
         try:
-            if created_tmp and tmp.exists():
+            if created_tmp and not verified_candidate and tmp.exists():
                 tmp.unlink()
         except Exception:
             pass
+        if isinstance(exc,JournalPublicationBudgetExceeded):
+            return dict(ok=False,master_journal_ok=False,status_code=413,code='JOURNAL_PUBLICATION_RECOVERY_TOO_LARGE',master_journal_error=str(exc),message=str(exc),publication_budget=exc.footprint)
         access_status = _workbook_access_failure_status(exc, path, stage=blocked_stage, operation=blocked_operation)
         if access_status is not None:
             _log_master_journal_access_block(access_status, sync_id=sync_id, stage=blocked_stage, operation=blocked_operation)
@@ -47162,12 +47137,13 @@ def _resync_fast_path_snapshot(path: Path, fingerprint: Dict[str, object]) -> Tu
     return None, "fingerprint_changed_or_no_verified_cache", diagnostics
 
 
-def _run_trading_journal_resync() -> Dict[str, object]:
-    request_id = f"resync-{uuid4().hex[:12]}"
+def _run_trading_journal_resync(*, force_full: bool = False, max_seconds: float = 1500, resume_only: bool = False, request_id: Optional[str] = None) -> Dict[str, object]:
+    request_id = request_id or f"resync-{uuid4().hex[:12]}"
     timings: Dict[str, float] = {}
     started = time.perf_counter()
     path = _master_journal_path()
     master_reserved = False
+    deadline = time.monotonic() + min(max(float(max_seconds), 1), 1500)
     if not TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False):
         return {
             **_master_journal_active_sync_payload(path, request_id, 'resync'),
@@ -47197,6 +47173,18 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             })
             return rejected
         master_reserved = True
+        try:
+            pending = _read_pending_publication(path)
+        except Exception as exc:
+            return dict(ok=False, code='PENDING_PUBLICATION_INVALID', status_code=409, message='Pending journal evidence cannot be verified; no rebuild started.', error_type=type(exc).__name__)
+        if pending is not None and not resume_only and _retire_stale_journal_publication(path,pending):
+            pending=None
+        if pending is not None:
+            result = _publish_verified_journal(path, pending, sync_id=request_id, resumed=True, deadline=deadline)
+            result.update(request_id=request_id, button='resync', snapshot_build_ran=False, skipped_snapshot_build=True, resync_timings={'total': time.perf_counter() - started})
+            return result
+        if resume_only:
+            return dict(ok=False, code='PENDING_PUBLICATION_ABSENT', status_code=409, message='No prepared publication exists; no rebuild started.')
         lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
         if lock_status.get("locked"):
             _log_master_journal_access_block(lock_status, sync_id=request_id, stage="initial_access", operation="exclusive_access_probe")
@@ -47208,7 +47196,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         APP_LOGGER.info("master_journal_workbook_sync_start sync_id=%s caller=resync path=%s prebuilt_snapshot=True reserved_before_snapshot=True", request_id, path)
 
         fingerprint = _resync_source_fingerprint(path)
-        fast_snapshot, fast_path_reason, fast_path_diagnostics = _resync_fast_path_snapshot(path, fingerprint)
+        fast_snapshot, fast_path_reason, fast_path_diagnostics = (None, "explicit_full_resync", {}) if force_full else _resync_fast_path_snapshot(path, fingerprint)
         if isinstance(fast_snapshot, dict):
             t0 = time.perf_counter()
             verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=fast_snapshot, preservation_source=path)
@@ -47242,7 +47230,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         snapshot = _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True, sync_id=request_id, sync_caller="resync") or {}
         timings["snapshot_build"] = round(time.perf_counter() - t0, 6)
         t0 = time.perf_counter()
-        sync = _sync_master_journal_workbook_unlocked(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {}, sync_caller="resync", sync_id=request_id)
+        sync = _sync_master_journal_workbook_unlocked(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {}, sync_caller="resync", sync_id=request_id, deadline=deadline)
         timings["workbook_sync"] = round(time.perf_counter() - t0, 6)
         if isinstance(sync, dict):
             sync.setdefault("sync_id", request_id)
@@ -47251,7 +47239,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         verification = None
         if ok and path.exists():
             t0 = time.perf_counter()
-            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=snapshot if isinstance(snapshot, dict) else None, preservation_source=path)
+            verification = sync.get("fast_verification") or _fast_verify_trading_journal_workbook(path, expected_snapshot=snapshot if isinstance(snapshot, dict) else None, preservation_source=path)
             timings["final_fast_verification"] = round(time.perf_counter() - t0, 6)
             if not verification.get("ok"):
                 ok = False
@@ -48023,3 +48011,292 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
         if conn:
             conn.close()
         _release_master_journal_workbook_sync()
+
+
+def _pending_publication_path(path: Path) -> Path:
+    return TRADING_JOURNAL_RESYNC_CACHE_PATH.with_suffix('.pending.json')
+
+JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES = 128 * 1024 * 1024
+
+class JournalPublicationBudgetExceeded(RuntimeError):
+    def __init__(self, footprint):
+        self.footprint = footprint
+        super().__init__('Prepared journal publication requires ' + str(footprint['required_bytes'])
+            + ' bytes; retained recovery limit is ' + str(footprint['limit_bytes'])
+            + ' bytes. Original workbook retained. Reduce the stated publication components or free/review bounded recovery capacity.')
+
+def _journal_publication_footprint(path: Path, record: Dict[str, object]) -> Dict[str, object]:
+    """Disk coexistence, using the actual atomic_json serializer, including
+    its Windows text newline encoding. Sidecar contents remain private.
+    """
+    safe = _json_safe({k:v for k,v in record.items() if k != 'digest'})
+    safe['digest'] = _stable_json_sha256(safe)
+    serialized = json.dumps(safe, indent=2, sort_keys=False, ensure_ascii=False)
+    metadata = len(serialized.replace('\n', os.linesep).encode('utf-8'))
+    pending = _pending_publication_path(path)
+    assets = path.parent / (path.stem + '.assets') / 'recommendations'
+    recovery=record.get('recovery') or {}
+    old_assets = sum(i['size'] for i in recovery.get('originals',[])[1:]) if recovery.get('originals') else (sum(p.stat().st_size for p in assets.glob('*.html') if p.is_file()) if assets.exists() else 0)
+    original = int((record.get('recovery') or {}).get('original_bytes') or (path.stat().st_size if path.exists() else 0))
+    candidate = Path(str(record['candidate']))
+    candidate_bytes = candidate.stat().st_size if candidate.exists() else int(record.get('candidate_bytes') or 0)
+    new_assets = sum(len(str(v).encode('utf-8')) for v in (record.get('bundle') or {}).get('files', {}).values())
+    cache_old = TRADING_JOURNAL_RESYNC_CACHE_PATH.stat().st_size if TRADING_JOURNAL_RESYNC_CACHE_PATH.exists() else 0
+    # Small success-cache metadata is bounded separately; it contains hashes,
+    # source fingerprints and account balance summaries, never chart bodies.
+    cache_reserve = max(64 * 1024, cache_old)
+    components = dict(original_workbook_bytes=original,candidate_bytes=candidate_bytes,
+        new_pending_metadata_bytes=metadata,existing_pending_bytes=pending.stat().st_size if pending.exists() else 0,
+        existing_sidecar_bytes=old_assets,new_sidecar_bytes=new_assets,
+        original_workbook_backup_bytes=original,original_sidecar_backup_bytes=old_assets,
+        success_cache_existing_bytes=cache_old,success_cache_temporary_reserve_bytes=cache_reserve)
+    stages = dict(
+        prepare=original+candidate_bytes+old_assets+components['existing_pending_bytes']+metadata,
+        backup=2*original+candidate_bytes+2*old_assets+2*metadata,
+        publish=candidate_bytes+original+2*old_assets+new_assets+2*metadata,
+        rollback=candidate_bytes+2*original+2*old_assets+new_assets+2*metadata,
+        cache_commit=candidate_bytes+original+old_assets+new_assets+2*metadata+cache_old+cache_reserve)
+    legacy = len(json.dumps(record).encode('utf-8')) + candidate_bytes
+    return dict(components=components,projected_peak_by_phase=stages,projected_peak_bytes=max(stages.values()),
+        legacy_compact_record_plus_candidate_bytes=legacy,required_bytes=max(stages.values()),
+        limit_bytes=JOURNAL_PUBLICATION_RECOVERY_LIMIT_BYTES,phase=record.get('phase'))
+
+def _check_journal_publication_budget(path: Path, record: Dict[str, object]) -> Dict[str, object]:
+    footprint = _journal_publication_footprint(path, record)
+    if footprint['required_bytes'] > footprint['limit_bytes']:
+        raise JournalPublicationBudgetExceeded(footprint)
+    return footprint
+
+def _journal_publication_recovery_plan(path: Path, record: Dict[str, object]) -> Dict[str, object]:
+    pending = _pending_publication_path(path)
+    root = pending.parent / (pending.stem + '.recovery-' + uuid4().hex)
+    assets = path.parent / (path.stem + '.assets') / 'recommendations'
+    originals = []
+    for index, source in enumerate([path, *sorted(assets.glob('*.html'))]):
+        stat = source.stat();digest = _publication_file_hash(source)
+        after = source.stat()
+        if (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) != (stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns):raise RuntimeError('Publication original changed while measuring recovery')
+        originals.append(dict(path=str(source),backup=str(index)+'.backup',size=stat.st_size,
+            sha256=digest,mtime_ns=stat.st_mtime_ns,dev=stat.st_dev,ino=stat.st_ino))
+    return dict(root=str(root),original_bytes=path.stat().st_size,originals=originals,ready=False)
+
+def _journal_recovery_root(path: Path, record: Dict[str, object]) -> Path:
+    root = Path(record['recovery']['root']);pending = _pending_publication_path(path)
+    if root.parent != pending.parent or not re.fullmatch(re.escape(pending.stem)+r'\.recovery-[0-9a-f]{32}',root.name):
+        raise RuntimeError('Invalid publication recovery root')
+    for parent in [root,*root.parents]:
+        if parent.exists() and getattr(parent.lstat(),'st_file_attributes',0)&1024:
+            raise RuntimeError('Publication recovery reparse path rejected')
+    identity=record['recovery'].get('identity')
+    if identity and (root.stat().st_dev,root.stat().st_ino)!=tuple(identity):raise RuntimeError('Recovery root identity changed')
+    return root
+
+def _ensure_journal_publication_backups(path: Path, record: Dict[str, object]) -> None:
+    import shutil
+    if not record.get('recovery'):record['recovery']=_journal_publication_recovery_plan(path,record)
+    _check_journal_publication_budget(path,record)
+    root=_journal_recovery_root(path,record)
+    if not root.exists():
+        root.mkdir();record['recovery']['identity']=[root.stat().st_dev,root.stat().st_ino]
+        _save_pending_publication(path,record)
+    for item in record['recovery']['originals']:
+        target=root/item['backup'];source=Path(item['path'])
+        if _publication_file_hash(source)!=item['sha256']:raise RuntimeError('Publication original changed before backup')
+        if target.exists():
+            if _publication_file_hash(target)!=item['sha256']:raise RuntimeError('Incomplete or changed publication backup retained')
+        else:
+            with target.open('xb') as stream:
+                with source.open('rb') as original:
+                    shutil.copyfileobj(original,stream)
+                stream.flush();os.fsync(stream.fileno())
+            if _publication_file_hash(target)!=item['sha256']:raise RuntimeError('Publication backup differs from pinned original')
+        item['backup_identity']=[target.stat().st_dev,target.stat().st_ino]
+    record['recovery']['ready']=True;_save_pending_publication(path,record)
+
+def _finish_journal_publication_backups(path: Path, record: Dict[str, object]) -> Dict[str, object]:
+    root=_journal_recovery_root(path,record);removed=[];retained=[]
+    if not root.exists():return dict(removed=[],retained=[])
+    for item in record['recovery']['originals']:
+        target=root/item['backup']
+        if not target.exists():continue
+        if [target.stat().st_dev,target.stat().st_ino]!=item.get('backup_identity') or _publication_file_hash(target)!=item['sha256']:
+            retained.append(str(target));continue
+        target.unlink();removed.append(item['backup'])
+    try:root.rmdir()
+    except OSError:retained.append(str(root))
+    return dict(removed=removed,retained=retained)
+
+def _rollback_journal_publication(path: Path, record: Dict[str, object]) -> bool:
+    """Restore only exact transaction-owned bytes; a newer Excel save wins."""
+    root=_journal_recovery_root(path,record)
+    if not record['recovery'].get('ready'):return False
+    if path.exists() and _publication_file_hash(path)==record['source_sha256']:
+        record['phase']='verified';_save_pending_publication(path,record);return True
+    if not path.exists() or _publication_file_hash(path)!=record['candidate_sha256']:
+        record['phase']='recovery_conflict';record['recovery_error']='Current workbook is not the owned candidate; newer save preserved'
+        _save_pending_publication(path,record);return False
+    assets=path.parent/(path.stem+'.assets')/'recommendations'
+    originals={Path(i['path']):i for i in record['recovery']['originals']}
+    proposed=(record.get('bundle') or {}).get('files',{})
+    for target,item in originals.items():
+        if target==path or not target.exists():continue
+        allowed={item['sha256']}
+        if target.name in proposed:allowed.add(hashlib.sha256(str(proposed[target.name]).encode('utf-8')).hexdigest())
+        if _publication_file_hash(target) not in allowed:
+            record['phase']='recovery_conflict';record['recovery_error']='Original sidecar changed independently; newer contents preserved'
+            _save_pending_publication(path,record);return False
+    for filename,content in proposed.items():
+        target=assets/filename
+        if target.exists():
+            allowed={hashlib.sha256(str(content).encode('utf-8')).hexdigest()}
+            if target in originals:allowed.add(originals[target]['sha256'])
+            if _publication_file_hash(target) not in allowed:
+                record['phase']='recovery_conflict';record['recovery_error']='Sidecar changed independently; recovery originals retained'
+                _save_pending_publication(path,record);return False
+    for source,item in originals.items():
+        backup=root/item['backup']
+        if _publication_file_hash(backup)!=item['sha256']:raise RuntimeError('Rollback backup changed')
+        _atomic_write_bytes(source,backup.read_bytes());os.utime(source,ns=(item['mtime_ns'],item['mtime_ns']))
+    for filename,content in proposed.items():
+        target=assets/filename
+        if target not in originals and target.exists() and _publication_file_hash(target)==hashlib.sha256(str(content).encode('utf-8')).hexdigest():target.unlink()
+    record['phase']='rolled_back';record['recovered_at']=_utc_now_iso()
+    record.pop('snapshot',None);record.pop('bundle',None);record.pop('payload',None)
+    _save_pending_publication(path,record)
+    record['recovery_cleanup']=_finish_journal_publication_backups(path,record);_save_pending_publication(path,record)
+    return True
+
+def _retire_stale_journal_publication(path: Path, record: Dict[str, object]) -> bool:
+    """Under the existing reservation, retire only pinned old transaction
+    artifacts, never the current workbook or independently changed sidecars.
+    """
+    if not path.exists() or _publication_file_hash(path)==record['candidate_sha256']:return False
+    problem=_pending_publication_problem(path,record)
+    if not ((record.get('phase')=='verified' and problem in ('source_workbook_changed','source_or_implementation_changed'))
+            or record.get('phase')=='recovery_conflict'):return False
+    candidate=Path(record['candidate'])
+    if candidate not in {path.with_suffix('.tmp.xlsx'),path.with_suffix('.update-candidate.tmp.xlsx')}:return False
+    if candidate.exists():
+        if _publication_file_hash(candidate)!=record['candidate_sha256']:return False
+        stat=candidate.stat()
+        if record.get('candidate_identity') and [stat.st_dev,stat.st_ino]!=record['candidate_identity']:return False
+        candidate.unlink()
+    record['phase']='abandoned';record['abandoned_reason']='Current saved workbook/input is authoritative; stale candidate not installed'
+    record.pop('snapshot',None);record.pop('bundle',None);record.pop('payload',None)
+    _save_pending_publication(path,record)
+    if record.get('recovery'):
+        record['recovery_cleanup']=_finish_journal_publication_backups(path,record);_save_pending_publication(path,record)
+    return True
+
+def _publication_file_hash(path: Path) -> str:
+    for ancestor in [path, *path.parents]:
+        if ancestor.exists() and getattr(ancestor.lstat(), 'st_file_attributes', 0) & 1024:
+            raise RuntimeError('Publication reparse path rejected')
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+def _save_pending_publication(path: Path, record: Dict[str, object]) -> None:
+    record.pop('digest', None)
+    safe = _json_safe(record)
+    record.clear(); record.update(safe)
+    record['digest'] = _stable_json_sha256(record)
+    _check_journal_publication_budget(path, record)
+    _save_json_file(_pending_publication_path(path), record)
+
+def _read_pending_publication(path: Path) -> Optional[Dict[str, object]]:
+    record_path = _pending_publication_path(path)
+    if not record_path.exists(): return None
+    record = json.loads(record_path.read_text(encoding='utf-8'))
+    digest = record.pop('digest', None)
+    if digest != _stable_json_sha256(record): raise RuntimeError('Pending publication record changed')
+    record['digest'] = digest
+    if record.get('phase') in ('complete','rolled_back','abandoned'):
+        if record.get('recovery_cleanup',{}).get('retained'):
+            raise RuntimeError('Publication completed but owned recovery cleanup needs review before another transaction')
+        return None
+    return record
+
+def _pending_publication_problem(path: Path, record: Dict[str, object]) -> Optional[str]:
+    if record.get('schema') != 1 or record.get('canonical') != str(path): return 'canonical_identity_changed'
+    if record.get('phase') != 'verified': return 'prior_publication_outcome_requires_recovery'
+    if record.get('source') != _resync_source_fingerprint(path): return 'source_or_implementation_changed'
+    if record.get('source_sha256') != (_publication_file_hash(path) if path.exists() else None): return 'source_workbook_changed'
+    if record.get('source_identity'):
+        stat=path.stat()
+        if [stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns]!=record['source_identity']:return 'source_workbook_changed'
+    candidate = Path(str(record.get('candidate')))
+    if candidate not in {path.with_suffix('.tmp.xlsx'), path.with_suffix('.update-candidate.tmp.xlsx')}: return 'candidate_path_changed'
+    if not candidate.exists() or record.get('candidate_sha256') != _publication_file_hash(candidate): return 'candidate_changed_or_missing'
+    if record.get('candidate_identity') and [candidate.stat().st_dev,candidate.stat().st_ino]!=record['candidate_identity']:return 'candidate_changed_or_missing'
+    if not record.get('validation', {}).get('ok'): return 'successful_validation_absent'
+    if not record.get('payload', {}).get('master_journal_ok'): return 'prepared_payload_invalid'
+    return None
+
+def _publish_verified_journal(path: Path, record: Dict[str, object], *, sync_id: str, resumed: bool, deadline: Optional[float] = None) -> Dict[str, object]:
+    """Called only while the established journal reservation is held."""
+    from tools.master_journal_workbook import _publish_recommendation_chart_bundle
+    problem = _pending_publication_problem(path, record)
+    if problem:
+        return dict(ok=False, master_journal_ok=False, code='PENDING_PUBLICATION_INVALID', status_code=409, message='Prepared journal cannot be published: ' + problem + '. No rebuild was started.', pending_reason=problem, publication_only=resumed)
+    if deadline is not None and time.monotonic() >= deadline: raise TimeoutError('Resync deadline before publication; verified candidate retained')
+    candidate = Path(record['candidate'])
+    status = _master_journal_lock_status(path)
+    if status.get('locked'):
+        _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='exclusive_access_probe')
+        record['last_block'] = dict(stage='final_replace', operation='exclusive_access_probe', status=status, request_id=sync_id)
+        _save_pending_publication(path, record)
+        return _excel_workbook_open_payload(extra=dict(master_journal_ok=False, master_journal_path=str(path), lock_status=status, blocked_stage='final_replace', blocked_operation='exclusive_access_probe', pending_publication=True, publication_phase='verified', publication_only=resumed, candidate_sha256=record['candidate_sha256'], sync_id=sync_id))
+    # Recheck all source/data/candidate pins after access/owner diagnostics.
+    problem = _pending_publication_problem(path, record)
+    if problem: return dict(ok=False, master_journal_ok=False, code='PENDING_PUBLICATION_INVALID', status_code=409, message='Prepared journal changed: ' + problem, pending_reason=problem)
+    try:
+        _ensure_journal_publication_backups(path,record)
+        problem=_pending_publication_problem(path,record)
+        if problem:raise RuntimeError('Publication source changed after backup: '+problem)
+        record['phase'] = 'replace_started'; _save_pending_publication(path, record)
+        try:
+            os.replace(candidate, path)
+        except OSError as exc:
+            status = _workbook_access_failure_status(exc, path, stage='final_replace', operation='replace_candidate')
+            if status is not None:
+                _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='replace_candidate')
+                if getattr(exc, 'winerror', None) in (32, 33) and candidate.exists() and _publication_file_hash(path) == record['source_sha256'] and _publication_file_hash(candidate) == record['candidate_sha256']:
+                    record['phase'] = 'verified'
+                record['last_block'] = dict(stage='final_replace', operation='replace_candidate', status=status, request_id=sync_id)
+                _save_pending_publication(path, record)
+                return _excel_workbook_open_payload(extra=dict(master_journal_ok=False, master_journal_path=str(path), lock_status=status, pending_publication=True, publication_phase=record['phase'], blocked_stage='final_replace', blocked_operation='replace_candidate'))
+            raise
+        record['phase'] = 'workbook_published'; _save_pending_publication(path, record)
+        if _publication_file_hash(path) != record['candidate_sha256']: raise RuntimeError('Installed journal differs from verified candidate; preserve pending recovery')
+        if _master_journal_single_file_mode():
+            enforcement = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
+            if not enforcement.get('ok'): raise RuntimeError('Unexpected extra workbook after publication: ' + str(enforcement))
+        bundle = dict(files=record['bundle']['files'], links={tuple(key): value for key, value in record['bundle']['links']}, workbook_path=path)
+        record['phase'] = 'assets_started'; _save_pending_publication(path, record)
+        try:
+            directory = _publish_recommendation_chart_bundle(bundle)
+        except OSError as exc:
+            status = _workbook_access_failure_status(exc, path, stage='publish_recommendation_assets', operation='publish_assets')
+            if status is not None: _log_master_journal_access_block(status, sync_id=sync_id, stage='publish_recommendation_assets', operation='publish_assets')
+            raise
+        verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=record['snapshot'], preservation_source=path)
+        if not verification.get('ok'): raise RuntimeError('Installed journal verification failed: ' + str(verification))
+        if not _manual_save_set_known_fingerprint(path, expected_fingerprint=_manual_save_file_fingerprint(path)):
+            raise RuntimeError('Workbook changed before releasing publication reservation')
+        payload = dict(record['payload'])
+        payload.update(ok=True, publication_only=resumed, publication_phase='complete', candidate_sha256=record['candidate_sha256'], fast_verification=verification, github_sync_deferred=True, github_sync_ok=None, master_journal_updated_at=_utc_now_iso())
+        payload.setdefault('master_journal_diagnostics', {})['recommendation_chart_asset_directory'] = str(directory)
+        _save_resync_success_metadata(path, _resync_source_fingerprint(path), record['snapshot'])
+        # Keep a compact completed receipt; consumed candidate and prepared HTML/snapshot
+        # cease to be retained recovery. Never erase unknown/failed mutation evidence.
+        record['phase'] = 'complete'; record['completed_at'] = _utc_now_iso()
+        record.pop('snapshot'); record.pop('bundle'); record.pop('payload')
+        _save_pending_publication(path, record)
+        record['recovery_cleanup']=_finish_journal_publication_backups(path,record)
+        _save_pending_publication(path,record)
+        return payload
+
+    except Exception as exc:
+        if record.get('recovery',{}).get('ready'):
+            _rollback_journal_publication(path,record)
+        raise
