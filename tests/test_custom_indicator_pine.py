@@ -36,13 +36,15 @@ def test_custom_indicator_removes_atr_inputs_calculation_and_plot() -> None:
     assert "showAtr" not in source
 
 
-def test_custom_indicator_crypto_only_volume_vwap_and_timing_gates() -> None:
+def test_custom_indicator_volume_vwap_and_timing_gates() -> None:
     source = _source()
     assert 'isCrypto = syminfo.type == "crypto"' in source
     assert "allowBybitTimingLines = isCrypto" in source
     assert "showVwapOnChart = showVwap and isCrypto" in source
     assert "showVwapOffsetOnChart = showVwapOffset and isCrypto" in source
-    assert "showVolumeInPane = showVolume and isCrypto" in source
+    assert 'showVolumeInPane = showVolume and (syminfo.type == "crypto" or syminfo.type == "stock" or syminfo.type == "fund")' in source
+    assert 'showVolume = input.bool(true, "Show Volume", group=volumeGroup)' in source
+    assert 'plot(showVolumeInPane ? volume : na, "Volume", color=volumeColor, style=plot.style_columns, format=format.volume)' in source
     assert "not isForex" not in source
 
 

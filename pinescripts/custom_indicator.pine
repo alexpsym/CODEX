@@ -77,7 +77,7 @@ ema9Color = color.rgb(57, 255, 20)
 ema20Color = color.blue
 showVwapOnChart = showVwap and isCrypto
 showVwapOffsetOnChart = showVwapOffset and isCrypto
-showVolumeInPane = showVolume and isCrypto
+showVolumeInPane = showVolume and (syminfo.type == "crypto" or syminfo.type == "stock" or syminfo.type == "fund")
 
 plot(showEma9 ? ema9 : na, "9 EMA", color=ema9Color, linewidth=2, format=format.price, force_overlay=true)
 plot(showEma20 ? ema20 : na, "20 EMA", color=ema20Color, linewidth=2, format=format.price, force_overlay=true)
