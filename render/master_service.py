@@ -46495,26 +46495,16 @@ async def open_master_journal_file() -> JSONResponse:
     path = _master_journal_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Trading Journal.xlsx does not exist. Import history or create the journal workbook first.")
-    polish: Dict[str, object] = {}
-    try:
-        polish = await asyncio.to_thread(_polish_master_journal_for_excel_open, path)
-    except PermissionError as exc:
-        polish = {
-            "ok": False,
-            "warning": "Trading Journal.xlsx is already open or locked, so rows/columns and recommendation styling could not be refreshed before opening.",
-            "error": str(exc),
-        }
-    except Exception as exc:
-        polish = {
-            "ok": False,
-            "warning": "Trading Journal.xlsx opened, but pre-open row/column sizing and recommendation styling failed.",
-            "error": str(exc),
-        }
+    # Opening is read-only for LTT: formatting belongs to the validated journal
+    # update/publication path, never an in-place openpyxl round trip here.
+    polish = {"ok": True, "skipped": True,
+              "reason": "Formatting is applied only through validated journal updates."}
     try:
         _open_path_with_os(path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to open Trading Journal.xlsx: {exc}")
     return JSONResponse({"ok": True, "master_journal_path": str(path.resolve()), "open_polish": polish})
+
 
 
 

@@ -23365,15 +23365,18 @@ def _saved_journal_names(payload, record):
         if name.get('name', '').startswith(_SAVED_JOURNAL_PREFIX):
             names.remove(name)
     data = base64.b64encode(zlib.compress(json.dumps(record, separators=(',', ':')).encode())).decode()
-    for i, offset in enumerate(range(0, len(data), 2000)):
+    # Excel rejects oversized quoted string constants in defined names. Keep
+    # each literal below 255 characters; legacy chunks remain readable.
+    for i, offset in enumerate(range(0, len(data), 250)):
         node = ET.SubElement(names, ns + 'definedName', name=_SAVED_JOURNAL_PREFIX + f'{i:05d}', hidden='1')
-        node.text = '"' + data[offset:offset + 2000] + '"'
+        node.text = '"' + data[offset:offset + 250] + '"'
     for name, text in record.get('balance_metadata', {}).items():
         for old in list(names):
             if old.get('name') == name:
                 names.remove(old)
         ET.SubElement(names, ns + 'definedName', name=name).text = text
     return _saved_journal_xml(doc, payload)
+
 
 
 def _saved_journal_xml(doc, original):

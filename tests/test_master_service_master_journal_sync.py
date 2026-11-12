@@ -2073,16 +2073,23 @@ def test_open_master_journal_missing_file_returns_404(tmp_path, monkeypatch):
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_open_master_journal_existing_file_opens_exact_path(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, '_trading_journal_import_status_snapshot', lambda: {'running':False})
     target = tmp_path / 'Trading Journal.xlsx'
-    target.write_bytes(b'x')
-    captured = {}
-    monkeypatch.setattr(master_service, '_open_path_with_os', lambda path: captured.setdefault('path', Path(path)))
-    resp = asyncio.run(master_service.open_master_journal_file())
-    import json
-    payload = json.loads(resp.body.decode('utf-8'))
-    assert payload['ok'] is True
-    assert captured['path'] == target
-    assert str(payload['master_journal_path']).endswith('Trading Journal.xlsx')
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: target)
+    wb=Workbook();wb.active['A1']='saved manual content';wb.save(target);wb.close()
+    before=target.read_bytes();captured={}
+    monkeypatch.setattr(master_service, '_polish_master_journal_for_excel_open', lambda *_: (_ for _ in ()).throw(AssertionError('Open must never polish or save')))
+    monkeypatch.setattr(master_service, '_open_path_with_os', lambda path: captured.update(path=Path(path),bytes=Path(path).read_bytes()))
+    coroutine=master_service.open_master_journal_file()
+    try:
+        with pytest.raises(StopIteration) as completed:coroutine.send(None)
+        response=completed.value.value
+    finally:coroutine.close()
+    payload=json.loads(response.body.decode('utf-8'))
+    assert payload['ok'] and payload['open_polish']['skipped']
+    assert captured=={'path':target,'bytes':before} and target.read_bytes()==before
+    assert payload['master_journal_path']==str(target.resolve())
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_open_master_journal_open_failure_returns_500(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
@@ -6741,3 +6748,54 @@ def test_resync_publication_bound_rollback_and_newer_save(tmp_path,monkeypatch):
         else:
             book=load_workbook(path);assert book.active['A1'].value=='generated';book.close()
         assert not ms._fixture_external_attempts
+
+
+def test_excel_recovery_actual_resync_and_open_preserve_package(tmp_path,monkeypatch):
+    import copy,hashlib,zipfile,xml.etree.ElementTree as ET
+    import tools.master_journal_workbook as journal
+    capture=os.environ.get('CODEX_EXCEL_RECOVERY_CAPTURE')
+    if not capture:pytest.skip('Explicitly retained private full-size recovery input required')
+    ms,path=_publication_fixture_service(monkeypatch,tmp_path/'actual-resync',delivery=True)
+    original=Path(capture).read_bytes();path.write_bytes(original)
+    source=journal.read_master_journal_source(path)
+    snapshot=dict(source,stats=ms._compute_journal_stats_with_period_reports(source['items'],source.get('balances') or []))
+    calls={'snapshot':0,'writer':0};real_writer=ms.update_master_journal_workbook_data_only
+    def build(**kwargs):calls['snapshot']+=1;return copy.deepcopy(snapshot)
+    def writer(*args,**kwargs):
+        calls['writer']+=1;print('RECOVERY_STAGE actual_full_size_writer',flush=True)
+        return real_writer(*args,**kwargs)
+    monkeypatch.setattr(ms,'_build_trading_journal_view_snapshot',build)
+    monkeypatch.setattr(ms,'_get_trading_journal_rows',lambda:copy.deepcopy(source['items']))
+    monkeypatch.setattr(ms,'update_master_journal_workbook_data_only',writer)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    print('RECOVERY_STAGE canonical_resync',flush=True)
+    first=ms._run_trading_journal_resync(max_seconds=520)
+    assert first.get('ok'),{k:first.get(k) for k in ['message','master_journal_error','status_code']}
+    assert calls=={'snapshot':1,'writer':1} and not ms.TRADING_JOURNAL_RESYNC_LOCK.locked()
+    with zipfile.ZipFile(capture) as before,zipfile.ZipFile(path) as after:
+        assert before.namelist()==after.namelist()
+        changed=[n for n in before.namelist() if before.read(n)!=after.read(n)]
+        assert changed==['xl/workbook.xml']
+        ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        names=ET.fromstring(after.read('xl/workbook.xml')).find(ns+'definedNames')
+        chunks=[n.text for n in names if n.get('name','').startswith(journal._SAVED_JOURNAL_PREFIX)]
+        assert chunks and max(map(len,chunks))<=252
+    published=path.read_bytes();launched=[]
+    monkeypatch.setattr(ms,'_trading_journal_import_status_snapshot',lambda:{'running':False})
+    monkeypatch.setattr(ms,'_polish_master_journal_for_excel_open',lambda *_:(_ for _ in ()).throw(AssertionError('Open must not write')))
+    monkeypatch.setattr(ms,'_open_path_with_os',lambda p:launched.append(Path(p)))
+    coroutine=ms.open_master_journal_file()
+    try:
+        with pytest.raises(StopIteration) as done:coroutine.send(None)
+        assert json.loads(done.value.value.body)['ok']
+    finally:coroutine.close()
+    assert launched==[path] and path.read_bytes()==published
+    print('RECOVERY_STAGE repeat_fast_path',flush=True)
+    second=ms._run_trading_journal_resync(max_seconds=60)
+    assert second.get('ok') and not second['snapshot_build_ran']
+    assert calls=={'snapshot':1,'writer':1} and path.read_bytes()==published
+    assert ms._read_pending_publication(path) is None and not ms._fixture_external_attempts
+    destination=os.environ.get('CODEX_EXCEL_RECOVERY_OUTPUT')
+    if destination:Path(destination).write_bytes(published)
+    result=os.environ.get('CODEX_EXCEL_RECOVERY_RESULT')
+    if result:Path(result).write_text(json.dumps(dict(ok=True,sha256=hashlib.sha256(published).hexdigest(),bytes=len(published),changed_parts=changed,retained_rows=len(source['items']),open_bytes_preserved=True,fast_path=True),indent=2))

@@ -13834,3 +13834,28 @@ def test_saved_excel_custom_layout_final_package_and_formula_caches(tmp_path, mo
     book=load_workbook(legacy_saved);sheet=book['Trade Log'];r=_trade_log_row_by_id(sheet,'t1')
     assert sheet.cell(r,_header_col(sheet,'Net P/L')).value==777
     assert sheet.cell(r,_header_col(sheet,'Notes')).value is None;book.close()
+
+
+def test_saved_journal_ownership_defined_name_literals_are_excel_safe(tmp_path):
+    import xml.etree.ElementTree as ET,base64,zlib,json
+    import tools.master_journal_workbook as journal
+    from openpyxl import Workbook,load_workbook
+    from io import BytesIO
+    from zipfile import ZipFile
+    book=Workbook();book.active['A1']='authored';source=tmp_path/'metadata.xlsx';book.save(source);book.close()
+    record={'schema':1,'cells':{'saved-clear':None},'seen_ids':['trade-one'],'protected':{str(i):str(i*i)+'value'+str(i*19) for i in range(9000)}}
+    with ZipFile(source) as package:raw=package.read('xl/workbook.xml')
+    changed=journal._saved_journal_names(raw,record)
+    ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    names=[n for n in ET.fromstring(changed).find(ns+'definedNames') if n.get('name','').startswith(journal._SAVED_JOURNAL_PREFIX)]
+    assert len(names)>1 and all(n.text.startswith('"') and n.text.endswith('"') and len(n.text)<=252 for n in names)
+    parsed=Workbook()
+    from openpyxl.workbook.defined_name import DefinedName
+    for n in names:parsed.defined_names.add(DefinedName(n.get('name'),attr_text=n.text))
+    assert journal._saved_journal_ownership(parsed)==record
+    # Existing pre-fix chunks remain readable for exact private recovery.
+    encoded=base64.b64encode(zlib.compress(json.dumps(record,separators=(',',':')).encode())).decode()
+    legacy=Workbook()
+    for i,start in enumerate(range(0,len(encoded),2000)):legacy.defined_names.add(DefinedName(journal._SAVED_JOURNAL_PREFIX+f'{i:05d}',attr_text='"'+encoded[start:start+2000]+'"'))
+    assert journal._saved_journal_ownership(legacy)==record
+    parsed.close();legacy.close()
