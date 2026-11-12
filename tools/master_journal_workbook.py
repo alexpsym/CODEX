@@ -19,6 +19,8 @@ from openpyxl.styles.numbers import BUILTIN_FORMATS_MAX_SIZE
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.cell import range_boundaries
+from openpyxl.utils.cell import coordinate_to_tuple
+from openpyxl.utils.datetime import to_excel
 from openpyxl.utils.indexed_list import IndexedList
 import calendar
 from copy import copy, deepcopy
@@ -7363,6 +7365,14 @@ def _trade_log_header_map(ws) -> Dict[str, int]:
 
 
 def _trade_log_data_start_row(ws) -> int:
+    # Saved custom columns must not make a three-row header look like data.
+    if any(str(ws.cell(1, c).value or '') == 'Row ID' for c in range(1, ws.max_column + 1)):
+        if any(r.min_row == 1 and r.max_row == 3 for r in getattr(ws, 'merged_cells', ()).ranges) if hasattr(ws, 'merged_cells') else False:
+            return 4
+        id_col = next(c for c in range(1, ws.max_column + 1) if str(ws.cell(1,c).value or '') == 'Row ID')
+        subheaders = {v for v in _trade_log_two_row_header_values_for(TRADE_LOG_HEADERS)[1] if v}
+        if ws.cell(3, id_col).value in (None, '') and sum(str(ws.cell(2,c).value or '') in subheaders for c in range(1,ws.max_column+1)) >= 2:
+            return 4
     if _trade_log_has_three_row_headers_for(ws, list(PRE_COUNTER_TREND_TRADE_LOG_HEADERS)):
         return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_three_row_headers(ws):
@@ -16645,7 +16655,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         data_start_row = _trade_log_data_start_row(ws)
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
-            raise RuntimeError('Master Journal Trade Log headers are invalid.')
+            raise RuntimeError('Master Journal Trade Log missing essential mapping: ' + ', '.join(sorted(required - set(idx))))
         items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:
@@ -16659,7 +16669,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         i_pnl = _alias_index(idx, 'Net P/L', 'Net Profit', 'Realized PnL')
         i_result_pct = _alias_index(idx, 'Result %', 'Profit %', 'P/L %', 'Result Percent')
         i_dur = _alias_index(idx, 'Trade Duration (DD:HH:MM:SS)', 'Trade Duration', 'Trade Duration Seconds', 'Duration')
-        max_col = max(1, len(headers))
+        max_col = max([1, *header_map.values()])
         max_row = ws.max_row or 1
         try:
             _min_col, _min_row, dim_max_col, dim_max_row = range_boundaries(ws.calculate_dimension())
@@ -16670,6 +16680,10 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         for row_cells in ws.iter_rows(min_row=data_start_row, max_row=max_row, max_col=max_col):
             r = [cell.value for cell in row_cells]
             if not any(v not in (None,'') for v in r):
+                continue
+            if 'Row ID' in idx and r[idx['Row ID']] in (None, ''):
+                diagnostics.setdefault('authored_rows_without_identity_retained', []).append(
+                    next((getattr(c,'row',None) for c in row_cells if getattr(c,'row',None)), None))
                 continue
             symbol = str(r[idx.get('Symbol',3)] or '').strip()
             side = str(r[idx.get('Side',4)] or '').strip()
@@ -21542,6 +21556,31 @@ def counter_trend_count(rows):
 
 _counter_base_header_map = _trade_log_header_map
 def _trade_log_header_map(ws):
+    actual = {}
+    for r in range(1, min(3, ws.max_row) + 1):
+        for c in range(1, ws.max_column + 1):
+            label = str(ws.cell(r, c).value or '').strip()
+            if label in TRADE_LOG_HEADERS:
+                if label in actual and actual[label] != c:
+                    raise ValueError('Ambiguous saved Trade Log header: ' + label)
+                actual[label] = c
+    if {'Row ID', 'Symbol'}.issubset(actual):
+        canonical_top, canonical_sub = _trade_log_two_row_header_values_for(TRADE_LOG_HEADERS)
+        pairs = {}; group = ''
+        for header, top, sub in zip(TRADE_LOG_HEADERS, canonical_top, canonical_sub):
+            group = top or group
+            if sub:
+                pairs[(group, sub)] = header
+        group = ''
+        for c in range(1, ws.max_column + 1):
+            group = str(ws.cell(1, c).value or '').strip() or group
+            sub = str(ws.cell(2, c).value or '').strip()
+            header = pairs.get((group, sub))
+            if header:
+                if header in actual and actual[header] != c:
+                    raise ValueError('Ambiguous saved grouped Trade Log header: ' + header)
+                actual[header] = c
+        return actual
     if _trade_log_has_three_row_headers_for(ws, list(PRE_COUNTER_TREND_TRADE_LOG_HEADERS)):
         headers = {header: col for col, header in enumerate(PRE_COUNTER_TREND_TRADE_LOG_HEADERS, 1)}
     else:
@@ -22507,10 +22546,14 @@ def build_master_journal_workbook(snapshot,output_path,**kwargs):
     if result.get('ok'):
         result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(output_path,rows)
         result['diagnostics']['symbols_order'] = _order_symbols_candidate(output_path)
+        _saved_journal_seed(output_path)
     return result
 
 _counter_update = update_master_journal_workbook_data_only
 def update_master_journal_workbook_data_only(path,snapshot,*args,**kwargs):
+    if kwargs.get('preserve_existing_layout'):
+        return _saved_journal_update(Path(path), snapshot, incremental=False,
+            statistics_builder=kwargs.get('_statistics_builder'), new_row_ids=kwargs.get('_new_row_ids'))
     original_symbols = Path(path).read_bytes()
     result=_counter_update(path,snapshot,*args,**kwargs)
     if result and result.get('ok'):
@@ -22526,9 +22569,9 @@ def update_master_journal_workbook_data_only(path,snapshot,*args,**kwargs):
 
 _counter_incremental = update_master_journal_workbook_incremental
 def update_master_journal_workbook_incremental(path,changed_rows,**kwargs):
-    result=_counter_incremental(path,changed_rows,**kwargs)
-    if result and result.get('ok'):result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(path,changed_rows)
-    return result
+    if '_statistics_builder' in kwargs:
+        kwargs['statistics_builder'] = kwargs.pop('_statistics_builder')
+    return _saved_journal_update(Path(path), {'items': list(changed_rows)}, incremental=True, **kwargs)
 
 
 # One Counter Trend migration, shared by package installation and normal saves.
@@ -23088,3 +23131,680 @@ def audit_existing_trade_number_package(original,candidate,updates,*,test_update
         for rid in ar:
             if rid not in removed:assert ET.tostring(ar[rid])==ET.tostring(br[rid]),'unrelated/shared relationship changed'
     return True
+
+
+# Ownership is workbook metadata, not a second journal. String-valued defined
+# names survive an Excel save, including row/column moves, without cell formulas.
+_SAVED_JOURNAL_PREFIX = '_LTT_JOURNAL_OWNERSHIP_'
+
+
+def _saved_journal_identity(path):
+    s = Path(path).stat()
+    return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+
+
+def _saved_journal_dependencies(wb, sheet, formula, active=None):
+    """Reuse the bounded deterministic formula contract, extending exact ranges
+    to explicitly named same-workbook sheets. Unknown dependencies fail closed.
+    """
+    coordinates, active = set(), set(active or ())
+    try:
+        for token in Tokenizer(formula).items:
+            if token.type == 'FUNC' and token.subtype == 'OPEN':
+                if token.value.rstrip('(').upper() not in _TRADE_LOG_FORMULA_CACHE_SAFE_FUNCTIONS:
+                    raise ValueError('unproven function ' + token.value)
+            if token.type != 'OPERAND' or token.subtype != 'RANGE':
+                continue
+            ref = token.value
+            owner = sheet
+            if '!' in ref:
+                owner, ref = ref.rsplit('!', 1)
+                owner = owner.strip("'").replace("''", "'")
+            if owner not in wb.sheetnames or '[' in ref:
+                raise ValueError('external or missing sheet dependency')
+            try:
+                bounds = range_boundaries(ref.replace('$', ''))
+            except ValueError:
+                raise ValueError('unresolved named dependency ' + ref)
+            a, b, c, d = bounds
+            if None in bounds or (c - a + 1) * (d - b + 1) > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS:
+                raise ValueError('unbounded dependency')
+            for row in range(b, d + 1):
+                for col in range(a, c + 1):
+                    cell = wb[owner].cell(row, col); key = (owner, cell.coordinate)
+                    coordinates.add(key)
+                    if len(coordinates) > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS:
+                        raise ValueError('dependency budget exceeded')
+                    if cell.data_type == 'f':
+                        if key in active or len(active) > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_DEPTH:
+                            raise ValueError('circular/deep dependency')
+                        nested = _saved_journal_dependencies(wb, owner, cell.value, active | {key})
+                        if not nested['safe']:
+                            raise ValueError(nested['reason'])
+                        coordinates.update(nested['coordinates'])
+        return dict(safe=True, coordinates=coordinates)
+    except Exception as exc:
+        return dict(safe=False, coordinates=coordinates, reason=str(exc))
+
+
+def verify_saved_journal_workbook(path, *, expected_snapshot=None):
+    """Validate the exact previously audited projection rather than imposing a
+    template on authored layout. A changed saved cell requires normal Resync.
+    """
+    wb = load_workbook(path, data_only=False, keep_links=True)
+    try:
+        record = _saved_journal_ownership(wb)
+        if not record.get('preserved'):
+            return None
+        cells, rows, _, issues = _saved_journal_map(wb)
+        if TRADE_LOG_SHEET not in rows:
+            return dict(ok=False, error='saved_journal_identity_mapping', diagnostics={'issues': issues})
+        for key, cell in cells.items():
+            expected = record.get('protected', {}).get(key, record['cells'].get(key))
+            if expected is not None and _saved_journal_value(cell) != expected:
+                return dict(ok=False, error='saved_workbook_changed_since_verification', diagnostics={'sheet': cell.parent.title, 'cell': cell.coordinate})
+        if expected_snapshot is not None:
+            # Check supplied financial inputs by stable identity, not a hash of
+            # incidental diagnostics or caller-side classification defaults.
+            fields = {'Net P/L':'net_profit', 'Commission':'commission', 'Qty':'qty',
+                      'Entry Price':'entry_price', 'Exit Price':'exit_price'}
+            for row in expected_snapshot.get('items', []):
+                identity = str(row.get('id') or '')
+                if identity not in rows[TRADE_LOG_SHEET]:
+                    if identity not in record['seen_ids']:
+                        return dict(ok=False, error='unproven_missing_trade_identity', diagnostics={'id':identity})
+                    continue  # explicitly seen deletion, not stale replay
+                projected = _trade_log_row_values(row)
+                for header, field in fields.items():
+                    key = json.dumps([TRADE_LOG_SHEET, identity, header])
+                    if field not in row or key in record.get('protected', {}) or key not in cells:
+                        continue
+                    actual, expected = _as_float(cells[key].value), _as_float(projected.get(header))
+                    if actual != expected and not (actual in (None,0) and expected in (None,0)):
+                        return dict(ok=False,error='generated_projection_inputs_changed',diagnostics={'id':identity,'field':header})
+        return dict(ok=True, diagnostics={'saved_package_projection_verified': True,
+                    'protected_cell_count': len(record.get('protected', {})), 'mapping_issues': issues,
+                    'sheet_order': wb.sheetnames})
+    finally:
+        wb.close()
+
+
+def _saved_journal_value(cell):
+    value = cell.value
+    if value in (None, ''):
+        return ['blank']
+    if isinstance(value, (datetime, date)):
+        return ['date', value.isoformat()]
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return ['number', str(Decimal(str(value)).normalize())]
+    return [cell.data_type, str(value)]
+
+
+def _saved_journal_ownership(wb):
+    import base64, zlib
+    chunks = sorted((n.name, n.attr_text) for n in wb.defined_names.values()
+                    if n.name.startswith(_SAVED_JOURNAL_PREFIX))
+    if not chunks:
+        return {'schema': 1, 'cells': {}, 'seen_ids': []}
+    try:
+        if [n for n, _ in chunks] != [_SAVED_JOURNAL_PREFIX + f'{i:05d}' for i in range(len(chunks))]:
+            raise ValueError('incomplete chunks')
+        record = json.loads(zlib.decompress(base64.b64decode(''.join(v.strip('"') for _, v in chunks))))
+        if record['schema'] != 1 or not isinstance(record['cells'], dict):
+            raise ValueError('unknown schema')
+        return record
+    except Exception as exc:
+        raise ValueError('Journal ownership metadata is invalid; saved workbook left unchanged') from exc
+
+
+def _saved_journal_map(wb):
+    """Resolve fields using actual saved identities/headers; never column offsets."""
+    cells, rows, headers, issues = {}, {}, {}, []
+    for ws in wb:
+        if ws.title in (TRADE_LOG_SHEET, SYMBOLS_SHEET):
+            marker = 'Row ID' if ws.title == TRADE_LOG_SHEET else 'Symbol'
+            candidates = [(r, [c for c in ws[r] if str(c.value or '').strip() == marker])
+                          for r in range(1, min(ws.max_row, 10) + 1)]
+            candidates = [(r, c[0].column) for r, c in candidates if len(c) == 1]
+            if len(candidates) != 1:
+                issues.append(ws.title + ': missing/ambiguous ' + marker)
+                continue
+            hr, identity_col = candidates[0]
+            hm = {}
+            # Native Trade Log headings can be vertically merged over rows1-3.
+            header_end = max(hr, min(3, ws.max_row)) if marker == 'Row ID' else hr
+            for r in range(1, header_end + 1):
+                for cell in ws[r]:
+                    label = str(cell.value or '').strip()
+                    if label and label in (TRADE_LOG_HEADERS if marker == 'Row ID' else _instrument_averages_header_map(ws)):
+                        if label in hm and hm[label] != cell.column:
+                            raise ValueError(ws.title + ': ambiguous header ' + label)
+                        hm[label] = cell.column
+            if marker == 'Symbol':
+                hm = _instrument_averages_header_map(ws)
+            else:
+                hm = _trade_log_header_map(ws)
+            headers[ws.title] = hm
+            index = {}
+            for r in range(header_end + 1, ws.max_row + 1):
+                identity = str(ws.cell(r, identity_col).value or '').strip()
+                if not identity:
+                    continue
+                if identity in index:
+                    raise ValueError(ws.title + ': duplicate identity ' + identity)
+                index[identity] = r
+                for label, col in hm.items():
+                    cells[json.dumps([ws.title, identity, label])] = ws.cell(r, col)
+            rows[ws.title] = index
+        elif _is_managed_derived_sheet(ws.title):
+            # A unique row label and column heading is required. Ambiguous or
+            # removed sections are left authored, not repaired to a template.
+            proposals = defaultdict(list)
+            markets = {v: k for k, v in _stats1_market_columns(ws).items()} if ws.title == STATS1_SHEET else {}
+            for (r, c), cell in list(ws._cells.items()):
+                if c < 2 or cell.data_type == 'f':
+                    continue
+                label = next((str(ws.cell(r, x).value).strip() for x in range(1, c)
+                              if isinstance(ws.cell(r, x).value, str) and ws.cell(r, x).value.strip()), '')
+                if not label:
+                    continue
+                heading = markets.get(c) or str(ws.cell(1, c).value or '').strip()
+                if not heading:
+                    heading = next((str(ws.cell(y, c).value).strip() for y in range(min(5, r - 1), 0, -1)
+                                    if isinstance(ws.cell(y, c).value, str) and ws.cell(y, c).value.strip()), '')
+                key = json.dumps([ws.title, label, heading or str(c)])
+                proposals[key].append(cell)
+            for key, options in proposals.items():
+                if len(options) == 1:
+                    cells[key] = options[0]
+            if ws.title == STATS2_SHEET:
+                try:
+                    section = _find_anchor_sections(ws, ['Account Balances'])['Account Balances']
+                    hr, hm = _find_dashboard_table_headers(ws, section)
+                    for r in range(hr + 1, section['end_row'] + 1):
+                        account = _canonical_account_label(ws.cell(r, hm['account']).value)
+                        if account:
+                            for label, col in hm.items():
+                                cell = ws.cell(r, col)
+                                for old_key in [k for k, v in cells.items() if v is cell]:
+                                    del cells[old_key]
+                                cells[json.dumps([ws.title, 'balance:' + account, label])] = cell
+                except (KeyError, ValueError, TypeError):
+                    issues.append('STATS2: Account Balances mapping unavailable; saved section retained')
+    return cells, rows, headers, issues
+
+
+def _saved_journal_names(payload, record):
+    import base64, zlib
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    doc = ET.fromstring(payload)
+    names = doc.find(ns + 'definedNames')
+    if names is None:
+        names = ET.Element(ns + 'definedNames')
+        calc = doc.find(ns + 'calcPr')
+        doc.insert(list(doc).index(calc) if calc is not None else len(doc), names)
+    for name in list(names):
+        if name.get('name', '').startswith(_SAVED_JOURNAL_PREFIX):
+            names.remove(name)
+    data = base64.b64encode(zlib.compress(json.dumps(record, separators=(',', ':')).encode())).decode()
+    for i, offset in enumerate(range(0, len(data), 2000)):
+        node = ET.SubElement(names, ns + 'definedName', name=_SAVED_JOURNAL_PREFIX + f'{i:05d}', hidden='1')
+        node.text = '"' + data[offset:offset + 2000] + '"'
+    for name, text in record.get('balance_metadata', {}).items():
+        for old in list(names):
+            if old.get('name') == name:
+                names.remove(old)
+        ET.SubElement(names, ns + 'definedName', name=name).text = text
+    return _saved_journal_xml(doc, payload)
+
+
+def _saved_journal_xml(doc, original):
+    """Keep namespace bindings used by extension attribute values (notably
+    mc:Ignorable); ElementTree otherwise discards unused declarations.
+    Ambiguous rebinding is not safe to round-trip and must leave source intact.
+    """
+    from xml.sax.saxutils import quoteattr
+    bindings = {}
+    for _, (prefix, uri) in ET.iterparse(BytesIO(original), events=['start-ns']):
+        if prefix in bindings and bindings[prefix] != uri:
+            raise ValueError('Scoped XML namespace rebinding requires exact package preservation')
+        bindings[prefix] = uri
+    for prefix, uri in bindings.items():
+        if not re.fullmatch(r'ns\d+', prefix):
+            ET.register_namespace(prefix, uri)
+    result = ET.tostring(doc)
+    end = result.index(b'>')
+    opening = result[:end]
+    extra = b''
+    for prefix, uri in bindings.items():
+        name = 'xmlns' + (':' + prefix if prefix else '')
+        if re.search(rb'\s' + re.escape(name.encode()) + rb'=', opening) is None:
+            extra += (' ' + name + '=' + quoteattr(uri)).encode()
+    return result[:end] + extra + result[end:]
+
+
+def _saved_journal_seed(path):
+    """Only a newly generated workbook establishes initial generator ownership."""
+    from io import BytesIO
+    original = Path(path).read_bytes()
+    wb = load_workbook(BytesIO(original), data_only=False, keep_links=True)
+    try:
+        cells, rows, _, _ = _saved_journal_map(wb)
+        record = dict(schema=1, cells={k: _saved_journal_value(c) for k, c in cells.items()},
+                      seen_ids=list(rows.get(TRADE_LOG_SHEET, {})),
+                      ranges={ws.title: dict(filter=ws.auto_filter.ref,
+                          tables={t.name:t.ref for t in ws.tables.values()}) for ws in wb})
+    finally:
+        wb.close()
+    with zipfile.ZipFile(BytesIO(original)) as source, zipfile.ZipFile(path, 'w') as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == 'xl/workbook.xml':
+                data = _saved_journal_names(data, record)
+            target.writestr(copy(info), data)
+
+
+def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
+                          expected_survivor_row_ids=None, statistics_builder=None, new_row_ids=None):
+    """Prepare the canonical generated projection, then permit exact value deltas
+    against one saved package. All presentation/unknown parts come from source.
+    """
+    from io import BytesIO
+    original = path.read_bytes()
+    original_identity = _saved_journal_identity(path)
+    source_hash = hashlib.sha256(original).hexdigest()
+    source = load_workbook(BytesIO(original), data_only=False, keep_links=True)
+    proposal = path.with_name('.' + path.stem + '.projection-' + uuid4().hex + '.xlsx')
+    candidate = (path.with_name('.' + path.stem + '.saved-edits-' + uuid4().hex + '.xlsx')
+                 if incremental else path.with_suffix('.update-candidate.tmp.xlsx'))
+    try:
+        record = _saved_journal_ownership(source)
+        old, row_index, headers, issues = _saved_journal_map(source)
+        if TRADE_LOG_SHEET not in row_index:
+            raise ValueError('; '.join(issues) or 'Trade Log identity mapping unavailable')
+        incoming = [dict(r) for r in snapshot.get('items', [])]
+        snapshot = deepcopy(snapshot)
+        numbering = assign_trade_numbers_and_create_folders(incoming, workbook_path=path) if incremental else {}
+        balance_expected, balance_metadata = None, {}
+        if incremental:
+            saved = read_master_journal_source(path)
+            by_id = {str(r.get('id')): r for r in saved.get('items', [])}
+            by_id.update({str(r.get('id')): r for r in incoming})
+            snapshot = dict(saved, items=list(by_id.values()))
+            if account_balance is not None:
+                # Use the canonical balance resolver/serializer, not guessed
+                # dashboard coordinates. Its source metadata remains scoped.
+                balance_book = load_workbook(BytesIO(original), keep_links=True)
+                try:
+                    balance_expected = _incremental_update_account_balance(balance_book, account_balance)
+                    snapshot['balances'] = _read_stats2_account_balances(balance_book)
+                    name = _account_balance_source_defined_name(_incremental_account_balance_label(account_balance))
+                    balance_metadata = {name: balance_book.defined_names[name].attr_text} if name in balance_book.defined_names else {}
+                finally:
+                    balance_book.close()
+        # The calculation projection must use the effective saved inputs too.
+        # Protecting a row only at the final ZIP merge would still replay its
+        # deleted or overridden values into statistics and recommendations.
+        saved_rows = {str(r.get('id')): r for r in read_master_journal_source(path).get('items', [])}
+        field_map = {'Open Time':'open_time','Close Time':'close_time','Account':'account',
+            'Symbol':'symbol','Side':'side','Qty':'qty','Entry Price':'entry_price',
+            'Exit Price':'exit_price','Commission':'commission','Net P/L':'net_profit',
+            'Profit %':'result_pct','R-Multiple':'r_multiple','Balance After':'balance_after_trade',
+            'Notes':'notes','Currency':'currency', **TRADE_LOG_MANUAL_FIELD_MAP,
+            **TRADE_NUMBER_FIELD_MAP}
+        preprotected, effective = set(), []
+        for supplied in snapshot.get('items', []):
+            row = dict(supplied); identity = str(row.get('id') or '')
+            if identity in record['seen_ids'] and identity not in row_index[TRADE_LOG_SHEET]:
+                continue
+            saved = saved_rows.get(identity)
+            if saved:
+                for header, field in field_map.items():
+                    key = json.dumps([TRADE_LOG_SHEET, identity, header]); cell = old.get(key)
+                    if cell is None or field not in saved:
+                        continue
+                    previous = record['cells'].get(key)
+                    changed = previous is not None and previous != _saved_journal_value(cell)
+                    uncertain = previous is None
+                    if changed or uncertain or key in record.get('protected', {}):
+                        row[field] = saved[field]; preprotected.add(key)
+                        if field == 'account': row['account_label'] = saved[field]
+            effective.append(row)
+        effective_changed = effective != snapshot.get('items', [])
+        snapshot['items'] = effective
+        if callable(statistics_builder):
+            snapshot['stats'] = statistics_builder(effective, snapshot.get('balances') or [])
+        elif effective_changed:
+            issues.append('Derived refresh deferred: effective saved inputs require the canonical statistics builder')
+        _counter_build(snapshot, proposal, publish_recommendation_assets=False,
+                       recommendation_workbook_path=path, manual_overrides={})
+        # All package transforms finish on the projection before sealing the
+        # saved package. No post-install Counter Trend writer is permitted.
+        additive = proposal.with_name('.' + proposal.name + '.counter.xlsx')
+        _prepare_counter_trend_cells_package(proposal, additive,
+            expected_sha256=hashlib.sha256(proposal.read_bytes()).hexdigest(), rows=snapshot.get('items'))
+        os.replace(additive, proposal)
+        desired_book = load_workbook(proposal, data_only=False, keep_links=True)
+        try:
+            desired, projected_rows, projected_headers, _ = _saved_journal_map(desired_book)
+            operations, protected, inserted, updated = {}, [], [], []
+            owned = dict(record['cells'])
+            protected_values = {}
+            for key, cell in old.items():
+                wanted = desired.get(key)
+                if wanted is None or cell.data_type == 'f':
+                    continue
+                value, next_value = _saved_journal_value(cell), _saved_journal_value(wanted)
+                if key in preprotected:
+                    protected.append([cell.parent.title, cell.coordinate, 'saved calculation input'])
+                    protected_values[key] = value
+                    continue
+                if effective_changed and not callable(statistics_builder) and cell.parent.title not in (TRADE_LOG_SHEET, SYMBOLS_SHEET):
+                    continue
+                previous = owned.get(key)
+                if previous is None:
+                    protected.append([cell.parent.title, cell.coordinate, 'unproven legacy ownership'])
+                    protected_values[key] = value
+                    continue
+                if previous != value:
+                    protected.append([cell.parent.title, cell.coordinate, 'saved edit/clear'])
+                    protected_values[key] = value
+                    continue
+                if value != next_value:
+                    operations.setdefault(cell.parent.title, {})[cell.coordinate] = (wanted, cell)
+                    owned[key] = next_value
+                    if cell.parent.title == TRADE_LOG_SHEET:
+                        updated.append(json.loads(key)[1])
+            # Only genuinely unseen identities append. Seen-but-missing rows
+            # are durable deletion tombstones and cannot replay from snapshots.
+            explicit_ids = {str(r.get('id')) for r in incoming} if incremental else set(new_row_ids or ())
+            for sheet in (TRADE_LOG_SHEET, SYMBOLS_SHEET):
+                if sheet not in row_index or sheet not in projected_rows:
+                    continue
+                ws = source[sheet]
+                last = max([ws.max_row, *[r.max_row for r in ws.merged_cells.ranges]])
+                for identity, row in projected_rows[sheet].items():
+                    if identity in row_index[sheet]:
+                        continue
+                    if sheet == TRADE_LOG_SHEET and (identity in record['seen_ids'] or
+                            (record.get('legacy', not bool(record['cells'])) and identity not in explicit_ids)):
+                        continue
+                    last += 1
+                    if last > 1048576:
+                        raise ValueError('No unoccupied append row in ' + sheet)
+                    template_row = max(row_index[sheet].values(), default=last)
+                    for label, col in headers[sheet].items():
+                        if label not in projected_headers[sheet]:
+                            continue
+                        wanted = desired_book[sheet].cell(row, projected_headers[sheet][label])
+                        target = ws.cell(last, col)
+                        target._style = copy(ws.cell(template_row, col)._style)
+                        operations.setdefault(sheet, {})[target.coordinate] = (wanted, target)
+                        owned[json.dumps([sheet, identity, label])] = _saved_journal_value(wanted)
+                    if sheet == TRADE_LOG_SHEET:
+                        inserted.append(identity)
+            seen = set(record['seen_ids']) | set(row_index[TRADE_LOG_SHEET]) | set(inserted)
+            next_record = dict(schema=1, cells=owned, seen_ids=sorted(seen), protected=protected_values,
+                               preserved=True, balance_metadata=balance_metadata,
+                               ranges=deepcopy(record.get('ranges', {})),
+                               legacy=record.get('legacy', not bool(record['cells'])))
+            audit = _saved_journal_patch(original, candidate, source, operations, next_record)
+        finally:
+            desired_book.close()
+        if _saved_journal_identity(path) != original_identity or path.read_bytes() != original:
+            raise RuntimeError('Source workbook changed during candidate preparation; latest Excel save retained')
+        diagnostics = dict(saved_edits=dict(protected=protected, mapping_issues=issues,
+                            changed_cells=audit, source_sha256=source_hash,
+                            candidate_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest()),
+                           trade_numbering=numbering,
+                           counter_trend='projection completed before final package audit',
+                           preservation_contract_verified=True)
+        result = dict(ok=True, path=str(path), candidate_path=str(candidate), diagnostics=diagnostics,
+                      inserted_row_ids=inserted, updated_row_ids=sorted(set(updated)),
+                      affected_row_ids=sorted({str(r.get('id')) for r in incoming} if incremental else set(inserted + updated)),
+                      deferred_derived_refresh=bool(incremental))
+        if balance_expected:
+            verified = load_workbook(candidate, data_only=True, keep_links=True)
+            try:
+                found = next((b for b in _read_stats2_account_balances(verified)
+                              if _canonical_account_label(b.get('account_label')) == balance_expected['label']), {})
+                if _as_float(found.get('balance')) != balance_expected['balance']:
+                    raise ValueError('Imported balance conflicts with a saved edit; candidate not published')
+                diagnostics['verified_account_balance'] = dict(balance_expected,
+                    account_label=balance_expected['label'],
+                    source=account_balance.get('source') or account_balance.get('balance_source'))
+                result['account_balance_updated'] = True
+            finally:
+                verified.close()
+        if incremental:
+            # Established service reservation surrounds this operation. Recheck
+            # immediately before the single canonical replacement.
+            if _saved_journal_identity(path) != original_identity or path.read_bytes() != original:
+                raise RuntimeError('Workbook changed before incremental publication')
+            os.replace(candidate, path)
+            result['published_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+            result.pop('candidate_path')
+            readback = verify_saved_journal_workbook(path)
+            if not readback or not readback.get('ok'):
+                raise ValueError('Installed incremental workbook failed readback: ' + str(readback))
+        return result
+    finally:
+        source.close()
+        # Failed candidates stay recoverable; only the consumed projection goes.
+        if proposal.exists():
+            proposal.unlink()
+
+
+def _saved_journal_patch(original, candidate, wb, operations, ownership):
+    """Copy every original part; change only declared values/affected caches.
+    Styles, extensions, relationships, tables and worksheet metadata are never
+    round-tripped through openpyxl. Reopen both views AND inverse-audit the ZIP.
+    """
+    from io import BytesIO
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    replacements, changed, extra_parts = {}, set(), {}
+    with zipfile.ZipFile(BytesIO(original)) as package:
+        for sheet, updates in operations.items():
+            part = _worksheet_ooxml_part_name(package, sheet)
+            root = ET.fromstring(package.read(part))
+            data = root.find(ns + 'sheetData')
+            rows = {int(r.get('r')): r for r in data}
+            original_rows = set(rows)
+            added_links = []
+            relpart = _worksheet_relationship_part_name(part)
+            relns = '{http://schemas.openxmlformats.org/package/2006/relationships}'
+            rels_original = package.read(relpart) if relpart in package.namelist() else None
+            rels = ET.fromstring(rels_original) if rels_original else ET.Element(relns+'Relationships')
+            ids = {r.get('Id') for r in rels}
+            for coordinate, (wanted, target) in updates.items():
+                row = rows.get(target.row)
+                if row is None:
+                    row = ET.SubElement(data, ns + 'row', r=str(target.row)); rows[target.row] = row
+                existing = next((c for c in row if c.get('r') == coordinate), None)
+                if existing is not None and existing.find(ns + 'f') is not None:
+                    raise ValueError('Refusing formula overwrite: ' + sheet + '!' + coordinate)
+                if existing is None:
+                    existing = ET.SubElement(row, ns + 'c', r=coordinate, s=str(target.style_id))
+                # Existing cell attributes/extensions are presentation, preserved.
+                for child in list(existing):
+                    if child.tag in {ns + 'v', ns + 'is'}:
+                        existing.remove(child)
+                existing.attrib.pop('t', None)
+                value = wanted.value
+                if value not in (None, ''):
+                    if isinstance(value, (datetime, date)):
+                        value = to_excel(value, wb.epoch)
+                    if isinstance(value, bool):
+                        existing.set('t', 'b'); ET.SubElement(existing, ns + 'v').text = '1' if value else '0'
+                    elif isinstance(value, (int, float, Decimal)):
+                        ET.SubElement(existing, ns + 'v').text = str(value)
+                    else:
+                        existing.set('t', 'inlineStr'); text = ET.SubElement(ET.SubElement(existing, ns + 'is'), ns + 't')
+                        text.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve'); text.text = str(value)
+                changed.add((sheet, coordinate))
+                if target.row not in original_rows and wanted.hyperlink is not None:
+                    link = wanted.hyperlink
+                    hyperlinks = root.find(ns+'hyperlinks')
+                    if hyperlinks is None:
+                        hyperlinks = ET.Element(ns+'hyperlinks')
+                        following = {'printOptions','pageMargins','pageSetup','headerFooter','rowBreaks',
+                            'colBreaks','customProperties','cellWatches','ignoredErrors','smartTags',
+                            'drawing','legacyDrawing','legacyDrawingHF','picture','oleObjects','controls',
+                            'webPublishItems','tableParts','extLst'}
+                        index = next((i for i,c in enumerate(root) if c.tag.rsplit('}',1)[-1] in following),len(root))
+                        root.insert(index,hyperlinks)
+                    node = ET.SubElement(hyperlinks,ns+'hyperlink',ref=coordinate)
+                    if link.target:
+                        i=1
+                        while 'rId'+str(i) in ids:i+=1
+                        rid='rId'+str(i);ids.add(rid)
+                        ET.SubElement(rels,relns+'Relationship',Id=rid,
+                            Type=_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE+'/hyperlink',Target=link.target,TargetMode='External')
+                        node.set('{'+_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE+'}id',rid)
+                    if link.location:node.set('location',link.location)
+                    if link.tooltip:node.set('tooltip',link.tooltip)
+                    if link.display:node.set('display',link.display)
+                    added_links.append(coordinate)
+            for row in data:
+                row[:] = sorted(row, key=lambda c: coordinate_to_tuple(c.get('r'))[1])
+            data[:] = sorted(data, key=lambda r: int(r.get('r')))
+            dimension = root.find(ns + 'dimension')
+            original_dimension = dimension.get('ref') if dimension is not None else None
+            if dimension is not None and updates:
+                minc, minr, maxc, maxr = range_boundaries(original_dimension)
+                maxc = max(maxc, *[target.column for _, target in updates.values()])
+                maxr = max(maxr, *[target.row for _, target in updates.values()])
+                dimension.set('ref', f'{get_column_letter(minc)}{minr}:{get_column_letter(maxc)}{maxr}')
+            # Exact inverse audit: every non-value field of existing cells and
+            # every undeclared element must match the original source tree.
+            inverse = deepcopy(root)
+            before = ET.fromstring(package.read(part))
+            # Extend only a range whose exact previous generated ref is still
+            # present. Authored range changes/criteria/sort state remain intact.
+            filter_node=root.find(ns+'autoFilter'); old_filter=filter_node.get('ref') if filter_node is not None else None
+            range_owner=ownership.get('ranges',{}).get(sheet,{})
+            def grown(ref):
+                a,b,c,d=range_boundaries(ref)
+                if d!=max(original_rows) or c<max((x.column for _,x in updates.values()),default=c):return ref
+                return f'{get_column_letter(a)}{b}:{get_column_letter(c)}{max(d,max(rows))}'
+            if old_filter and range_owner.get('filter')==old_filter:
+                filter_node.set('ref',grown(old_filter));range_owner['filter']=filter_node.get('ref')
+            # Tables use their exact worksheet relationship, not a guessed name.
+            for table_node in root.findall(ns+'tableParts/'+ns+'tablePart'):
+                rid=table_node.get('{'+_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE+'}id')
+                rel=next((r for r in rels if r.get('Id')==rid),None)
+                if rel is None:raise ValueError('Unresolved saved table relationship')
+                target=rel.get('Target','')
+                tablepart=target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join(posixpath.dirname(part),target))
+                raw=package.read(tablepart);table=ET.fromstring(raw);ref=table.get('ref')
+                if (range_owner.get('tables') or {}).get(table.get('name'))!=ref:continue
+                new_ref=grown(ref)
+                if new_ref==ref:continue
+                table.set('ref',new_ref);tf=table.find(ns+'autoFilter')
+                if tf is not None and tf.get('ref')==ref:tf.set('ref',new_ref)
+                restored=deepcopy(table);restored.set('ref',ref)
+                if tf is not None and tf.get('ref')==new_ref:restored.find(ns+'autoFilter').set('ref',ref)
+                if _journal_xml_signature(restored)!=_journal_xml_signature(ET.fromstring(raw)):
+                    raise RuntimeError('Undeclared table change')
+                replacements[tablepart]=_saved_journal_xml(table,raw);range_owner['tables'][table.get('name')]=new_ref
+            # Audit existing cell attributes and non-value children independently
+            # before omitting declared value targets in the inverse audit.
+            original_cells={c.get('r'):c for c in before.findall('.//'+ns+'c')}
+            for cell in root.findall('.//'+ns+'c'):
+                prior=original_cells.get(cell.get('r'))
+                if cell.get('r') not in updates or prior is None:continue
+                left,right=deepcopy(prior),deepcopy(cell)
+                for item in (left,right):
+                    item.attrib.pop('t',None)
+                    for child in list(item):
+                        if child.tag in {ns+'v',ns+'is'}:item.remove(child)
+                if _journal_xml_signature(left)!=_journal_xml_signature(right):raise RuntimeError('Existing cell presentation changed')
+            if added_links:
+                links=inverse.find(ns+'hyperlinks')
+                for item in list(links):
+                    if item.get('ref') in added_links:links.remove(item)
+                if before.find(ns+'hyperlinks') is None and not len(links):inverse.remove(links)
+                # Existing relationships are byte-for-byte retained semantically;
+                # additions can only be the trusted new-row hyperlink targets.
+                expected={r.get('Id') for r in ET.fromstring(rels_original)} if rels_original else set()
+                old_rels=deepcopy(rels)
+                for item in list(old_rels):
+                    if item.get('Id') not in expected:old_rels.remove(item)
+                if rels_original and _journal_xml_signature(old_rels)!=_journal_xml_signature(ET.fromstring(rels_original)):
+                    raise RuntimeError('Existing hyperlink relationships changed')
+                payload=_saved_journal_xml(rels,rels_original) if rels_original else ET.tostring(rels)
+                if rels_original:replacements[relpart]=payload
+                else:
+                    content=ET.fromstring(package.read('[Content_Types].xml'))
+                    if not any(n.get('Extension')=='rels' for n in content):raise ValueError('Missing relationship content type')
+                    extra_parts[relpart]=payload
+            if original_dimension is not None:
+                inverse.find(ns + 'dimension').set('ref', original_dimension)
+            for doc in (inverse, before):
+                sd = doc.find(ns + 'sheetData')
+                for row in list(sd):
+                    for cell in list(row):
+                        if cell.get('r') in updates:
+                            row.remove(cell)
+                    if int(row.get('r')) not in {int(r.get('r')) for r in ET.fromstring(package.read(part)).find(ns + 'sheetData')}:
+                        sd.remove(row)
+            if _journal_xml_signature(inverse) != _journal_xml_signature(before):
+                raise RuntimeError('Undeclared worksheet delta: ' + sheet)
+            replacements[part] = _saved_journal_xml(root, package.read(part))
+        # Preserve unchanged formula/cache bytes. Only proven dependencies of
+        # actual changed inputs lose caches and request Excel recalculation.
+        for ws in wb:
+            part = _worksheet_ooxml_part_name(package, ws.title)
+            root = ET.fromstring(replacements.get(part, package.read(part)))
+            touched = False
+            for cell in root.findall('.//' + ns + 'c'):
+                formula = cell.find(ns + 'f')
+                if formula is None or not changed:
+                    continue
+                signature = _saved_journal_dependencies(wb, ws.title, '=' + (formula.text or ''))
+                if not signature['safe']:
+                    if cell.find(ns + 'v') is not None and cell.find(ns + 'v').text is not None:
+                        raise ValueError('Cannot prove cached formula dependencies at ' + ws.title + '!' + cell.get('r') + ': ' + signature['reason'])
+                    continue
+                if any(coord in changed for coord in signature['coordinates']):
+                    for value in cell.findall(ns + 'v'):
+                        cell.remove(value)
+                    if cell.get('t') in {'str', 'b', 'e'}:
+                        cell.attrib.pop('t')
+                    touched = True
+            if touched:
+                replacements[part] = _saved_journal_xml(root, package.read(part))
+        workbook_xml = _saved_journal_names(package.read('xl/workbook.xml'), ownership)
+        if changed:
+            root = ET.fromstring(workbook_xml); calc = root.find(ns + 'calcPr')
+            if calc is None:
+                calc = ET.SubElement(root, ns + 'calcPr')
+            calc.set('fullCalcOnLoad', '1'); calc.set('forceFullCalc', '1')
+            workbook_xml = _saved_journal_xml(root, package.read('xl/workbook.xml'))
+        replacements['xl/workbook.xml'] = workbook_xml
+        with zipfile.ZipFile(candidate, 'w') as target:
+            target.comment = package.comment
+            for info in package.infolist():
+                target.writestr(copy(info), replacements.get(info.filename, package.read(info.filename)))
+            for name in sorted(extra_parts):target.writestr(name,extra_parts[name])
+        with zipfile.ZipFile(candidate) as installed:
+            if installed.namelist() != package.namelist()+sorted(extra_parts):
+                raise RuntimeError('Workbook package part set changed')
+            for name in package.namelist():
+                if installed.read(name) != replacements.get(name, package.read(name)):
+                    raise RuntimeError('Final package differs from audited delta: ' + name)
+            for name,payload in extra_parts.items():
+                if installed.read(name)!=payload:raise RuntimeError('New link relationship differs from audited delta')
+    for data_only in (False, True):
+        check = load_workbook(candidate, data_only=data_only, keep_links=True)
+        try:
+            if check.sheetnames != wb.sheetnames:
+                raise RuntimeError('Saved workbook sheet order changed')
+            if not data_only:
+                for sheet, updates in operations.items():
+                    for coordinate, (wanted, _) in updates.items():
+                        if _saved_journal_value(check[sheet][coordinate]) != _saved_journal_value(wanted):
+                            raise RuntimeError('Final candidate value mismatch: ' + sheet + '!' + coordinate)
+        finally:
+            check.close()
+    return sorted([sheet + '!' + coordinate for sheet, coordinate in changed])

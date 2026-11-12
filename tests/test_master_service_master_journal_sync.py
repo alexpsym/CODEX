@@ -6438,3 +6438,62 @@ def test_counter_trend_manual_snapshot_statistics_pipeline(tmp_path,monkeypatch)
     assert ms._apply_trading_journal_manual_overrides(saved,cleared)['counter_trend']==''
     with pytest.raises(ms.HTTPException) as exc:ms._normalize_trading_journal_edit_payload({'counter_trend':'perhaps'},for_create=False,existing=saved)
     assert exc.value.status_code==422 and saved['counter_trend']=='Yes'
+
+
+def test_saved_excel_resync_publication_and_newer_save_conflicts(tmp_path, monkeypatch):
+    import types, copy
+    import tools.master_journal_workbook as journal
+    # Exercise the deliverable HEAD+task candidate, not unrelated dirty helpers.
+    ms=types.ModuleType('saved_excel_delivery_fixture'); ms.__file__=str(MODULE_PATH)
+    sys.modules[ms.__name__]=ms
+    loader=importlib.machinery.SourceFileLoader(ms.__name__,str(MODULE_PATH))
+    exec(loader.get_code(ms.__name__),ms.__dict__)
+    for name,value in list(vars(ms).items()):
+        if name.startswith('TRADING_JOURNAL_') and name.endswith('_PATH') and isinstance(value,Path):
+            monkeypatch.setattr(ms,name,tmp_path/(name.lower()+'.json'))
+    path=tmp_path/'Trading Journal.xlsx'
+    row=dict(id='fixture-trade',row_type='trade',account='BYBIT DEMO',account_label='BYBIT DEMO',symbol='XRPUSDT',asset_class='crypto',side='SELL',qty=10,entry_price=1.1,exit_price=1.09,net_profit=0.1,result_pct=1,r_multiple=1,open_time='2026-11-01T00:00:00+00:00',close_time='2026-11-01T01:00:00+00:00',currency='USDT')
+    snapshot=dict(items=[row],balances=[],stats=ms._compute_journal_stats_with_period_reports([row],[]))
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026);monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    journal._counter_build(snapshot,path,publish_recommendation_assets=False);journal._saved_journal_seed(path)
+    wb=load_workbook(path);ws=wb['Trade Log'];h=journal._trade_log_header_map(ws)
+    ws.cell(4,h['Notes']).value='Alex saved'; ws.cell(4,h['Net P/L']).font=copy.copy(ws.cell(4,h['Net P/L']).font)
+    wb.create_sheet('Alex sheet')['A1']='manual content';wb.save(path);wb.close()
+    monkeypatch.setattr(ms,'_master_journal_path',lambda:path)
+    monkeypatch.setattr(ms,'_journal_transaction_lock_path',lambda _p:tmp_path/'journal-fixture-transaction.lock')
+    assert ms._journal_transaction_lock_path(path).parent==tmp_path
+    assert path.resolve().parent==tmp_path.resolve()
+    monkeypatch.setattr(ms,'_master_journal_single_file_mode',lambda:False)
+    monkeypatch.setattr(ms,'TRADING_JOURNAL_LOCAL_DIR',tmp_path)
+    monkeypatch.setattr(ms,'_master_journal_lock_status',lambda _p:{'locked':False})
+    version={'n':0}
+    monkeypatch.setattr(ms,'_journal_source_fingerprint',lambda:{'fixture':version['n']})
+    monkeypatch.setattr(ms,'_build_trading_journal_view_snapshot',lambda **k:copy.deepcopy(snapshot))
+    monkeypatch.setattr(ms,'_build_manual_import_authoritative_snapshot',lambda **k:copy.deepcopy(snapshot))
+    monkeypatch.setattr(ms,'_get_trading_journal_rows',lambda:[copy.deepcopy(row)])
+    monkeypatch.setattr(ms,'_set_trading_journal_rows',lambda rows:None)
+    monkeypatch.setattr(ms,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(ms,'_sync_journal_excel_files_to_github',lambda *a,**k:{'github_sync_enabled':False,'github_sync_ok':True})
+    monkeypatch.setattr(ms,'_schedule_dropbox_upload_state_backup',lambda:None)
+    first=ms._run_trading_journal_resync();assert first['ok'],first
+    second=ms._run_trading_journal_resync();assert second['ok'],second
+    assert not second['snapshot_build_ran']
+    wb=load_workbook(path);assert wb['Trade Log'].cell(4,h['Notes']).value=='Alex saved';assert wb['Alex sheet']['A1'].value=='manual content';wb.close()
+    real=journal._saved_journal_patch; latest={}
+    def excel_save(*a,**k):
+        result=real(*a,**k)
+        wb=load_workbook(path);wb['Alex sheet']['A1']='newer Excel save';wb.save(path);wb.close();latest['bytes']=path.read_bytes()
+        return result
+    monkeypatch.setattr(journal,'_saved_journal_patch',excel_save)
+    version['n']+=1
+    conflict=ms._run_trading_journal_resync();assert not conflict['ok'];assert path.read_bytes()==latest['bytes']
+    assert not ms.TRADING_JOURNAL_RESYNC_LOCK.locked()
+    monkeypatch.setattr(journal,'_saved_journal_patch',real)
+    retry=ms._run_trading_journal_resync();assert retry['ok'],retry
+    wb=load_workbook(path);assert wb['Alex sheet']['A1'].value=='newer Excel save';wb.close()
+    before=path.read_bytes()
+    monkeypatch.setattr(journal,'_saved_journal_patch',lambda *a,**k:(_ for _ in ()).throw(ValueError('injected final audit failure')))
+    version['n']+=1
+    failed=ms._run_trading_journal_resync();assert not failed['ok'];assert path.read_bytes()==before
+    assert not ms.TRADING_JOURNAL_RESYNC_LOCK.locked()

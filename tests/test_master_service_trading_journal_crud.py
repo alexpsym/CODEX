@@ -9083,3 +9083,53 @@ def test_historical_commission_recovery_size_matches_written_artifacts(tmp_path,
     assert rejected['phase']=='recovered' and rejected['sqlite_phase']=='rolled_back_uncommitted'
     assert not (tmp_path/'bounded-oversized/view_cache.candidate').exists()
     assert not (tmp_path/'bounded-oversized/journal.sqlite').exists()
+
+
+def test_saved_excel_actual_import_and_incremental_recovery(temp_state_paths, monkeypatch):
+    import tools.master_journal_workbook as journal
+    from copy import copy
+    initial=_strict_oanda_row('oanda_export:demo:1',net_profit=10.0,balance_after_trade=1516.0)
+    incoming=_strict_oanda_row('oanda_export:demo:1',net_profit=11.0,balance_after_trade=1517.42)
+    added=_strict_oanda_row('oanda_export:demo:2',net_profit=3.0,balance_after_trade=1520.42)
+    balance=_strict_oanda_balance(1520.42)
+    path,state,calls=_install_strict_incremental_import_harness(temp_state_paths,monkeypatch,
+        workbook_rows=[initial],incoming_rows=[incoming,added],incoming_balance=balance)
+    monkeypatch.setattr(master_service,'_journal_transaction_lock_path',lambda _p:temp_state_paths/'journal-fixture-transaction.lock')
+    assert master_service._journal_transaction_lock_path(path).parent==temp_state_paths
+    assert path.resolve().parent==temp_state_paths.resolve()
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026);monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(master_service,'_arm_trading_journal_derived_refresh_timer_locked',lambda *a,**k:None)
+    snapshot=dict(items=[initial],balances=[state['balance']],stats=master_service._compute_journal_stats_with_period_reports([initial],[state['balance']]))
+    path.unlink()  # harness sentinel is not an XLSX; real fixture starts here
+    journal._counter_build(snapshot,path,publish_recommendation_assets=False);journal._saved_journal_seed(path)
+    wb=load_workbook(path);ws=wb['Trade Log'];h=journal._trade_log_header_map(ws)
+    old_filter=ws.auto_filter.ref
+    ws.cell(4,h['Notes']).value='saved before import';font=copy(ws.cell(4,h['Net P/L']).font);font.sz=17;ws.cell(4,h['Net P/L']).font=font
+    wb.create_sheet('Saved sheet')['A1']='preserve';wb.save(path);wb.close()
+    real=journal.update_master_journal_workbook_incremental
+    def actual(path,rows,**kwargs):
+        calls['helper'].append({'rows':rows});result=real(path,rows,**kwargs)
+        state['rows']=journal.read_master_journal_source(path)['items'];state['balance']=dict(kwargs['account_balance'])
+        return result
+    monkeypatch.setattr(master_service,'update_master_journal_workbook_incremental',actual)
+    monkeypatch.setattr(master_service,'read_master_journal_source',journal.read_master_journal_source)
+    result=master_service._import_uploaded_trading_journal_file('oanda_demo.csv',b'x')
+    assert result['ok'],result
+    assert result['incremental_workbook_update_used'] and calls['full_sync']==0
+    wb=load_workbook(path);ws=wb['Trade Log'];h=journal._trade_log_header_map(ws)
+    index={str(ws.cell(r,h['Row ID']).value):r for r in range(4,ws.max_row+1)}
+    assert len([k for k in index if k.startswith('oanda_export:')])==2
+    assert ws.cell(index[initial['id']],h['Notes']).value=='saved before import'
+    assert ws.cell(index[initial['id']],h['Net P/L']).value==11.0
+    assert ws.cell(index[initial['id']],h['Net P/L']).font.sz==17
+    assert wb['Saved sheet']['A1'].value=='preserve';wb.close()
+    assert journal.range_boundaries(ws.auto_filter.ref)[3]>journal.range_boundaries(old_filter)[3]
+    balances=journal.read_master_journal_source(path)['balances']
+    assert next(b for b in balances if str(b.get('account_label') or b.get('account')).upper()=='OANDA DEMO')['balance']==pytest.approx(1520.42)
+    # Replay a durable JSON-committed intent through the existing recovery,
+    # without a scheduler, broker call or a second copy of the new identity.
+    master_service._set_trading_journal_incremental_recovery_phase('json_committed')
+    replay=master_service._replay_trading_journal_incremental_recovery(dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE))
+    assert replay['ok'],replay
+    assert len(journal.read_master_journal_source(path)['items'])==2

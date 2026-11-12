@@ -13681,3 +13681,156 @@ def test_counter_trend_counts_existing_workbook_periods_and_exclusions(tmp_path)
     assert wb['YEARLY REPORT']['B3'].value==2 and wb['2026']['F3'].value==2
     sy=wb['SYMBOLS'];assert [sy.cell(r,4).value for r in range(mjw.INSTRUMENT_AVERAGES_DATA_START_ROW,mjw.INSTRUMENT_AVERAGES_DATA_START_ROW+3)]==[1,1,0]
     wb.close()
+
+
+def test_saved_excel_custom_layout_final_package_and_formula_caches(tmp_path, monkeypatch):
+    import tools.master_journal_workbook as journal
+    import zipfile, hashlib, os
+    from copy import copy
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.worksheet.cell_range import CellRange
+    from openpyxl.worksheet.table import Table
+    from openpyxl.worksheet.filters import FilterColumn, Filters
+    from xml.etree import ElementTree as ET
+    monkeypatch.setattr(journal, 'REPORT_START_YEAR', 2026)
+    monkeypatch.setattr(journal, 'REPORT_MIN_END_YEAR', 2026)
+    monkeypatch.setattr(journal, 'assign_trade_numbers_and_create_folders', lambda *a, **k: {})
+    path = tmp_path / 'Trading Journal.xlsx'; snapshot = sample_snapshot()
+    snapshot['items'][0]['notes']='generated note'
+    journal._counter_build(snapshot, path, publish_recommendation_assets=False)
+    additive = tmp_path / 'counter.xlsx'
+    journal._prepare_counter_trend_cells_package(path, additive, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), rows=snapshot['items'])
+    os.replace(additive, path)
+    wb=load_workbook(path);sy=wb['SYMBOLS']
+    sy.add_table(Table(displayName='GeneratedFixtureSymbols',ref=f'A3:{journal.get_column_letter(sy.max_column)}{sy.max_row}',headerRowCount=0))
+    wb.save(path);wb.close();journal._saved_journal_seed(path)
+    # Reproduce the first destructive writer on a canonical isolated shape.
+    legacy=tmp_path/'legacy-probe.xlsx';legacy.write_bytes(path.read_bytes())
+    canonical=load_workbook(legacy);probe=canonical['Trade Log'];previous=journal._trade_log_header_map(probe)
+    body={r:{h:probe.cell(r,c).value for h,c in previous.items()} for r in range(4,probe.max_row+1)}
+    body[4]['Net P/L']=777;body[4]['Notes']=None
+    for m in list(probe.merged_cells.ranges):probe.unmerge_cells(str(m))
+    if probe.max_column>len(journal.TRADE_LOG_HEADERS):probe.delete_cols(len(journal.TRADE_LOG_HEADERS)+1,probe.max_column-len(journal.TRADE_LOG_HEADERS))
+    for r,values in enumerate(journal._trade_log_three_row_header_values_for(journal.TRADE_LOG_HEADERS),1):
+        for c,value in enumerate(values,1):probe.cell(r,c).value=value
+    for c,h in enumerate(journal.TRADE_LOG_HEADERS,1):
+        letter=journal.get_column_letter(c);probe.merge_cells(f'{letter}{2 if h in journal.MOVE_TO_FIELD_MAP else 1}:{letter}3')
+    for r,values in body.items():
+        for c,h in enumerate(journal.TRADE_LOG_HEADERS,1):probe.cell(r,c).value=values.get(h)
+    canonical.save(legacy);canonical.close()
+    journal._counter_incremental(legacy,[dict(snapshot['items'][0],net_profit=99,notes='upstream replacement')])
+    old=load_workbook(legacy);assert old['Trade Log'].cell(4,_header_col(old['Trade Log'],'Net P/L')).value==99;assert old['Trade Log'].cell(4,_header_col(old['Trade Log'],'Notes')).value=='upstream replacement';old.close()
+    wb = load_workbook(path); ws = wb['Trade Log']
+    merges = [CellRange(str(m)) for m in ws.merged_cells.ranges]
+    for m in list(ws.merged_cells.ranges): ws.unmerge_cells(str(m))
+    ws.insert_cols(7)
+    for m in merges:
+        if m.min_col >= 7: m.shift(col_shift=1)
+        elif m.max_col >= 7: m.max_col += 1
+        ws.merge_cells(str(m))
+    ws['G1'] = 'Alex custom'; ws['G4'] = 'keep my note'
+    row = _trade_log_row_by_id(ws, 't1'); removed = _trade_log_row_by_id(ws, 't2')
+    ws.delete_rows(removed)
+    ws.cell(row, _header_col(ws, 'Qty')).value = None
+    ws.cell(row, _header_col(ws, 'Net P/L')).value = 777
+    ws.cell(row, _header_col(ws, 'Notes')).value = None
+    ws.cell(row, _header_col(ws, 'Commission')).font=Font(size=19,color='FF123456',underline='single')
+    ws.cell(row, _header_col(ws, 'Commission')).fill=PatternFill(fill_type=None)
+    ws.cell(row, _header_col(ws, 'Notes')).comment = Comment('saved comment', 'Alex')
+    ws['G4'].hyperlink = 'https://example.invalid/keep'
+    ws['G4'].font = Font(name='Arial', size=18, color='FF334455', italic=True, underline='double')
+    ws.row_dimensions[25].height = 37; ws['G25'].fill = PatternFill('solid', fgColor='ABCDEF')
+    ws['G8'] = 'custom row without an ID'; ws.column_dimensions['G'].width = 41
+    saved_filter=ws.auto_filter.ref
+    ws.auto_filter.filterColumn.append(FilterColumn(colId=0,filters=Filters(filter=['manual criteria'])))
+    manual = wb.create_sheet('Alex notes'); manual['A1'] = '=1+2'; manual['A2'] = '=1-1'; manual['A3'] = '="text"'; manual['A4'] = '=2+2'
+    manual['C1'] = 1; manual['C2'] = 2; chart=BarChart(); chart.add_data(Reference(manual,min_col=3,min_row=1,max_row=2)); manual.add_chart(chart,'E5')
+    manual.merge_cells('D1:E2'); manual.freeze_panes='B3'; manual.sheet_view.showGridLines=False
+    wb._sheets.remove(manual); wb._sheets.insert(0, manual); wb.active=0
+    wb.save(path); wb.close()
+    # Model Excel's exact cache types, including zero/string/absent caches.
+    frozen = tmp_path / 'frozen.xlsx'
+    with zipfile.ZipFile(path) as before, zipfile.ZipFile(frozen,'w') as out:
+        part=journal._worksheet_ooxml_part_name(before,'Alex notes')
+        tradepart=journal._worksheet_ooxml_part_name(before,'Trade Log')
+        for info in before.infolist():
+            payload=before.read(info.filename)
+            if info.filename==tradepart:
+                payload=payload.replace(b'<worksheet ',b'<worksheet xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:custom="urn:alex:fixture" mc:Ignorable="custom" ',1)
+            if info.filename==part:
+                root=ET.fromstring(payload); ns='{'+journal._SPREADSHEETML_NAMESPACE+'}'
+                for cell in root.findall('.//'+ns+'c'):
+                    if cell.get('r') not in {'A1','A2','A3','A4'}: continue
+                    for v in cell.findall(ns+'v'): cell.remove(v)
+                    if cell.get('r')=='A3': cell.set('t','str')
+                    if cell.get('r')!='A4': ET.SubElement(cell,ns+'v').text={'A1':'3','A2':'0','A3':'text'}[cell.get('r')]
+                payload=ET.tostring(root)
+            out.writestr(copy(info),payload)
+    os.replace(frozen,path); original=path.read_bytes()
+    new=dict(snapshot['items'][0],id='t3',symbol='NEWUSDT',commission=2.0,counter_trend='Yes',trade_number='C0099')
+    real_build=journal._counter_build
+    def accepted_links(*a,**k):
+        result=real_build(*a,**k)
+        generated=Path(a[1]);book=load_workbook(generated);sheet=book['Trade Log'];hm=journal._trade_log_header_map(sheet)
+        for r in range(4,sheet.max_row+1):
+            if sheet.cell(r,hm['Row ID']).value=='t3':sheet.cell(r,hm[journal.TRADE_NUMBER_HEADER]).hyperlink='Trades/C0099/'
+        book.save(generated);book.close();return result
+    monkeypatch.setattr(journal,'_counter_build',accepted_links)
+    changed=dict(snapshot['items'][0],commission=1.234)
+    requested=dict(snapshot,items=[changed,snapshot['items'][1],new])
+    calculations=[]
+    def statistics(rows,balances):
+        calculations.append(rows)
+        assert {r['id'] for r in rows}=={'t1','t3'}
+        assert next(r for r in rows if r['id']=='t1')['net_profit']==777
+        return snapshot['stats']  # numeric engine is existing; verify exact inputs here
+    result=journal.update_master_journal_workbook_data_only(path,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_statistics_builder=statistics)
+    assert calculations
+    assert result['ok'],result; assert path.read_bytes()==original
+    candidate=Path(result['candidate_path'])
+    with zipfile.ZipFile(path) as before,zipfile.ZipFile(candidate) as after:
+        assert b'xmlns:custom="urn:alex:fixture"' in after.read(tradepart)
+        for name in before.namelist():
+            if name.startswith(('xl/charts/','xl/drawings/')) or name==part:
+                assert before.read(name)==after.read(name),name
+    os.replace(candidate,path)
+    assert journal.verify_saved_journal_workbook(path,expected_snapshot=requested)['ok']
+    wb=load_workbook(path);ws=wb['Trade Log']
+    assert wb.sheetnames[0]=='Alex notes'; assert ws['G4'].value=='keep my note'; assert ws['G4'].font.sz==18
+    assert ws['G4'].font.u=='double' and ws['G4'].hyperlink.target=='https://example.invalid/keep'
+    assert ws.cell(row,_header_col(ws,'Qty')).value is None
+    assert ws.cell(row,_header_col(ws,'Net P/L')).value==777
+    assert ws.cell(row,_header_col(ws,'Commission')).value==pytest.approx(1.234)
+    assert ws.cell(row,_header_col(ws,'Commission')).font.sz==19
+    assert ws.cell(row,_header_col(ws,'Commission')).font.u=='single'
+    assert ws.cell(row,_header_col(ws,'Commission')).fill.patternType is None
+    assert ws.cell(row,_header_col(ws,'Notes')).value is None
+    ids=[ws.cell(r,_header_col(ws,'Row ID')).value for r in range(4,ws.max_row+1)]
+    assert 't2' not in ids and ids.count('t3')==1
+    assert _trade_log_row_by_id(ws,'t3')>25 and ws['G8'].value=='custom row without an ID'
+    new_row=_trade_log_row_by_id(ws,'t3')
+    assert ws.cell(new_row,_header_col(ws,journal.TRADE_NUMBER_HEADER)).hyperlink.target=='Trades/C0099/'
+    assert ws.auto_filter.ref==saved_filter and ws.auto_filter.filterColumn[0].filters.filter==['manual criteria']
+    sy=wb['SYMBOLS'];assert journal.range_boundaries(sy.tables['GeneratedFixtureSymbols'].ref)[3]==sy.max_row
+    assert ws['G25'].fill.fgColor.rgb.endswith('ABCDEF') and ws.row_dimensions[25].height==37
+    wb.close()
+    cached=load_workbook(path,data_only=True);assert [cached['Alex notes'][f'A{i}'].value for i in range(1,5)]==[3,0,'text',None];cached.close()
+    repeat=journal.update_master_journal_workbook_data_only(path,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_statistics_builder=statistics)
+    os.replace(repeat['candidate_path'],path)
+    wb=load_workbook(path);assert _trade_log_row_by_id(wb['Trade Log'],'t3')>25
+    assert 't2' not in [wb['Trade Log'].cell(r,_header_col(wb['Trade Log'],'Row ID')).value for r in range(4,wb['Trade Log'].max_row+1)];wb.close()
+    # Predating the ownership feature: even equality on the first refresh is
+    # not proof of generator ownership of a saved manual value or clear.
+    legacy_saved=tmp_path/'legacy-saved.xlsx';book=load_workbook(path)
+    for name in list(book.defined_names):
+        if name.startswith(journal._SAVED_JOURNAL_PREFIX):del book.defined_names[name]
+    book.save(legacy_saved);book.close()
+    legacy_request=dict(snapshot,items=[dict(changed,net_profit=777,notes=None),new])
+    first=journal.update_master_journal_workbook_data_only(legacy_saved,legacy_request,preserve_existing_layout=True,publish_recommendation_assets=False)
+    os.replace(first['candidate_path'],legacy_saved)
+    revised=dict(changed,net_profit=99,notes='broker replacement')
+    imported=journal.update_master_journal_workbook_incremental(legacy_saved,[revised])
+    assert imported['ok'] and imported['diagnostics']['saved_edits']['protected']
+    book=load_workbook(legacy_saved);sheet=book['Trade Log'];r=_trade_log_row_by_id(sheet,'t1')
+    assert sheet.cell(r,_header_col(sheet,'Net P/L')).value==777
+    assert sheet.cell(r,_header_col(sheet,'Notes')).value is None;book.close()

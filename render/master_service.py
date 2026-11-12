@@ -7013,6 +7013,7 @@ def _replay_trading_journal_incremental_recovery(
                 workbook_rows,
                 account_balance=account_balance,
                 expected_survivor_row_ids=sorted(survivor_ids),
+                _statistics_builder=_compute_journal_stats_with_period_reports,
             )
         finally:
             _release_master_journal_workbook_sync()
@@ -42406,6 +42407,9 @@ def _trade_log_filter_coverage(ws) -> Dict[str, object]:
 
 def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "internal", sync_id: Optional[str] = None) -> Dict[str, object]:
     path = _master_journal_path()
+    from tools.master_journal_workbook import _saved_journal_identity, verify_saved_journal_workbook
+    _saved_edits_pin = (_saved_journal_identity(path), hashlib.sha256(path.read_bytes()).hexdigest()) if path.exists() else None
+    _saved_edits_audit = {}
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
     blocked_stage = 'snapshot_build'
@@ -42606,6 +42610,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         snapshot,
                         preserve_existing_layout=True,
                         publish_recommendation_assets=False,
+                        _statistics_builder=_compute_journal_stats_with_period_reports,
+                        _new_row_ids={str(r.get("id") or "") for r in _PENDING_MANUAL_SYNC_ROWS if isinstance(r,dict)},
                     )
                 else:
                     update_result = update_master_journal_workbook_data_only(
@@ -42614,9 +42620,12 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         expected_survivor_row_ids=expected_survivor_row_ids,
                         preserve_existing_layout=True,
                         publish_recommendation_assets=False,
+                        _statistics_builder=_compute_journal_stats_with_period_reports,
+                        _new_row_ids={str(r.get("id") or "") for r in _PENDING_MANUAL_SYNC_ROWS if isinstance(r,dict)},
                     )
                 if not bool((update_result or {}).get("ok")):
                     raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
+                _saved_edits_audit.update((update_result.get("diagnostics") or {}).get("saved_edits") or {})
                 candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
                 if not candidate_path:
                     raise RuntimeError("Trading Journal data-only update failed: candidate workbook path missing.")
@@ -42641,464 +42650,475 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         )
 
         from openpyxl import load_workbook as _load_wb
-        wb = _load_wb(validate_path, data_only=True)
-        _finish_substage("workbook_validation_load")
-        try:
-            for sheet in SHEET_ORDER:
-                if sheet not in wb.sheetnames:
-                    raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
-            trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
-            inst = _symbols_sheet(wb)
-            cal = wb["P&L Calendar"]
-            dash = _stats1_sheet(wb)
-            detail_dash = _stats2_sheet(wb) or dash
-            if "All Trades" in wb.sheetnames:
-                raise RuntimeError("Trading Journal validation failed: legacy 'All Trades' sheet remains after migration.")
-            if "_Trade Meta" in wb.sheetnames:
-                raise RuntimeError("Trading Journal validation failed: '_Trade Meta' must not be present.")
-            if not trade_log.auto_filter or not trade_log.auto_filter.ref:
-                raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
-            trade_log_filter_coverage = _trade_log_filter_coverage(trade_log)
-            if not trade_log_filter_coverage.get("ok"):
-                raise RuntimeError(
-                    "Trading Journal validation failed: Trade Log filter does not "
-                    "cover its populated data; "
-                    f"diagnostics={trade_log_filter_coverage}."
-                )
-            if not inst.auto_filter or not inst.auto_filter.ref:
-                raise RuntimeError("Trading Journal validation failed: SYMBOLS filter missing.")
-            def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
-                metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
-                for key in ("is_hidden", "hidden", "_hidden"):
-                    if _is_test_trade_value(row.get(key)) or _is_test_trade_value(metrics.get(key)):
-                        return True
-                return False
-
-            validation_trade_rows = [
-                _repair_or_flag_zero_trade_qty(dict(r))
-                for r in (snapshot.get("items") or [])
-                if isinstance(r, dict) and _row_type(r) == "trade"
-            ]
-            validation_trade_rows, _validation_dedupe_diagnostics = (
-                _dedupe_trade_rows_by_execution(validation_trade_rows)
-            )
-            visible_trade_rows = [
-                row for row in validation_trade_rows
-                if not _is_hidden_trade_row(row)
-            ]
-            crypto_zero_qty_ids: List[str] = []
-            fx_zero_qty_ids: List[str] = []
-            for row in visible_trade_rows:
-                qty = _to_float(row.get("qty"))
-                if qty != 0:
-                    continue
-                acct = str(row.get("account") or row.get("account_label") or "").upper()
-                sym = str(row.get("symbol") or "").upper()
-                rid = str(row.get("id") or sym or "?")
-                is_fx = any(x in acct for x in ("OANDA", "PEPPERSTONE")) or ("/" in sym and len(sym) == 7)
-                if is_fx:
-                    fx_zero_qty_ids.append(rid)
-                else:
-                    crypto_zero_qty_ids.append(rid)
-            if crypto_zero_qty_ids:
-                raise RuntimeError(
-                    "Trading Journal validation failed: unrepaired crypto Qty=0 rows detected "
-                    f"(sample row IDs: {', '.join(crypto_zero_qty_ids[:5])})."
-                )
-            workbook_row_ids: Set[str] = set()
-            if visible_trade_rows:
-                trade_headers = _trade_log_header_map(trade_log)
-                trade_data_start = _trade_log_data_start_row(trade_log)
-                symbol_col = trade_headers.get("Symbol")
-                row_id_col = trade_headers.get("Row ID")
-                if not symbol_col:
-                    raise RuntimeError("Trading Journal validation failed: Trade Log Symbol column missing.")
-                populated_symbol_rows = 0
-                for rr in range(trade_data_start, trade_log.max_row + 1):
-                    symbol = str(trade_log.cell(rr, symbol_col).value or "").strip()
-                    if symbol:
-                        populated_symbol_rows += 1
-                    if row_id_col:
-                        rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
-                        if rid:
-                            workbook_row_ids.add(rid)
-                if populated_symbol_rows <= 0:
-                    raise RuntimeError("Trading Journal validation failed: Trade Log is blank despite source rows.")
-                expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
-                if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
-                    raise RuntimeError("Trading Journal validation failed: Row ID metadata is required in master_journal mode.")
-                if expected_ids and not expected_ids.issubset(workbook_row_ids):
-                    raise RuntimeError("Trading Journal validation failed: Trade Log row IDs do not match source snapshot.")
-                open_col = trade_headers.get("Open Time")
-                close_col = trade_headers.get("Close Time")
-                dur_col = trade_headers.get("Trade Duration (DD:HH:MM:SS)")
-                currency_cols = [trade_headers.get("Commission"), trade_headers.get("Net P/L")]
-                def _trade_duration_cell_seconds(cell) -> Optional[float]:
-                    value = cell.value
-                    if value in (None, ""):
-                        return None
-                    if _is_ddhhmmss_number_format(cell.number_format):
-                        parsed_ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
-                        if parsed_ddhhmmss is not None:
-                            return float(parsed_ddhhmmss)
-                    parsed_text = _parse_duration_text(value)
-                    if parsed_text is not None:
-                        return float(parsed_text)
-                    parsed_ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
-                    return float(parsed_ddhhmmss) if parsed_ddhhmmss is not None else None
-                for rr in range(trade_data_start, trade_log.max_row + 1):
-                    if open_col:
-                        ov = trade_log.cell(rr, open_col).value
-                        if isinstance(ov, str) and "T" in ov:
-                            raise RuntimeError("Trading Journal validation failed: Trade Log Open Time contains ISO 'T' string.")
-                    if close_col:
-                        cv = trade_log.cell(rr, close_col).value
-                        if isinstance(cv, str) and "T" in cv:
-                            raise RuntimeError("Trading Journal validation failed: Trade Log Close Time contains ISO 'T' string.")
-                    if dur_col:
-                        dur_cell = trade_log.cell(rr, dur_col)
-                        if dur_cell.value not in (None, "") and _trade_duration_cell_seconds(dur_cell) is None:
-                            raise RuntimeError("Trading Journal validation failed: Trade Log duration cells must be duration text or numeric DDHHMMSS.")
-                if open_col and close_col and dur_col:
-                    expected_duration_ids: Set[str] = set()
-                    for row in visible_trade_rows:
-                        if not _is_duration_validated_trade_row(row):
-                            continue
-                        rid = str(row.get("id") or "").strip()
-                        if not rid:
-                            continue
-                        if str(row.get("open_time") or "").strip() and str(row.get("close_time") or "").strip():
-                            expected_duration_ids.add(rid)
-                    if expected_duration_ids and row_id_col:
-                        row_lookup = {str(r.get("id") or "").strip(): r for r in visible_trade_rows if isinstance(r, dict)}
-                        missing_duration_details: List[Dict[str, object]] = []
-                        for rr in range(trade_data_start, trade_log.max_row + 1):
-                            rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
-                            if rid not in expected_duration_ids:
-                                continue
-                            dur_cell = trade_log.cell(rr, dur_col)
-                            dv = dur_cell.value
-                            if _trade_duration_cell_seconds(dur_cell) is None:
-                                src = row_lookup.get(rid) or {}
-                                missing_duration_details.append({
-                                    "row_id": rid,
-                                    "row_type": _row_type(src) if isinstance(src, dict) else "",
-                                    "open_time": src.get("open_time") if isinstance(src, dict) else "",
-                                    "close_time": src.get("close_time") if isinstance(src, dict) else "",
-                                    "duration_cell_value": dv,
-                                })
-                        if missing_duration_details:
-                            raise RuntimeError(
-                                "Trading Journal validation failed: Trade Log duration column blank/unparseable for trade rows with valid open/close timestamps "
-                                f"(sample row IDs: {', '.join(str(d.get('row_id') or '') for d in missing_duration_details[:5])}; "
-                                f"details={missing_duration_details[:3]})."
-                            )
-                for cc in [c for c in currency_cols if c]:
-                    for rr in range(trade_data_start, trade_log.max_row + 1):
-                        fmt = str(trade_log.cell(rr, cc).number_format or "")
-                        if "UNKNOWN" in fmt:
-                            col_name = next((name for name, col in trade_headers.items() if col == cc), f"col_{cc}")
-                            sym = str(trade_log.cell(rr, trade_headers.get("Symbol")).value or "").strip() if trade_headers.get("Symbol") else ""
-                            acct = str(trade_log.cell(rr, trade_headers.get("Account")).value or "").strip() if trade_headers.get("Account") else ""
-                            row_type = str(trade_log.cell(rr, trade_headers.get("Row Type")).value or "").strip() if trade_headers.get("Row Type") else ""
-                            raise RuntimeError(
-                                "Trading Journal validation failed: Trade Log currency format contains UNKNOWN "
-                                f"(row={rr}, column={col_name}, account={acct or '—'}, symbol={sym or '—'}, row_type={row_type or '—'})."
-                            )
-            stats = snapshot.get("stats") or {}
-            by_instrument = stats.get("by_instrument") or []
-            if by_instrument:
-                instrument_header_map = {
-                    str(name).strip().lower(): col
-                    for name, col in _instrument_averages_header_map(inst).items()
-                }
-                symbol_idx = instrument_header_map.get("symbol")
-                trades_idx = next(
-                    (instrument_header_map[candidate] for candidate in ("trades", "total trades", "total_trades")
-                     if candidate in instrument_header_map),
-                    None,
-                )
-                if not symbol_idx or not trades_idx:
-                    raise RuntimeError("Trading Journal validation failed: SYMBOLS Symbol/Trades headers missing.")
-                has_instrument_data = False
-                for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
-                    symbol = str(inst.cell(rr, symbol_idx).value or "").strip()
-                    trades = _safe_float(inst.cell(rr, trades_idx).value)
-                    if symbol and trades is not None:
-                        has_instrument_data = True
-                        break
-                if not has_instrument_data:
-                    raise RuntimeError("Trading Journal validation failed: SYMBOLS is blank despite instrument stats.")
-                def _inst_col(*aliases: str) -> int | None:
-                    for a in aliases:
-                        if a in instrument_header_map:
-                            return instrument_header_map[a]
-                    return None
-                inst_dur_cols = [
-                    _inst_col("shortest duration (dd:hh:mm:ss)", "shortest (dd:hh:mm:ss)"),
-                    _inst_col("avg duration (dd:hh:mm:ss)"),
-                    _inst_col("longest duration (dd:hh:mm:ss)", "longest (dd:hh:mm:ss)"),
-                ]
-                if all(c is not None for c in inst_dur_cols):
-                    inst_dur_cols = [int(c) for c in inst_dur_cols]
-                    has_any_duration_stat = any(
-                        any(_safe_float(rec.get(k)) is not None for k in ("min_trade_duration_seconds", "avg_trade_duration_seconds", "max_trade_duration_seconds"))
-                        for rec in by_instrument if isinstance(rec, dict)
+        if _saved_edits_audit:
+            if (_saved_journal_identity(path), hashlib.sha256(path.read_bytes()).hexdigest()) != _saved_edits_pin:
+                raise RuntimeError('Workbook changed while preparing saved-edit candidate; latest Excel save retained')
+            if hashlib.sha256(validate_path.read_bytes()).hexdigest() != _saved_edits_audit['candidate_sha256']:
+                raise RuntimeError('Final saved-edit package changed after complete delta audit')
+            verification = verify_saved_journal_workbook(validate_path, expected_snapshot=snapshot)
+            if not verification or not verification.get('ok'):
+                raise RuntimeError('Saved-edit candidate verification failed: ' + str(verification))
+            validation_warnings.extend(['Preserved saved edit: ' + '!'.join(item[:2]) for item in _saved_edits_audit['protected']])
+            validation_warnings.extend(_saved_edits_audit['mapping_issues'])
+        else:
+            wb = _load_wb(validate_path, data_only=True)
+            _finish_substage("workbook_validation_load")
+            try:
+                for sheet in SHEET_ORDER:
+                    if sheet not in wb.sheetnames:
+                        raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
+                trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
+                inst = _symbols_sheet(wb)
+                cal = wb["P&L Calendar"]
+                dash = _stats1_sheet(wb)
+                detail_dash = _stats2_sheet(wb) or dash
+                if "All Trades" in wb.sheetnames:
+                    raise RuntimeError("Trading Journal validation failed: legacy 'All Trades' sheet remains after migration.")
+                if "_Trade Meta" in wb.sheetnames:
+                    raise RuntimeError("Trading Journal validation failed: '_Trade Meta' must not be present.")
+                if not trade_log.auto_filter or not trade_log.auto_filter.ref:
+                    raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
+                trade_log_filter_coverage = _trade_log_filter_coverage(trade_log)
+                if not trade_log_filter_coverage.get("ok"):
+                    raise RuntimeError(
+                        "Trading Journal validation failed: Trade Log filter does not "
+                        "cover its populated data; "
+                        f"diagnostics={trade_log_filter_coverage}."
                     )
-                    any_duration_cells = False
-                    def _symbols_duration_seconds(value: object, number_format: object = None) -> float | None:
+                if not inst.auto_filter or not inst.auto_filter.ref:
+                    raise RuntimeError("Trading Journal validation failed: SYMBOLS filter missing.")
+                def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
+                    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+                    for key in ("is_hidden", "hidden", "_hidden"):
+                        if _is_test_trade_value(row.get(key)) or _is_test_trade_value(metrics.get(key)):
+                            return True
+                    return False
+
+                validation_trade_rows = [
+                    _repair_or_flag_zero_trade_qty(dict(r))
+                    for r in (snapshot.get("items") or [])
+                    if isinstance(r, dict) and _row_type(r) == "trade"
+                ]
+                validation_trade_rows, _validation_dedupe_diagnostics = (
+                    _dedupe_trade_rows_by_execution(validation_trade_rows)
+                )
+                visible_trade_rows = [
+                    row for row in validation_trade_rows
+                    if not _is_hidden_trade_row(row)
+                ]
+                crypto_zero_qty_ids: List[str] = []
+                fx_zero_qty_ids: List[str] = []
+                for row in visible_trade_rows:
+                    qty = _to_float(row.get("qty"))
+                    if qty != 0:
+                        continue
+                    acct = str(row.get("account") or row.get("account_label") or "").upper()
+                    sym = str(row.get("symbol") or "").upper()
+                    rid = str(row.get("id") or sym or "?")
+                    is_fx = any(x in acct for x in ("OANDA", "PEPPERSTONE")) or ("/" in sym and len(sym) == 7)
+                    if is_fx:
+                        fx_zero_qty_ids.append(rid)
+                    else:
+                        crypto_zero_qty_ids.append(rid)
+                if crypto_zero_qty_ids:
+                    raise RuntimeError(
+                        "Trading Journal validation failed: unrepaired crypto Qty=0 rows detected "
+                        f"(sample row IDs: {', '.join(crypto_zero_qty_ids[:5])})."
+                    )
+                workbook_row_ids: Set[str] = set()
+                if visible_trade_rows:
+                    trade_headers = _trade_log_header_map(trade_log)
+                    trade_data_start = _trade_log_data_start_row(trade_log)
+                    symbol_col = trade_headers.get("Symbol")
+                    row_id_col = trade_headers.get("Row ID")
+                    if not symbol_col:
+                        raise RuntimeError("Trading Journal validation failed: Trade Log Symbol column missing.")
+                    populated_symbol_rows = 0
+                    for rr in range(trade_data_start, trade_log.max_row + 1):
+                        symbol = str(trade_log.cell(rr, symbol_col).value or "").strip()
+                        if symbol:
+                            populated_symbol_rows += 1
+                        if row_id_col:
+                            rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
+                            if rid:
+                                workbook_row_ids.add(rid)
+                    if populated_symbol_rows <= 0:
+                        raise RuntimeError("Trading Journal validation failed: Trade Log is blank despite source rows.")
+                    expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
+                    if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
+                        raise RuntimeError("Trading Journal validation failed: Row ID metadata is required in master_journal mode.")
+                    if expected_ids and not expected_ids.issubset(workbook_row_ids):
+                        raise RuntimeError("Trading Journal validation failed: Trade Log row IDs do not match source snapshot.")
+                    open_col = trade_headers.get("Open Time")
+                    close_col = trade_headers.get("Close Time")
+                    dur_col = trade_headers.get("Trade Duration (DD:HH:MM:SS)")
+                    currency_cols = [trade_headers.get("Commission"), trade_headers.get("Net P/L")]
+                    def _trade_duration_cell_seconds(cell) -> Optional[float]:
+                        value = cell.value
                         if value in (None, ""):
                             return None
-                        parsed = _parse_duration_text(value)
-                        if parsed is not None:
-                            return float(parsed)
-                        if isinstance(value, (int, float)):
-                            ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
-                            if ddhhmmss is not None:
-                                return float(ddhhmmss)
-                        return None
-                    for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
-                        vals = [inst.cell(rr, c).value for c in inst_dur_cols]
-                        parsed = [
-                            _symbols_duration_seconds(inst.cell(rr, c).value, inst.cell(rr, c).number_format)
-                            for c in inst_dur_cols
-                        ]
-                        nonblank = [v for v in vals if v not in (None, "")]
-                        parsed_present = [v for v in parsed if v is not None]
-                        if parsed_present:
-                            any_duration_cells = True
-                        if nonblank and len(parsed_present) != len(nonblank):
-                            raise RuntimeError("Trading Journal validation failed: SYMBOLS durations must be duration text or numeric DDHHMMSS.")
-                        if len(parsed_present) == 3 and not (parsed_present[0] <= parsed_present[1] <= parsed_present[2]):
-                            raise RuntimeError("Trading Journal validation failed: SYMBOLS duration order must satisfy Shortest <= Avg <= Longest.")
-                    if has_any_duration_stat and not any_duration_cells:
-                        raise RuntimeError("Trading Journal validation failed: SYMBOLS duration columns are blank despite duration stats.")
-                net_col = instrument_header_map.get("net p/l %")
-                avg_col = instrument_header_map.get("avg p/l %")
-                if net_col and avg_col:
-                    has_result_pct_stats = any(
-                        (_safe_float(rec.get("net_result_pct")) is not None) or (_safe_float(rec.get("avg_result_pct")) is not None)
-                        for rec in by_instrument if isinstance(rec, dict)
-                    )
-                    if has_result_pct_stats:
-                        has_op = False
-                        for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
-                            if isinstance(inst.cell(rr, net_col).value, (int, float)) or isinstance(inst.cell(rr, avg_col).value, (int, float)):
-                                has_op = True
-                                break
-                        if not has_op:
-                            raise RuntimeError("Trading Journal validation failed: SYMBOLS Net/Avg P/L % columns are blank despite result_pct stats.")
-            non_test_with_results = []
-            from tools.master_journal_workbook import _as_date as _journal_as_date
-            for r in visible_trade_rows:
-                if _is_test_trade_value(r.get("is_test_trade")):
-                    continue
-                ts_value = r.get("close_time") or r.get("open_time")
-                dt = _journal_as_date(ts_value) if ts_value else None
-                if not dt:
-                    continue
-                if _safe_float(r.get("result_pct")) is None:
-                    continue
-                non_test_with_results.append(r)
-            _finish_substage("validation_instrument_averages")
-            if non_test_with_results:
-                expected_year_months: Set[Tuple[int, int]] = set()
-                for row in non_test_with_results:
-                    ts_value = row.get("close_time") or row.get("open_time")
-                    dt = _journal_as_date(ts_value) if ts_value else None
-                    if dt:
-                        expected_year_months.add((int(dt.year), int(dt.month)))
-                missing_calendar_cells = _calendar_missing_expected_pl_cells(
-                    cal,
-                    expected_year_months,
-                )
-                if missing_calendar_cells:
-                    raise RuntimeError(
-                        "Trading Journal validation failed: P&L Calendar missing "
-                        "expected dated P/L cells: "
-                        + ", ".join(
-                            f"{year:04d}-{month:02d}"
-                            for year, month in missing_calendar_cells[:20]
-                        )
-                        + "."
-                    )
-            _finish_substage("validation_calendar")
-            expected_reports = expected_report_sheet_names(snapshot)
-            for sheet_name in expected_reports:
-                if sheet_name not in wb.sheetnames:
-                    raise RuntimeError(f"Trading Journal validation failed: missing required report sheet '{sheet_name}'.")
-                report_ws = wb[sheet_name]
-                if report_ws.max_column < 2 or report_ws.max_row < 53:
-                    raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' is missing its metric layout.")
-                if not str(report_ws.cell(1, 2).value or "").strip():
-                    raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' has blank report headers.")
-                metric_labels = [
-                    str(report_ws.cell(rr, 1).value or "").strip()
-                    for rr in range(2, report_ws.max_row + 1)
-                ]
-                required_report_labels = {
-                    "Trades",
-                    "Short break-even",
-                    "Min drawdown",
-                    "Total Commission",
-                }
-                missing_report_labels = sorted(required_report_labels - set(metric_labels))
-                if missing_report_labels:
-                    raise RuntimeError(
-                        f"Trading Journal validation failed: report sheet '{sheet_name}' "
-                        f"is missing required metric labels {missing_report_labels}."
-                    )
-            _finish_substage("validation_reports")
-            balances = snapshot.get("balances") or []
-            if balances:
-                anchor = None
-                for rr in range(1, detail_dash.max_row + 1):
-                    for cc in range(1, detail_dash.max_column + 1):
-                        if str(detail_dash.cell(rr, cc).value or "").strip().lower() == "account balances":
-                            anchor = (rr, cc)
-                            break
-                    if anchor:
-                        break
-                if not anchor:
-                    raise RuntimeError("Trading Journal validation failed: Account Balances section anchor missing.")
-                header_row = None
-                header_map: Dict[str, int] = {}
-                for rr in range(anchor[0] + 1, min(detail_dash.max_row + 1, anchor[0] + 12)):
-                    row_map: Dict[str, int] = {}
-                    for cc in range(anchor[1], min(detail_dash.max_column + 1, anchor[1] + 8)):
-                        token = str(detail_dash.cell(rr, cc).value or "").strip().lower()
-                        if token in {"account", "balance", "currency", "as of", "as_of"}:
-                            if token == "as_of":
-                                token = "as of"
-                            row_map[token] = cc
-                    if {"account", "balance", "currency"}.issubset(set(row_map.keys())):
-                        header_row = rr
-                        header_map = row_map
-                        break
-                if not header_row:
-                    raise RuntimeError("Trading Journal validation failed: Account Balances headers missing.")
-                canonical_balances = _canonicalize_and_dedupe_balances([b for b in balances if isinstance(b, dict)])
-                expected_balances: Dict[str, Dict[str, object]] = {}
-                for b in canonical_balances:
-                    if not isinstance(b, dict):
-                        continue
-                    account_label = str(b.get("account_label") or b.get("account") or "").strip()
-                    if not account_label:
-                        continue
-                    expected_balances[account_label.upper()] = b
-                actual_rows: Dict[str, Dict[str, object]] = {}
-                for rr in range(header_row + 1, min(detail_dash.max_row + 1, header_row + 80)):
-                    account = str(detail_dash.cell(rr, header_map["account"]).value or "").strip()
-                    if not account:
-                        continue
-                    actual_rows[account.upper()] = {
-                        "row": rr,
-                        "account": account,
-                        "balance": detail_dash.cell(rr, header_map["balance"]).value,
-                        "currency": str(detail_dash.cell(rr, header_map["currency"]).value or "").strip(),
+                        if _is_ddhhmmss_number_format(cell.number_format):
+                            parsed_ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
+                            if parsed_ddhhmmss is not None:
+                                return float(parsed_ddhhmmss)
+                        parsed_text = _parse_duration_text(value)
+                        if parsed_text is not None:
+                            return float(parsed_text)
+                        parsed_ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
+                        return float(parsed_ddhhmmss) if parsed_ddhhmmss is not None else None
+                    for rr in range(trade_data_start, trade_log.max_row + 1):
+                        if open_col:
+                            ov = trade_log.cell(rr, open_col).value
+                            if isinstance(ov, str) and "T" in ov:
+                                raise RuntimeError("Trading Journal validation failed: Trade Log Open Time contains ISO 'T' string.")
+                        if close_col:
+                            cv = trade_log.cell(rr, close_col).value
+                            if isinstance(cv, str) and "T" in cv:
+                                raise RuntimeError("Trading Journal validation failed: Trade Log Close Time contains ISO 'T' string.")
+                        if dur_col:
+                            dur_cell = trade_log.cell(rr, dur_col)
+                            if dur_cell.value not in (None, "") and _trade_duration_cell_seconds(dur_cell) is None:
+                                raise RuntimeError("Trading Journal validation failed: Trade Log duration cells must be duration text or numeric DDHHMMSS.")
+                    if open_col and close_col and dur_col:
+                        expected_duration_ids: Set[str] = set()
+                        for row in visible_trade_rows:
+                            if not _is_duration_validated_trade_row(row):
+                                continue
+                            rid = str(row.get("id") or "").strip()
+                            if not rid:
+                                continue
+                            if str(row.get("open_time") or "").strip() and str(row.get("close_time") or "").strip():
+                                expected_duration_ids.add(rid)
+                        if expected_duration_ids and row_id_col:
+                            row_lookup = {str(r.get("id") or "").strip(): r for r in visible_trade_rows if isinstance(r, dict)}
+                            missing_duration_details: List[Dict[str, object]] = []
+                            for rr in range(trade_data_start, trade_log.max_row + 1):
+                                rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
+                                if rid not in expected_duration_ids:
+                                    continue
+                                dur_cell = trade_log.cell(rr, dur_col)
+                                dv = dur_cell.value
+                                if _trade_duration_cell_seconds(dur_cell) is None:
+                                    src = row_lookup.get(rid) or {}
+                                    missing_duration_details.append({
+                                        "row_id": rid,
+                                        "row_type": _row_type(src) if isinstance(src, dict) else "",
+                                        "open_time": src.get("open_time") if isinstance(src, dict) else "",
+                                        "close_time": src.get("close_time") if isinstance(src, dict) else "",
+                                        "duration_cell_value": dv,
+                                    })
+                            if missing_duration_details:
+                                raise RuntimeError(
+                                    "Trading Journal validation failed: Trade Log duration column blank/unparseable for trade rows with valid open/close timestamps "
+                                    f"(sample row IDs: {', '.join(str(d.get('row_id') or '') for d in missing_duration_details[:5])}; "
+                                    f"details={missing_duration_details[:3]})."
+                                )
+                    for cc in [c for c in currency_cols if c]:
+                        for rr in range(trade_data_start, trade_log.max_row + 1):
+                            fmt = str(trade_log.cell(rr, cc).number_format or "")
+                            if "UNKNOWN" in fmt:
+                                col_name = next((name for name, col in trade_headers.items() if col == cc), f"col_{cc}")
+                                sym = str(trade_log.cell(rr, trade_headers.get("Symbol")).value or "").strip() if trade_headers.get("Symbol") else ""
+                                acct = str(trade_log.cell(rr, trade_headers.get("Account")).value or "").strip() if trade_headers.get("Account") else ""
+                                row_type = str(trade_log.cell(rr, trade_headers.get("Row Type")).value or "").strip() if trade_headers.get("Row Type") else ""
+                                raise RuntimeError(
+                                    "Trading Journal validation failed: Trade Log currency format contains UNKNOWN "
+                                    f"(row={rr}, column={col_name}, account={acct or '—'}, symbol={sym or '—'}, row_type={row_type or '—'})."
+                                )
+                stats = snapshot.get("stats") or {}
+                by_instrument = stats.get("by_instrument") or []
+                if by_instrument:
+                    instrument_header_map = {
+                        str(name).strip().lower(): col
+                        for name, col in _instrument_averages_header_map(inst).items()
                     }
-                nonnumeric: List[str] = []
-                nonnumeric_skipped: List[str] = []
-                mismatches: List[str] = []
-                for account_key, expected in expected_balances.items():
-                    expected_balance = _to_float(expected.get("balance"))
-                    expected_currency = str(expected.get("currency") or "").strip()
-                    expected_source = str(expected.get("balance_source") or expected.get("source") or "unknown")
-                    actual = actual_rows.get(account_key)
-                    if actual is None:
-                        mismatches.append(f"{account_key}: missing account row; expected={expected_balance} {expected_currency} source={expected_source}")
+                    symbol_idx = instrument_header_map.get("symbol")
+                    trades_idx = next(
+                        (instrument_header_map[candidate] for candidate in ("trades", "total trades", "total_trades")
+                         if candidate in instrument_header_map),
+                        None,
+                    )
+                    if not symbol_idx or not trades_idx:
+                        raise RuntimeError("Trading Journal validation failed: SYMBOLS Symbol/Trades headers missing.")
+                    has_instrument_data = False
+                    for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
+                        symbol = str(inst.cell(rr, symbol_idx).value or "").strip()
+                        trades = _safe_float(inst.cell(rr, trades_idx).value)
+                        if symbol and trades is not None:
+                            has_instrument_data = True
+                            break
+                    if not has_instrument_data:
+                        raise RuntimeError("Trading Journal validation failed: SYMBOLS is blank despite instrument stats.")
+                    def _inst_col(*aliases: str) -> int | None:
+                        for a in aliases:
+                            if a in instrument_header_map:
+                                return instrument_header_map[a]
+                        return None
+                    inst_dur_cols = [
+                        _inst_col("shortest duration (dd:hh:mm:ss)", "shortest (dd:hh:mm:ss)"),
+                        _inst_col("avg duration (dd:hh:mm:ss)"),
+                        _inst_col("longest duration (dd:hh:mm:ss)", "longest (dd:hh:mm:ss)"),
+                    ]
+                    if all(c is not None for c in inst_dur_cols):
+                        inst_dur_cols = [int(c) for c in inst_dur_cols]
+                        has_any_duration_stat = any(
+                            any(_safe_float(rec.get(k)) is not None for k in ("min_trade_duration_seconds", "avg_trade_duration_seconds", "max_trade_duration_seconds"))
+                            for rec in by_instrument if isinstance(rec, dict)
+                        )
+                        any_duration_cells = False
+                        def _symbols_duration_seconds(value: object, number_format: object = None) -> float | None:
+                            if value in (None, ""):
+                                return None
+                            parsed = _parse_duration_text(value)
+                            if parsed is not None:
+                                return float(parsed)
+                            if isinstance(value, (int, float)):
+                                ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
+                                if ddhhmmss is not None:
+                                    return float(ddhhmmss)
+                            return None
+                        for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
+                            vals = [inst.cell(rr, c).value for c in inst_dur_cols]
+                            parsed = [
+                                _symbols_duration_seconds(inst.cell(rr, c).value, inst.cell(rr, c).number_format)
+                                for c in inst_dur_cols
+                            ]
+                            nonblank = [v for v in vals if v not in (None, "")]
+                            parsed_present = [v for v in parsed if v is not None]
+                            if parsed_present:
+                                any_duration_cells = True
+                            if nonblank and len(parsed_present) != len(nonblank):
+                                raise RuntimeError("Trading Journal validation failed: SYMBOLS durations must be duration text or numeric DDHHMMSS.")
+                            if len(parsed_present) == 3 and not (parsed_present[0] <= parsed_present[1] <= parsed_present[2]):
+                                raise RuntimeError("Trading Journal validation failed: SYMBOLS duration order must satisfy Shortest <= Avg <= Longest.")
+                        if has_any_duration_stat and not any_duration_cells:
+                            raise RuntimeError("Trading Journal validation failed: SYMBOLS duration columns are blank despite duration stats.")
+                    net_col = instrument_header_map.get("net p/l %")
+                    avg_col = instrument_header_map.get("avg p/l %")
+                    if net_col and avg_col:
+                        has_result_pct_stats = any(
+                            (_safe_float(rec.get("net_result_pct")) is not None) or (_safe_float(rec.get("avg_result_pct")) is not None)
+                            for rec in by_instrument if isinstance(rec, dict)
+                        )
+                        if has_result_pct_stats:
+                            has_op = False
+                            for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
+                                if isinstance(inst.cell(rr, net_col).value, (int, float)) or isinstance(inst.cell(rr, avg_col).value, (int, float)):
+                                    has_op = True
+                                    break
+                            if not has_op:
+                                raise RuntimeError("Trading Journal validation failed: SYMBOLS Net/Avg P/L % columns are blank despite result_pct stats.")
+                non_test_with_results = []
+                from tools.master_journal_workbook import _as_date as _journal_as_date
+                for r in visible_trade_rows:
+                    if _is_test_trade_value(r.get("is_test_trade")):
                         continue
-                    actual_balance = _to_float(actual.get("balance"))
-                    actual_currency = str(actual.get("currency") or "").strip()
-                    if expected_balance is None or actual_balance is None:
-                        # Non-authoritative timeline placeholders should not block Trade Log persistence.
-                        if expected_balance is None and str(expected_source).strip().lower() == "timeline_missing":
-                            nonnumeric_skipped.append(
+                    ts_value = r.get("close_time") or r.get("open_time")
+                    dt = _journal_as_date(ts_value) if ts_value else None
+                    if not dt:
+                        continue
+                    if _safe_float(r.get("result_pct")) is None:
+                        continue
+                    non_test_with_results.append(r)
+                _finish_substage("validation_instrument_averages")
+                if non_test_with_results:
+                    expected_year_months: Set[Tuple[int, int]] = set()
+                    for row in non_test_with_results:
+                        ts_value = row.get("close_time") or row.get("open_time")
+                        dt = _journal_as_date(ts_value) if ts_value else None
+                        if dt:
+                            expected_year_months.add((int(dt.year), int(dt.month)))
+                    missing_calendar_cells = _calendar_missing_expected_pl_cells(
+                        cal,
+                        expected_year_months,
+                    )
+                    if missing_calendar_cells:
+                        raise RuntimeError(
+                            "Trading Journal validation failed: P&L Calendar missing "
+                            "expected dated P/L cells: "
+                            + ", ".join(
+                                f"{year:04d}-{month:02d}"
+                                for year, month in missing_calendar_cells[:20]
+                            )
+                            + "."
+                        )
+                _finish_substage("validation_calendar")
+                expected_reports = expected_report_sheet_names(snapshot)
+                for sheet_name in expected_reports:
+                    if sheet_name not in wb.sheetnames:
+                        raise RuntimeError(f"Trading Journal validation failed: missing required report sheet '{sheet_name}'.")
+                    report_ws = wb[sheet_name]
+                    if report_ws.max_column < 2 or report_ws.max_row < 53:
+                        raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' is missing its metric layout.")
+                    if not str(report_ws.cell(1, 2).value or "").strip():
+                        raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' has blank report headers.")
+                    metric_labels = [
+                        str(report_ws.cell(rr, 1).value or "").strip()
+                        for rr in range(2, report_ws.max_row + 1)
+                    ]
+                    required_report_labels = {
+                        "Trades",
+                        "Short break-even",
+                        "Min drawdown",
+                        "Total Commission",
+                    }
+                    missing_report_labels = sorted(required_report_labels - set(metric_labels))
+                    if missing_report_labels:
+                        raise RuntimeError(
+                            f"Trading Journal validation failed: report sheet '{sheet_name}' "
+                            f"is missing required metric labels {missing_report_labels}."
+                        )
+                _finish_substage("validation_reports")
+                balances = snapshot.get("balances") or []
+                if balances:
+                    anchor = None
+                    for rr in range(1, detail_dash.max_row + 1):
+                        for cc in range(1, detail_dash.max_column + 1):
+                            if str(detail_dash.cell(rr, cc).value or "").strip().lower() == "account balances":
+                                anchor = (rr, cc)
+                                break
+                        if anchor:
+                            break
+                    if not anchor:
+                        raise RuntimeError("Trading Journal validation failed: Account Balances section anchor missing.")
+                    header_row = None
+                    header_map: Dict[str, int] = {}
+                    for rr in range(anchor[0] + 1, min(detail_dash.max_row + 1, anchor[0] + 12)):
+                        row_map: Dict[str, int] = {}
+                        for cc in range(anchor[1], min(detail_dash.max_column + 1, anchor[1] + 8)):
+                            token = str(detail_dash.cell(rr, cc).value or "").strip().lower()
+                            if token in {"account", "balance", "currency", "as of", "as_of"}:
+                                if token == "as_of":
+                                    token = "as of"
+                                row_map[token] = cc
+                        if {"account", "balance", "currency"}.issubset(set(row_map.keys())):
+                            header_row = rr
+                            header_map = row_map
+                            break
+                    if not header_row:
+                        raise RuntimeError("Trading Journal validation failed: Account Balances headers missing.")
+                    canonical_balances = _canonicalize_and_dedupe_balances([b for b in balances if isinstance(b, dict)])
+                    expected_balances: Dict[str, Dict[str, object]] = {}
+                    for b in canonical_balances:
+                        if not isinstance(b, dict):
+                            continue
+                        account_label = str(b.get("account_label") or b.get("account") or "").strip()
+                        if not account_label:
+                            continue
+                        expected_balances[account_label.upper()] = b
+                    actual_rows: Dict[str, Dict[str, object]] = {}
+                    for rr in range(header_row + 1, min(detail_dash.max_row + 1, header_row + 80)):
+                        account = str(detail_dash.cell(rr, header_map["account"]).value or "").strip()
+                        if not account:
+                            continue
+                        actual_rows[account.upper()] = {
+                            "row": rr,
+                            "account": account,
+                            "balance": detail_dash.cell(rr, header_map["balance"]).value,
+                            "currency": str(detail_dash.cell(rr, header_map["currency"]).value or "").strip(),
+                        }
+                    nonnumeric: List[str] = []
+                    nonnumeric_skipped: List[str] = []
+                    mismatches: List[str] = []
+                    for account_key, expected in expected_balances.items():
+                        expected_balance = _to_float(expected.get("balance"))
+                        expected_currency = str(expected.get("currency") or "").strip()
+                        expected_source = str(expected.get("balance_source") or expected.get("source") or "unknown")
+                        actual = actual_rows.get(account_key)
+                        if actual is None:
+                            mismatches.append(f"{account_key}: missing account row; expected={expected_balance} {expected_currency} source={expected_source}")
+                            continue
+                        actual_balance = _to_float(actual.get("balance"))
+                        actual_currency = str(actual.get("currency") or "").strip()
+                        if expected_balance is None or actual_balance is None:
+                            # Non-authoritative timeline placeholders should not block Trade Log persistence.
+                            if expected_balance is None and str(expected_source).strip().lower() == "timeline_missing":
+                                nonnumeric_skipped.append(
+                                    f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual.get('balance')}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
+                                )
+                                continue
+                            nonnumeric.append(
                                 f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual.get('balance')}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
                             )
                             continue
-                        nonnumeric.append(
-                            f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual.get('balance')}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
+                        if abs(actual_balance - expected_balance) > 1e-9 or actual_currency.upper() != expected_currency.upper():
+                            mismatches.append(
+                                f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual_balance}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
+                            )
+                    if nonnumeric:
+                        raise RuntimeError("Trading Journal validation failed: Account Balances missing numeric values: " + " | ".join(nonnumeric[:20]))
+                    if nonnumeric_skipped:
+                        validation_warnings.append(
+                            "Account balance validation skipped for non-authoritative timeline_missing entries: "
+                            + " | ".join(nonnumeric_skipped[:20])
                         )
-                        continue
-                    if abs(actual_balance - expected_balance) > 1e-9 or actual_currency.upper() != expected_currency.upper():
-                        mismatches.append(
-                            f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual_balance}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
-                        )
-                if nonnumeric:
-                    raise RuntimeError("Trading Journal validation failed: Account Balances missing numeric values: " + " | ".join(nonnumeric[:20]))
-                if nonnumeric_skipped:
-                    validation_warnings.append(
-                        "Account balance validation skipped for non-authoritative timeline_missing entries: "
-                        + " | ".join(nonnumeric_skipped[:20])
-                    )
-                if mismatches:
-                    missing_expected_ids: List[str] = []
-                    if expected_survivor_row_ids:
-                        expected_set = {str(rid or "").strip() for rid in expected_survivor_row_ids if str(rid or "").strip()}
-                        if expected_set:
-                            missing_expected_ids = sorted([rid for rid in expected_set if rid not in workbook_row_ids])
-                    if missing_expected_ids:
+                    if mismatches:
+                        missing_expected_ids: List[str] = []
+                        if expected_survivor_row_ids:
+                            expected_set = {str(rid or "").strip() for rid in expected_survivor_row_ids if str(rid or "").strip()}
+                            if expected_set:
+                                missing_expected_ids = sorted([rid for rid in expected_set if rid not in workbook_row_ids])
+                        if missing_expected_ids:
+                            raise RuntimeError(
+                                "Trading Journal validation failed: expected imported row IDs missing from Trade Log before balance validation. "
+                                f"missing_row_ids={missing_expected_ids[:20]}"
+                            )
+                        bybit_demo_trade_rows: List[Dict[str, object]] = []
+                        debug_headers = _trade_log_header_map(trade_log)
+                        debug_data_start = _trade_log_data_start_row(trade_log)
+                        acct_col = debug_headers.get("Account")
+                        sym_col = debug_headers.get("Symbol")
+                        rid_col = debug_headers.get("Row ID")
+                        close_col = debug_headers.get("Close Time")
+                        if acct_col and rid_col:
+                            for rr in range(debug_data_start, trade_log.max_row + 1):
+                                acct_val = str(trade_log.cell(rr, acct_col).value or "").strip()
+                                if acct_val.lower() != "bybit demo":
+                                    continue
+                                bybit_demo_trade_rows.append({
+                                    "row_id": str(trade_log.cell(rr, rid_col).value or "").strip(),
+                                    "symbol": str(trade_log.cell(rr, sym_col).value or "").strip() if sym_col else "",
+                                    "close_time": str(trade_log.cell(rr, close_col).value or "").strip() if close_col else "",
+                                })
+                        snapshot_bybit_demo_rows = [
+                            {
+                                "row_id": str(r.get("id") or "").strip(),
+                                "symbol": str(r.get("symbol") or "").strip(),
+                                "close_time": str(r.get("close_time") or "").strip(),
+                            }
+                            for r in visible_trade_rows
+                            if str(r.get("account") or r.get("account_label") or "").strip().lower() == "bybit demo"
+                        ]
                         raise RuntimeError(
-                            "Trading Journal validation failed: expected imported row IDs missing from Trade Log before balance validation. "
-                            f"missing_row_ids={missing_expected_ids[:20]}"
+                            "Trading Journal validation failed: Account Balances mismatch vs snapshot: "
+                            + " | ".join(mismatches[:20])
+                            + f" | candidate_bybit_demo_rows={bybit_demo_trade_rows[-5:]}"
+                            + f" | snapshot_bybit_demo_rows={snapshot_bybit_demo_rows[-5:]}"
                         )
-                    bybit_demo_trade_rows: List[Dict[str, object]] = []
-                    debug_headers = _trade_log_header_map(trade_log)
-                    debug_data_start = _trade_log_data_start_row(trade_log)
-                    acct_col = debug_headers.get("Account")
-                    sym_col = debug_headers.get("Symbol")
-                    rid_col = debug_headers.get("Row ID")
-                    close_col = debug_headers.get("Close Time")
-                    if acct_col and rid_col:
-                        for rr in range(debug_data_start, trade_log.max_row + 1):
-                            acct_val = str(trade_log.cell(rr, acct_col).value or "").strip()
-                            if acct_val.lower() != "bybit demo":
-                                continue
-                            bybit_demo_trade_rows.append({
-                                "row_id": str(trade_log.cell(rr, rid_col).value or "").strip(),
-                                "symbol": str(trade_log.cell(rr, sym_col).value or "").strip() if sym_col else "",
-                                "close_time": str(trade_log.cell(rr, close_col).value or "").strip() if close_col else "",
-                            })
-                    snapshot_bybit_demo_rows = [
-                        {
-                            "row_id": str(r.get("id") or "").strip(),
-                            "symbol": str(r.get("symbol") or "").strip(),
-                            "close_time": str(r.get("close_time") or "").strip(),
-                        }
-                        for r in visible_trade_rows
-                        if str(r.get("account") or r.get("account_label") or "").strip().lower() == "bybit demo"
-                    ]
-                    raise RuntimeError(
-                        "Trading Journal validation failed: Account Balances mismatch vs snapshot: "
-                        + " | ".join(mismatches[:20])
-                        + f" | candidate_bybit_demo_rows={bybit_demo_trade_rows[-5:]}"
-                        + f" | snapshot_bybit_demo_rows={snapshot_bybit_demo_rows[-5:]}"
-                    )
-            _finish_substage("validation_dashboard_balances")
-            leaders = ((stats.get("groups") or {}).get("leaders") or {})
-            expected_payloads = {
-                label: (leaders.get(key) or {}) for label, key in LEADER_LABEL_TO_KEY.items()
-                if isinstance(leaders.get(key), dict) and any((leaders.get(key) or {}).get(k) is not None for k in ("symbol", "wins", "losses", "trades", "total_trades"))
-            }
-            if expected_payloads:
-                _, header_map, metric_rows, _ = _find_instrument_leaders_table(detail_dash)
-                metric_rows_normalized = {str(label or "").strip().lower(): row_idx for label, row_idx in (metric_rows or {}).items()}
-                if not header_map:
-                    validation_warnings.append("Instrument leaders validation skipped: optional Instrument Leaders section/header is missing.")
-                    expected_payloads = {}
-                present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label) or metric_rows_normalized.get(label)}
-                if expected_payloads and not present_expected_payloads:
-                    validation_warnings.append("Instrument leaders validation skipped: optional Instrument Leaders section has no recognized metric rows.")
-                for metric_label in present_expected_payloads:
-                    row_idx = metric_rows.get(metric_label) or metric_rows_normalized.get(metric_label)
-                    symbol = str(detail_dash.cell(row_idx, header_map["symbol"]).value or "").strip()
-                    trades_num = _safe_float(detail_dash.cell(row_idx, header_map["trades"]).value)
-                    if not symbol or symbol == "—" or trades_num is None:
-                        raise RuntimeError(f"Trading Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
-            _finish_substage("validation_leaders")
-        finally:
-            wb.close()
+                _finish_substage("validation_dashboard_balances")
+                leaders = ((stats.get("groups") or {}).get("leaders") or {})
+                expected_payloads = {
+                    label: (leaders.get(key) or {}) for label, key in LEADER_LABEL_TO_KEY.items()
+                    if isinstance(leaders.get(key), dict) and any((leaders.get(key) or {}).get(k) is not None for k in ("symbol", "wins", "losses", "trades", "total_trades"))
+                }
+                if expected_payloads:
+                    _, header_map, metric_rows, _ = _find_instrument_leaders_table(detail_dash)
+                    metric_rows_normalized = {str(label or "").strip().lower(): row_idx for label, row_idx in (metric_rows or {}).items()}
+                    if not header_map:
+                        validation_warnings.append("Instrument leaders validation skipped: optional Instrument Leaders section/header is missing.")
+                        expected_payloads = {}
+                    present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label) or metric_rows_normalized.get(label)}
+                    if expected_payloads and not present_expected_payloads:
+                        validation_warnings.append("Instrument leaders validation skipped: optional Instrument Leaders section has no recognized metric rows.")
+                    for metric_label in present_expected_payloads:
+                        row_idx = metric_rows.get(metric_label) or metric_rows_normalized.get(metric_label)
+                        symbol = str(detail_dash.cell(row_idx, header_map["symbol"]).value or "").strip()
+                        trades_num = _safe_float(detail_dash.cell(row_idx, header_map["trades"]).value)
+                        if not symbol or symbol == "—" or trades_num is None:
+                            raise RuntimeError(f"Trading Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
+                _finish_substage("validation_leaders")
+            finally:
+                wb.close()
 
         from tools.master_journal_workbook import (
             _prepare_recommendation_chart_bundle,
@@ -43130,7 +43150,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 payload["master_journal_error"] = payload["message"]
                 return payload
             blocked_operation = 'replace_candidate'
+            if _saved_edits_pin is not None and (_saved_journal_identity(path), hashlib.sha256(path.read_bytes()).hexdigest()) != _saved_edits_pin:
+                raise RuntimeError('Workbook changed before publication; latest Excel save retained')
             os.replace(tmp, path)
+            if _saved_edits_audit:
+                readback = verify_saved_journal_workbook(path, expected_snapshot=snapshot)
+                if not readback or not readback.get('ok'):
+                    raise RuntimeError('Installed saved-edit workbook verification failed: ' + str(readback))
         _finish_substage("final_replace")
         if not path.exists() or path.stat().st_size <= 0:
             raise RuntimeError("Trading Journal.xlsx was not created.")
@@ -45448,6 +45474,7 @@ def _import_uploaded_trading_journal_file(
                             incremental_changed_rows,
                             account_balance=oanda_transaction_export_balance,
                             expected_survivor_row_ids=expected_survivors,
+                            _statistics_builder=_compute_journal_stats_with_period_reports,
                         )
                     except IncrementalWorkbookUpdateNotEligible as exc:
                         incremental_fallback_reason = (
@@ -45905,6 +45932,10 @@ def _import_uploaded_trading_journal_file(
                     )
             try:
                 if workbook_had_original and workbook_backup_bytes is not None:
+                    owned_hash = str((sync_result or {}).get('published_sha256') or (sync_result or {}).get('candidate_sha256') or '')
+                    current_bytes = workbook_path.read_bytes()
+                    if current_bytes != workbook_backup_bytes and (not owned_hash or hashlib.sha256(current_bytes).hexdigest() != owned_hash):
+                        raise RuntimeError('Newer workbook save retained; import rollback does not own current bytes')
                     _atomic_write_bytes(workbook_path, workbook_backup_bytes)
                 elif not workbook_had_original and workbook_path.exists():
                     workbook_path.unlink()
@@ -46682,6 +46713,10 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
     }
     if not path.exists():
         return {"ok": False, "error": "Trading Journal.xlsx is missing.", "diagnostics": diagnostics}
+    from tools.master_journal_workbook import verify_saved_journal_workbook
+    preserved = verify_saved_journal_workbook(path, expected_snapshot=expected_snapshot)
+    if preserved is not None:
+        return preserved
     wb = load_workbook(path, data_only=False)
     try:
         from tools.master_journal_workbook import _generated_statistics_height_rows, _statistics_authored_row_heights
