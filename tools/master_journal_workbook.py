@@ -23652,6 +23652,77 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
             proposal.unlink()
 
 
+def _saved_journal_filter_name_matches(node, sheet, index, ref):
+    if node.get('name') != '_xlnm._FilterDatabase' or node.get('localSheetId') != str(index):
+        return False
+    text = node.text or ''
+    if '!' not in text:
+        return False
+    owner, area = text.rsplit('!', 1)
+    return owner.strip("'").replace("''", "'") == sheet and area.replace('$', '') == ref.replace('$', '')
+
+
+def _saved_journal_trade_filter_plan(wb, operations, ownership, workbook_xml):
+    """Prove a generated, contiguous ID tail before widening the saved filter."""
+    if TRADE_LOG_SHEET not in wb.sheetnames:
+        return None
+    ws = wb[TRADE_LOG_SHEET]
+    ref = ws.auto_filter.ref
+    if not ref:
+        return None  # An authored deletion is never recreated.
+    headers = _trade_log_header_map(ws)
+    identity_col = headers.get('Row ID')
+    if identity_col is None:
+        return None
+    a, b, c, d = range_boundaries(ref)
+    if None in (a, b, c, d) or not a <= identity_col <= c:
+        return None
+    identities = {row: cell for (row, col), cell in ws._cells.items()
+                  if col == identity_col and row > b and cell.value not in (None, '')}
+    for wanted, target in operations.get(TRADE_LOG_SHEET, {}).values():
+        if target.column == identity_col and target.row > b:
+            if wanted.value in (None, ''):
+                identities.pop(target.row, None)
+            else:
+                identities[target.row] = wanted
+    values = [str(cell.value) for _, cell in sorted(identities.items())]
+    if not values or len(set(values)) != len(values):
+        return None
+    end = max(identities)
+    if end <= d:
+        return None
+    seen = set(ownership.get('seen_ids', []))
+    # Every uncovered physical row must be an independently owned Row ID.
+    for row in range(d + 1, end + 1):
+        cell = identities.get(row)
+        if cell is None or not isinstance(cell.value, str) or cell.value != cell.value.strip():
+            return None
+        identity = cell.value
+        key = json.dumps([TRADE_LOG_SHEET, identity, 'Row ID'])
+        if identity not in seen or ownership.get('cells', {}).get(key) != _saved_journal_value(cell):
+            return None
+    ranges = ownership.get('ranges', {})
+    if TRADE_LOG_SHEET in ranges:
+        if ranges[TRADE_LOG_SHEET].get('filter') != ref:
+            return None  # Preserve manually narrowed or otherwise authored ranges.
+    else:
+        # Historical Git blob 8c60557a499da66cf38526173ba74096024c1c88:
+        # exact generated A3:AY1576 plus its ordered 1573-ID body. This is a
+        # one-lineage legacy proof, not a general guess based on range size.
+        if not (ownership.get('legacy') and ownership.get('preserved')
+                and ref == 'A3:AY1576' and identity_col == 51
+                and set(row for row in identities if row <= d) == set(range(4, 1577))):
+            return None
+        prefix = [str(identities[row].value) for row in range(4, 1577)]
+        if hashlib.sha256(json.dumps(prefix, separators=(',', ':')).encode()).hexdigest() != '10cb837a451f4e8ec83552ebab8a645e080b12d0ff572fc25ad556841839f1c4':
+            return None
+        ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+        names = ET.fromstring(workbook_xml).findall(ns+'definedNames/'+ns+'definedName')
+        if not any(_saved_journal_filter_name_matches(n, TRADE_LOG_SHEET, wb.sheetnames.index(TRADE_LOG_SHEET), ref) for n in names):
+            return None
+    return dict(old=ref, new=re.sub(r'\d+$', str(end), ref))
+
+
 def _saved_journal_patch(original, candidate, wb, operations, ownership, *, append_donor_rows=None):
     """Copy every original part; change only declared values/affected caches.
     Styles, extensions, relationships, tables and worksheet metadata are never
@@ -23661,6 +23732,10 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership, *, appe
     ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
     replacements, changed, extra_parts = {}, set(), {}
     with zipfile.ZipFile(BytesIO(original)) as package:
+        filter_plan = _saved_journal_trade_filter_plan(wb, operations, ownership, package.read('xl/workbook.xml'))
+        operations = dict(operations)
+        if filter_plan:
+            operations.setdefault(TRADE_LOG_SHEET, {})  # Range-only correction is audited too.
         for sheet, updates in operations.items():
             part = _worksheet_ooxml_part_name(package, sheet)
             root = ET.fromstring(package.read(part))
@@ -23748,8 +23823,19 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership, *, appe
                 a,b,c,d=range_boundaries(ref)
                 if d!=max(original_rows) or c<max((x.column for _,x in updates.values()),default=c):return ref
                 return f'{get_column_letter(a)}{b}:{get_column_letter(c)}{max(d,max(rows))}'
-            if old_filter and range_owner.get('filter')==old_filter:
-                filter_node.set('ref',grown(old_filter));range_owner['filter']=filter_node.get('ref')
+            if sheet == TRADE_LOG_SHEET:
+                new_filter = filter_plan['new'] if filter_plan else old_filter
+            else:
+                new_filter = grown(old_filter) if old_filter and range_owner.get('filter') == old_filter else old_filter
+            if new_filter != old_filter:
+                if sheet == TRADE_LOG_SHEET:
+                    assert old_filter == filter_plan['old']
+                    range_owner = ownership.setdefault('ranges', {}).setdefault(sheet, {})
+                filter_node.set('ref', new_filter)
+                restored_filter = deepcopy(filter_node); restored_filter.set('ref', old_filter)
+                if _journal_xml_signature(restored_filter) != _journal_xml_signature(before.find(ns+'autoFilter')):
+                    raise RuntimeError('Undeclared filter change')
+                range_owner['filter'] = new_filter
             # Tables use their exact worksheet relationship, not a guessed name.
             for table_node in root.findall(ns+'tableParts/'+ns+'tablePart'):
                 rid=table_node.get('{'+_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE+'}id')
@@ -23837,6 +23923,25 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership, *, appe
             if touched:
                 replacements[part] = _saved_journal_xml(root, package.read(part))
         workbook_xml = _saved_journal_names(package.read('xl/workbook.xml'), ownership)
+        if filter_plan:
+            doc = ET.fromstring(workbook_xml)
+            restored_names = deepcopy(doc)
+            names = doc.findall(ns+'definedNames/'+ns+'definedName')
+            old_names = restored_names.findall(ns+'definedNames/'+ns+'definedName')
+            name_edits = []
+            for index, (name, old_name) in enumerate(zip(names, old_names)):
+                if _saved_journal_filter_name_matches(name, TRADE_LOG_SHEET, wb.sheetnames.index(TRADE_LOG_SHEET), filter_plan['old']):
+                    name_edits.append((index, old_name.text))
+                    name.text = re.sub(r'\d+$', str(range_boundaries(filter_plan['new'])[3]), name.text)
+                    if name.attrib != old_name.attrib:
+                        raise RuntimeError('Filter name attributes changed')
+            inverse_names = deepcopy(doc)
+            inverse_nodes = inverse_names.findall(ns+'definedNames/'+ns+'definedName')
+            for index, old_text in name_edits:
+                inverse_nodes[index].text = old_text
+            if _journal_xml_signature(inverse_names) != _journal_xml_signature(restored_names):
+                raise RuntimeError('Undeclared filter name change')
+            workbook_xml = _saved_journal_xml(doc, workbook_xml)
         replacements['xl/workbook.xml'] = workbook_xml
         with zipfile.ZipFile(candidate, 'w') as target:
             target.comment = package.comment

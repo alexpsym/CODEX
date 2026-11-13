@@ -14016,3 +14016,96 @@ def test_saved_journal_append_uses_original_style_indices(tmp_path, monkeypatch)
             assert (ET.tostring(left) if left is not None else None)==(ET.tostring(right) if right is not None else None),(name,field)
     assert path.read_bytes()==original
     phase('all preservation assertions completed; 1573 prior IDs retained; AG129=313')
+
+
+def test_saved_journal_trade_log_filter_covers_owned_tail(tmp_path, monkeypatch):
+    import subprocess, zipfile, json, hashlib
+    from copy import deepcopy
+    from xml.etree import ElementTree as ET
+    import tools.master_journal_workbook as j
+    ns='{'+j._SPREADSHEETML_NAMESPACE+'}'
+    def parts(path):
+        with zipfile.ZipFile(path) as z:return {n:z.read(n) for n in z.namelist()}
+    def filter_names(raw, book, ref):
+        return [n for n in ET.fromstring(raw).findall(ns+'definedNames/'+ns+'definedName') if j._saved_journal_filter_name_matches(n,'Trade Log',book.sheetnames.index('Trade Log'),ref)]
+    original=subprocess.run(['git','cat-file','blob','a0b47cf2ceb79f7f2a7f0b786a56048b6f2a6fa8'],capture_output=True,check=True).stdout
+    historical=subprocess.run(['git','cat-file','blob','8c60557a499da66cf38526173ba74096024c1c88'],capture_output=True,check=True).stdout
+    path=tmp_path/'pinned.xlsx';path.write_bytes(original)
+    history=tmp_path/'historical.xlsx';history.write_bytes(historical)
+    wb=load_workbook(path);oldbook=load_workbook(history)
+    before=parts(path);record=j._saved_journal_ownership(wb);original_record=deepcopy(record)
+    _,row_index,headers,_=j._saved_journal_map(wb)
+    _,old_index,_,_=j._saved_journal_map(oldbook)
+    assert len(row_index['Trade Log'])==1581
+    assert wb['Trade Log'].auto_filter.ref==oldbook['Trade Log'].auto_filter.ref=='A3:AY1576'
+    old_ids=[identity for identity,row in sorted(old_index['Trade Log'].items(),key=lambda item:item[1])]
+    prefix=[identity for identity,row in sorted(row_index['Trade Log'].items(),key=lambda item:item[1]) if row<=1576]
+    assert len(prefix)==1573 and prefix==old_ids
+    assert hashlib.sha256(json.dumps(prefix,separators=(',',':')).encode()).hexdigest()=='10cb837a451f4e8ec83552ebab8a645e080b12d0ff572fc25ad556841839f1c4'
+    oldbook.close()
+    with zipfile.ZipFile(path) as z:
+        trade=j._worksheet_ooxml_part_name(z,'Trade Log');sim=j._worksheet_ooxml_part_name(z,' SIM')
+    assert len(filter_names(before['xl/workbook.xml'],wb,'A3:AY1576'))==1
+    elsa=next(identity for identity in row_index['Trade Log'] if ':ELSAUSDT:' in identity and row_index['Trade Log'][identity]==1577)
+    c385=wb['Trade Log']['A1577'];assert c385.value=='C385' and c385.hyperlink
+    saved_link=deepcopy(c385.hyperlink)
+    # Every uncovered ID must be proven; one missing ownership entry blocks adoption.
+    unproven=deepcopy(record);unproven['cells'].pop(json.dumps(['Trade Log',elsa,'Row ID']))
+    assert j._saved_journal_trade_filter_plan(wb,{},unproven,before['xl/workbook.xml']) is None
+    saved_id=wb['Trade Log']['AY4'].value;wb['Trade Log']['AY4']='authored-identity'
+    assert j._saved_journal_trade_filter_plan(wb,{},record,before['xl/workbook.xml']) is None
+    wb['Trade Log']['AY4']=saved_id
+    candidate=tmp_path/'Trade Log filter acceptance.xlsx'
+    changed=j._saved_journal_patch(original,candidate,wb,{},record)
+    assert changed==[], 'range-only repair must not report changed trade cells'
+    after=parts(candidate)
+    assert path.read_bytes()==original
+    for name,raw in before.items():
+        if name not in (trade,'xl/workbook.xml'):assert after[name]==raw,name
+    assert after['xl/styles.xml']==before['xl/styles.xml'] and after[sim]==before[sim]
+    caches=[c for c in ET.fromstring(after[sim]).findall('.//'+ns+'c') if c.find(ns+'f') is not None and c.find(ns+'v') is not None and c.find(ns+'v').text is not None]
+    assert len(caches)==511
+    repaired=ET.fromstring(after[trade]);assert repaired.find(ns+'autoFilter').get('ref')=='A3:AY1584'
+    repaired.find(ns+'autoFilter').set('ref','A3:AY1576')
+    assert j._journal_xml_signature(repaired)==j._journal_xml_signature(ET.fromstring(before[trade]))
+    assert len(filter_names(after['xl/workbook.xml'],wb,'A3:AY1584'))==1
+    # Inverse-audit all workbook metadata except legitimate ownership and the exact name range.
+    docs=[ET.fromstring(before['xl/workbook.xml']),ET.fromstring(after['xl/workbook.xml'])]
+    for doc in docs:
+        names=doc.find(ns+'definedNames')
+        for n in list(names):
+            if n.get('name','').startswith(j._SAVED_JOURNAL_PREFIX):names.remove(n)
+            elif j._saved_journal_filter_name_matches(n,'Trade Log',wb.sheetnames.index('Trade Log'),'A3:AY1584'):n.text=n.text.replace('1584','1576')
+    assert j._journal_xml_signature(docs[0])==j._journal_xml_signature(docs[1])
+    for mode in (False,True):
+        reopened=load_workbook(candidate,data_only=mode)
+        assert reopened['Trade Log'].auto_filter.ref=='A3:AY1584'
+        assert reopened['Trade Log']['A1577'].value=='C385'
+        assert reopened['Trade Log']['A1577'].hyperlink==saved_link
+        if not mode:
+            _,actual,_,_=j._saved_journal_map(reopened);assert actual['Trade Log']==row_index['Trade Log']
+            owned=j._saved_journal_ownership(reopened)
+            assert owned['ranges']['Trade Log']['filter']=='A3:AY1584'
+            owned.pop('ranges');previous=deepcopy(original_record);previous.pop('ranges');assert owned==previous
+        reopened.close()
+    wb.close()
+    monkeypatch.setattr(j,'REPORT_START_YEAR',2026);monkeypatch.setattr(j,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(j,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    small=tmp_path/'small.xlsx';snapshot=sample_snapshot();j._counter_build(snapshot,small,publish_recommendation_assets=False)
+    book=load_workbook(small);ws=book['Trade Log'];ws.auto_filter.add_filter_column(3,['Bybit Demo']);ws.auto_filter.add_sort_condition('B4:B4');book.save(small);book.close();j._saved_journal_seed(small)
+    raw=parts(small)
+    with zipfile.ZipFile(small) as z:smallpart=j._worksheet_ooxml_part_name(z,'Trade Log')
+    old_filter=ET.fromstring(raw[smallpart]).find(ns+'autoFilter');ref=old_filter.get('ref');end=range_boundaries(ref)[3]
+    row=dict(snapshot['items'][0]);row.update(id='bybit:demo:trade:FILTERCHECKUSDT:new',symbol='FILTERCHECKUSDT',account='Bybit Demo',account_label='Bybit Demo',qty=1,entry_price=100,exit_price=110,net_profit=10,commission=0,currency='USDT')
+    requested=dict(items=[row],balances=[],stats={'totals':{},'groups':{}})
+    result=j.update_master_journal_workbook_data_only(small,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids={row['id']})
+    assert result['ok'];new=Path(result['candidate_path']);assert j.verify_saved_journal_workbook(new,expected_snapshot=requested)['ok']
+    appended=parts(new);new_filter=ET.fromstring(appended[smallpart]).find(ns+'autoFilter');assert new_filter.get('ref')==ref.rsplit(':',1)[0]+':AY'+str(end+1)
+    check=deepcopy(new_filter);check.set('ref',ref);assert j._journal_xml_signature(check)==j._journal_xml_signature(old_filter)
+    view=load_workbook(new);assert len(filter_names(appended['xl/workbook.xml'],view,new_filter.get('ref')))==1;view.close()
+    # An authored narrowing and a deletion must survive the normal saved writer.
+    for label,authored in [('narrow','A3:AY3'),('deleted',None)]:
+        custom=tmp_path/(label+'.xlsx');custom.write_bytes(small.read_bytes());book=load_workbook(custom);book['Trade Log'].auto_filter.ref=authored;book.save(custom);book.close()
+        result=j.update_master_journal_workbook_data_only(custom,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids={row['id']})
+        assert result['ok'];view=load_workbook(result['candidate_path']);assert view['Trade Log'].auto_filter.ref==authored;view.close()
+    print('FILTER_ACCEPTANCE '+json.dumps(dict(candidate=str(candidate),sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),ids=1581,caches=511,filter='A3:AY1584',C385='preserved')),flush=True)
