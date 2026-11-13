@@ -13952,3 +13952,67 @@ def test_saved_journal_patch_preserves_simulation_caches(tmp_path, monkeypatch):
                 count+=1
     assert count==511
     loaded.close()
+
+
+def test_saved_journal_append_uses_original_style_indices(tmp_path, monkeypatch):
+    import subprocess, zipfile, time
+    from xml.etree import ElementTree as ET
+    import tools.master_journal_workbook as journal
+    started=time.monotonic()
+    def phase(name):print('saved_style_phase',name,round(time.monotonic()-started,3),flush=True)
+    phase('extract pinned input')
+    original=subprocess.run(['git','cat-file','blob','8c60557a499da66cf38526173ba74096024c1c88'],capture_output=True,check=True).stdout
+    path=tmp_path/'Trading Journal.xlsx';path.write_bytes(original)
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026)
+    monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    ns='{'+journal._SPREADSHEETML_NAMESPACE+'}'
+    def package(path):
+        with zipfile.ZipFile(path) as z:return {n:z.read(n) for n in z.namelist()}
+    before=package(path)
+    with zipfile.ZipFile(path) as z:
+        trade=journal._worksheet_ooxml_part_name(z,journal.TRADE_LOG_SHEET)
+        symbols=journal._worksheet_ooxml_part_name(z,journal.SYMBOLS_SHEET)
+        sim=journal._worksheet_ooxml_part_name(z,' SIM')
+    def row_ids(parts):
+        strings=[]
+        if 'xl/sharedStrings.xml' in parts:
+            strings=[''.join(x.itertext()) for x in ET.fromstring(parts['xl/sharedStrings.xml'])]
+        def text(c):
+            if c.get('t')=='inlineStr':return ''.join(t.text or '' for t in c.findall('.//'+ns+'t'))
+            v=c.find(ns+'v');value=v.text if v is not None else ''
+            return strings[int(value)] if c.get('t')=='s' and value else value
+        cells=ET.fromstring(parts[trade]).findall('.//'+ns+'c')
+        column=next(coordinate_to_tuple(c.get('r'))[1] for c in cells if text(c)=='Row ID')
+        return [text(c) for c in cells if coordinate_to_tuple(c.get('r'))[1]==column and coordinate_to_tuple(c.get('r'))[0]>=4 and text(c)]
+    prior=row_ids(before);assert len(prior)==1573
+    new_id='bybit:demo:trade:REPROCHECKUSDT:saved-style-regression'
+    row=dict(id=new_id,row_type='trade',source='bybit',account='Bybit Demo',account_label='Bybit Demo',symbol='REPROCHECKUSDT',side='Buy',qty=1,entry_price=100,exit_price=110,net_profit=10,commission=0,r_multiple=2,currency='USDT',result_currency='USDT',open_time='2026-11-13T00:00:00Z',close_time='2026-11-13T01:00:00Z',test='No')
+    snapshot=dict(items=[row],balances=[],stats={'totals':{},'groups':{}})
+    phase('real saved-package writer start')
+    result=journal.update_master_journal_workbook_data_only(path,snapshot,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids={new_id})
+    phase('real saved-package writer returned')
+    assert result['ok'],result
+    candidate=Path(result['candidate_path'])
+    assert candidate!=path and path.read_bytes()==original
+    checked=journal.verify_saved_journal_workbook(candidate,expected_snapshot=snapshot)
+    phase('real saved-package verifier returned')
+    assert checked and checked['ok'],checked
+    after=package(candidate);ids=row_ids(after)
+    assert ids.count(new_id)==1 and set(prior).issubset(ids)
+    assert after['xl/styles.xml']==before['xl/styles.xml']
+    assert after[sim]==before[sim]
+    oldsymbols={c.get('r'):c for c in ET.fromstring(before[symbols]).findall('.//'+ns+'c')}
+    newsymbols={c.get('r'):c for c in ET.fromstring(after[symbols]).findall('.//'+ns+'c')}
+    assert oldsymbols['AG128'].get('s','0')=='313'
+    assert newsymbols['AG129'].get('s','0')=='313'
+    for name,raw in before.items():
+        if not name.startswith('xl/worksheets/sheet') or not name.endswith('.xml'):continue
+        old=ET.fromstring(raw);new=ET.fromstring(after[name]);cells={c.get('r'):c for c in new.findall('.//'+ns+'c')}
+        for cell in old.findall('.//'+ns+'c'):
+            assert cell.get('r') in cells
+            assert cell.get('s','0')==cells[cell.get('r')].get('s','0'),(name,cell.get('r'))
+        for field in ['cols','sheetViews','mergeCells','sheetFormatPr','pageMargins','pageSetup','drawing','legacyDrawing']:
+            left=old.find(ns+field);right=new.find(ns+field)
+            assert (ET.tostring(left) if left is not None else None)==(ET.tostring(right) if right is not None else None),(name,field)
+    assert path.read_bytes()==original
+    phase('all preservation assertions completed; 1573 prior IDs retained; AG129=313')

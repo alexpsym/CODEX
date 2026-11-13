@@ -23536,6 +23536,7 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
         try:
             desired, projected_rows, projected_headers, _ = _saved_journal_map(desired_book)
             operations, protected, inserted, updated = {}, [], [], []
+            append_donor_rows = {}
             owned = dict(record['cells'])
             protected_values = {}
             for key, cell in old.items():
@@ -23571,6 +23572,7 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
                     continue
                 ws = source[sheet]
                 last = max([ws.max_row, *[r.max_row for r in ws.merged_cells.ranges]])
+                template_row = max(row_index[sheet].values(), default=None)
                 for identity, row in projected_rows[sheet].items():
                     if identity in row_index[sheet]:
                         continue
@@ -23580,13 +23582,13 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
                     last += 1
                     if last > 1048576:
                         raise ValueError('No unoccupied append row in ' + sheet)
-                    template_row = max(row_index[sheet].values(), default=last)
+                    if template_row is not None:
+                        append_donor_rows[sheet] = template_row
                     for label, col in headers[sheet].items():
                         if label not in projected_headers[sheet]:
                             continue
                         wanted = desired_book[sheet].cell(row, projected_headers[sheet][label])
                         target = ws.cell(last, col)
-                        target._style = copy(ws.cell(template_row, col)._style)
                         operations.setdefault(sheet, {})[target.coordinate] = (wanted, target)
                         owned[json.dumps([sheet, identity, label])] = _saved_journal_value(wanted)
                     if sheet == TRADE_LOG_SHEET:
@@ -23596,7 +23598,8 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
                                preserved=True, balance_metadata=balance_metadata,
                                ranges=deepcopy(record.get('ranges', {})),
                                legacy=record.get('legacy', not bool(record['cells'])))
-            audit = _saved_journal_patch(original, candidate, source, operations, next_record)
+            audit = _saved_journal_patch(original, candidate, source, operations, next_record,
+                append_donor_rows=append_donor_rows)
         finally:
             desired_book.close()
         if _saved_journal_identity(path) != original_identity or path.read_bytes() != original:
@@ -23643,7 +23646,7 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
             proposal.unlink()
 
 
-def _saved_journal_patch(original, candidate, wb, operations, ownership):
+def _saved_journal_patch(original, candidate, wb, operations, ownership, *, append_donor_rows=None):
     """Copy every original part; change only declared values/affected caches.
     Styles, extensions, relationships, tables and worksheet metadata are never
     round-tripped through openpyxl. Reopen both views AND inverse-audit the ZIP.
@@ -23658,6 +23661,9 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership):
             data = root.find(ns + 'sheetData')
             rows = {int(r.get('r')): r for r in data}
             original_rows = set(rows)
+            donor = rows.get((append_donor_rows or {}).get(sheet))
+            donor_styles = {coordinate_to_tuple(cell.get('r'))[1]: cell.get('s', '0')
+                            for cell in donor} if donor is not None else {}
             added_links = []
             relpart = _worksheet_relationship_part_name(part)
             relns = '{http://schemas.openxmlformats.org/package/2006/relationships}'
@@ -23672,7 +23678,8 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership):
                 if existing is not None and existing.find(ns + 'f') is not None:
                     raise ValueError('Refusing formula overwrite: ' + sheet + '!' + coordinate)
                 if existing is None:
-                    existing = ET.SubElement(row, ns + 'c', r=coordinate, s=str(target.style_id))
+                    existing = ET.SubElement(row, ns + 'c', r=coordinate,
+                        s=donor_styles.get(target.column, '0') if target.row not in original_rows else '0')
                 # Existing cell attributes/extensions are presentation, preserved.
                 for child in list(existing):
                     if child.tag in {ns + 'v', ns + 'is'}:
