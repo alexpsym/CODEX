@@ -2430,78 +2430,60 @@ def test_github_sync_real_repo_without_eligible_diff_is_successful_noop(
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_manual_save_defers_during_import_verification_and_rollback(tmp_path, monkeypatch):
-    workbook = tmp_path / 'Trading Journal.xlsx'
-    workbook.write_bytes(b'previous verified workbook')
-    master_service._manual_save_set_known_fingerprint(workbook)
-    monkeypatch.setattr(master_service, '_manual_save_watcher_debounce_seconds', lambda: 0.2)
-    published = []
-    monkeypatch.setattr(
-        master_service, '_sync_journal_excel_files_to_github',
-        lambda path: published.append(path.read_bytes()) or {
-            'github_sync_enabled': True, 'github_sync_ok': True,
-            'github_sync_noop': False, 'github_sync_verified': True,
-            'github_sync_error': '', 'github_sync_files': [], 'github_sync_commit': 'fixture',
-        },
-    )
-    owner_ready = threading.Event()
-    start_rollback = threading.Event()
-    rollback_written = threading.Event()
-    release_owner = threading.Event()
-    owner_errors = []
-
-    def import_owner():
-        rejected = master_service._reserve_master_journal_workbook_sync(
-            workbook, 'fixture-import', 'manual_import_transaction',
-        )
-        if rejected is not None:
-            owner_errors.append(rejected)
-            owner_ready.set()
-            return
+    workbook=tmp_path/'Trading Journal.xlsx';workbook.write_bytes(b'verified before user save')
+    ms=master_service
+    monkeypatch.setattr(ms,'_journal_transaction_lock_path',lambda p:tmp_path/'transaction.lock')
+    monkeypatch.setattr(ms,'_master_journal_path',lambda:workbook)
+    monkeypatch.setattr(ms,'_manual_save_watcher_debounce_seconds',lambda:0.2)
+    ms._manual_save_set_known_fingerprint(workbook)
+    workbook.write_bytes(b'pending manual save')
+    ms._manual_save_scan_once(10.0,workbook)
+    pending=(ms._MANUAL_SAVE_PENDING_FINGERPRINT,ms._MANUAL_SAVE_PENDING_SINCE)
+    ready=threading.Event();release=threading.Event();deferred=threading.Event();poll=threading.Event();stop=threading.Event()
+    errors=[];opens=[];published=[]
+    real_open=Path.open
+    def observed(path,*a,**k):
+        if path.resolve()==workbook.resolve():opens.append(threading.get_ident())
+        return real_open(path,*a,**k)
+    monkeypatch.setattr(Path,'open',observed)
+    def owner():
         try:
-            workbook.write_bytes(b'unverified import candidate')
-            owner_ready.set()
-            if not start_rollback.wait(5):
-                owner_errors.append('rollback signal missed')
-                return
-            workbook.write_bytes(b'restored pending manual save')
-            rollback_written.set()
-            if not release_owner.wait(5):
-                owner_errors.append('release signal missed')
+            assert ms._reserve_master_journal_workbook_sync(workbook,'fixture-import','manual_import_transaction') is None
+            ready.set();assert release.wait(10)
+        except Exception as exc:errors.append(exc);ready.set()
         finally:
-            master_service._release_master_journal_workbook_sync()
-
-    owner = threading.Thread(target=import_owner, name='fixture-import-owner')
-    owner.start()
+            if ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get('owner_thread_id')==threading.get_ident():ms._release_master_journal_workbook_sync()
+    def sync(path):
+        published.append(path.read_bytes());stop.set()
+        return dict(github_sync_enabled=True,github_sync_ok=True,github_sync_verified=True,github_sync_noop=False,github_sync_error='',github_sync_commit='fixture',github_sync_files=[])
+    monkeypatch.setattr(ms,'_sync_journal_excel_files_to_github',sync)
+    class PollStop:
+        def is_set(self):return stop.is_set()
+        def wait(self,seconds):
+            if not stop.is_set():deferred.set();assert poll.wait(10)
+            return stop.is_set()
+    monkeypatch.setattr(ms,'_MANUAL_SAVE_WATCHER_STOP',PollStop())
+    def watcher():
+        try:ms._manual_save_github_sync_watcher_loop()
+        except Exception as exc:errors.append(exc)
+    worker=threading.Thread(target=owner);worker.start();watch=None
     try:
-        assert owner_ready.wait(5)
-        assert not owner_errors
-        master_service._manual_save_scan_once(10.0, workbook)
-        master_service._manual_save_scan_once(11.0, workbook)
-        assert published == []
-        assert master_service._manual_save_state_snapshot()['manual_save_pending'] is True
-        start_rollback.set()
-        assert rollback_written.wait(5)
-        master_service._manual_save_scan_once(12.0, workbook)
-        master_service._manual_save_scan_once(13.0, workbook)
-        assert published == []
-        assert master_service._manual_save_state_snapshot()['manual_save_pending'] is True
+        assert ready.wait(5) and not errors
+        ms._manual_save_scan_once(11.0,workbook)
+        assert opens==[] and published==[]
+        assert (ms._MANUAL_SAVE_PENDING_FINGERPRINT,ms._MANUAL_SAVE_PENDING_SINCE)==pending
+        watch=threading.Thread(target=watcher);watch.start();assert deferred.wait(5)
+        assert opens==[] and published==[], 'startup or watcher opened workbook while import owned it'
+        assert (ms._MANUAL_SAVE_PENDING_FINGERPRINT,ms._MANUAL_SAVE_PENDING_SINCE)==pending
+        release.set();worker.join(5);assert not worker.is_alive()
+        poll.set();watch.join(5);assert not watch.is_alive()
+        assert not errors and published==[b'pending manual save'] and opens
+        assert ms._MANUAL_SAVE_KNOWN_FINGERPRINT==ms._manual_save_file_fingerprint(workbook)
+        assert ms._MANUAL_SAVE_PENDING_FINGERPRINT is None
+        assert not ms._manual_save_state_snapshot()['manual_save_pending']
     finally:
-        release_owner.set()
-        owner.join(timeout=5)
-    assert not owner.is_alive() and not owner_errors
-    master_service._manual_save_scan_once(14.0, workbook)
-    assert published == [b'restored pending manual save']
-    assert master_service._manual_save_state_snapshot()['manual_save_pending'] is False
-
-    # A service-owned write that was verified by its own Git transaction is known.
-    assert master_service._reserve_master_journal_workbook_sync(workbook, 'fixture-service', 'manual_import_transaction') is None
-    try:
-        workbook.write_bytes(b'verified service workbook')
-        assert master_service._manual_save_set_known_fingerprint(workbook)
-    finally:
-        master_service._release_master_journal_workbook_sync()
-    master_service._manual_save_scan_once(20.0, workbook)
-    assert published == [b'restored pending manual save']
+        release.set();poll.set();stop.set();worker.join(5)
+        if watch:watch.join(5)
 
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')

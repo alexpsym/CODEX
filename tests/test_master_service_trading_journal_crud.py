@@ -9170,3 +9170,100 @@ def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeyp
     assert prior.issubset(ids)
     for identity in expected:assert ids.count(identity)==1
     with zipfile.ZipFile(path) as z:assert z.read(part)==sim
+
+
+def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(temp_state_paths, monkeypatch):
+    import tools.master_journal_workbook as journal
+    from test_master_journal_workbook import sample_snapshot
+    import ctypes, zipfile
+    from ctypes import wintypes
+    from openpyxl.styles import Font
+    from openpyxl.comments import Comment
+    assert sys.platform=='win32', 'This regression requires the actual Windows access probe'
+    ms=master_service;path=temp_state_paths/'Trading Journal.xlsx'
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026);monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(ms,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(ms,'_journal_transaction_lock_path',lambda p:temp_state_paths/'transaction.lock')
+    real_temp=ms.tempfile.NamedTemporaryFile
+    def fixture_temp(*a,**k):k.setdefault('dir',str(temp_state_paths));return real_temp(*a,**k)
+    monkeypatch.setattr(ms.tempfile,'NamedTemporaryFile',fixture_temp)
+    snapshot=sample_snapshot();prior={str(r['id']) for r in snapshot['items']}
+    journal._counter_build(snapshot,path,publish_recommendation_assets=False)
+    wb=load_workbook(path);ws=wb.create_sheet('Authored layout');ws['A1']='Keep authored content';ws['A1'].font=Font(name='Arial',size=17,bold=True);ws['A1'].comment=Comment('manual note','Alex');ws['A1'].hyperlink='https://example.invalid/';ws.column_dimensions['A'].width=31;ws.freeze_panes='B2';wb.save(path);wb.close();journal._saved_journal_seed(path)
+    ms._set_trading_journal_rows(snapshot['items'])
+    with zipfile.ZipFile(path) as z:authored=journal._worksheet_ooxml_part_name(z,'Authored layout');authored_bytes=z.read(authored)
+    import requests
+    def denied(*a,**k):raise AssertionError('external transport forbidden')
+    monkeypatch.setattr(requests.sessions.Session,'request',denied)
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE];kernel.CreateFileW.restype=wintypes.HANDLE
+    kernel.CloseHandle.argtypes=[wintypes.HANDLE];kernel.CloseHandle.restype=wintypes.BOOL
+    def exclusive_handle():
+        handle=kernel.CreateFileW(str(path),0x80000000,0,None,3,0x80,None)
+        assert handle not in (None,ctypes.c_void_p(-1).value),ctypes.get_last_error()
+        return handle
+    real_probe=ms._master_journal_lock_status
+    handle=exclusive_handle()
+    try:assert real_probe(path)['locked'], 'actual incompatible Windows handle must block'
+    finally:assert kernel.CloseHandle(handle)
+    assert not real_probe(path)['locked']
+    header=_bybit_csv_grouped_three_trades().splitlines()[0]
+    def csv(symbol):return (header+f'\n{symbol},o1,Buy,Market,1,100,100,Trade,0,0,e1,17/05/2026 22:50,1000\n{symbol},o2,Sell,Market,1,110,110,Trade,0,0,e2,17/05/2026 22:51,1010\n').encode()
+    payload=csv('LOCKCHECKUSDT');file=temp_state_paths/'expected.csv';file.write_bytes(payload);expected={str(r['id']) for r in ms._parse_bybit_trade_history_csv(file,account_mode='demo')};assert len(expected)==1
+    probes=[];watch_opens=[];watch_errors=[];mode={'publishing':False,'fail':False,'watch_done':False}
+    real_open=Path.open
+    def observed(p,*a,**k):
+        if threading.current_thread().name=='fixture-watcher' and p.resolve()==path.resolve():watch_opens.append(str(p))
+        return real_open(p,*a,**k)
+    monkeypatch.setattr(Path,'open',observed)
+    def watcher():
+        try:ms._manual_save_scan_once(100.0,path)
+        except Exception as exc:watch_errors.append(exc)
+    def probe(p):
+        probes.append(str(p))
+        if mode['publishing']:
+            if not mode['watch_done']:
+                mode['watch_done']=True;done=threading.Event()
+                def attempt():
+                    try:watcher()
+                    finally:done.set()
+                worker=threading.Thread(target=attempt,name='fixture-watcher');worker.start();assert done.wait(5);worker.join(5);assert not worker.is_alive()
+                assert not watch_opens and not watch_errors
+            if mode['fail']:
+                h=exclusive_handle()
+                try:return real_probe(p)
+                finally:assert kernel.CloseHandle(h)
+        return real_probe(p)
+    monkeypatch.setattr(ms,'_master_journal_lock_status',probe)
+    # Known LTT contention must be reported before the first access probe.
+    assert ms._reserve_master_journal_workbook_sync(path,'fixture-owner','resync') is None
+    blocked=[]
+    try:
+        worker=threading.Thread(target=lambda:blocked.append(ms._import_uploaded_trading_journal_file('bybit_demo.csv',payload,account_mode='demo')));worker.start();worker.join(5);assert not worker.is_alive()
+        assert blocked[0]['code']=='MASTER_JOURNAL_SYNC_IN_PROGRESS' and blocked[0]['active_caller']=='resync'
+        assert not probes
+    finally:ms._release_master_journal_workbook_sync()
+    real_publish=ms._publish_verified_journal
+    def publish(*a,**k):
+        mode['publishing']=True;mode['watch_done']=False
+        try:return real_publish(*a,**k)
+        finally:mode['publishing']=False
+    monkeypatch.setattr(ms,'_publish_verified_journal',publish)
+    result=ms._import_uploaded_trading_journal_file('bybit_demo.csv',payload,account_mode='demo')
+    assert result['ok'],result
+    assert mode['watch_done'] and not watch_opens and not watch_errors
+    rows=journal.read_master_journal_source(path)['items'];ids=[str(r['id']) for r in rows];assert prior.issubset(ids)
+    for identity in expected:assert ids.count(identity)==1
+    with zipfile.ZipFile(path) as z:assert z.read(authored)==authored_bytes
+    # A real pre-replacement denial leaves the original untouched; rollback is read-only.
+    before=path.read_bytes();before_stat=path.stat();rewrites=[];real_atomic=ms._atomic_write_bytes
+    def atomic(p,data):
+        if Path(p).resolve()==path.resolve():rewrites.append(1)
+        return real_atomic(p,data)
+    monkeypatch.setattr(ms,'_atomic_write_bytes',atomic);mode['fail']=True
+    failed=ms._import_uploaded_trading_journal_file('bybit_demo.csv',csv('FAILLOCKUSDT'),account_mode='demo')
+    assert not failed['ok'],failed
+    assert mode['watch_done'] and not rewrites and not watch_opens and not watch_errors
+    assert path.read_bytes()==before and path.stat().st_mtime_ns==before_stat.st_mtime_ns
+    assert not ms._master_journal_lock_status(path)['locked']

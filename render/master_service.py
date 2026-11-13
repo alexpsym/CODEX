@@ -1214,31 +1214,6 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
     master_path = master_path or _master_journal_path()
     if _should_ignore_manual_save_path(master_path) or not master_path.exists():
         return
-    fp = _manual_save_file_fingerprint(master_path)
-    if _MANUAL_SAVE_KNOWN_FINGERPRINT is None:
-        _MANUAL_SAVE_KNOWN_FINGERPRINT = fp
-        return
-    if fp == _MANUAL_SAVE_KNOWN_FINGERPRINT:
-        _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
-        _MANUAL_SAVE_RETRY_COUNT = 0; _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
-        _manual_save_state_update(manual_save_pending=False, manual_save_retry_count=0, manual_save_next_retry_at=None)
-        return
-    if _MANUAL_SAVE_PENDING_FINGERPRINT != fp:
-        _MANUAL_SAVE_PENDING_FINGERPRINT = fp
-        _MANUAL_SAVE_PENDING_SINCE = now
-        _MANUAL_SAVE_RETRY_COUNT = 0
-        _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
-        _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso(), manual_save_pending=True, manual_save_retry_count=0, manual_save_next_retry_at=None)
-        return
-    if (now - float(_MANUAL_SAVE_PENDING_SINCE or now)) < _manual_save_watcher_debounce_seconds():
-        return
-    fp2 = _manual_save_file_fingerprint(master_path)
-    if fp2 != fp:
-        _MANUAL_SAVE_PENDING_FINGERPRINT = fp2
-        _MANUAL_SAVE_PENDING_SINCE = now
-        return
-    if now < _MANUAL_SAVE_NEXT_RETRY_AT:
-        return
     rejected = _reserve_master_journal_workbook_sync(
         master_path, f"manual-save-{uuid4().hex[:12]}", "manual_save_watcher",
     )
@@ -1246,6 +1221,31 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
         # Keep the pending fingerprint while an import/resync verifies or rolls back.
         return
     try:
+        fp = _manual_save_file_fingerprint(master_path)
+        if _MANUAL_SAVE_KNOWN_FINGERPRINT is None:
+            _MANUAL_SAVE_KNOWN_FINGERPRINT = fp
+            return
+        if fp == _MANUAL_SAVE_KNOWN_FINGERPRINT:
+            _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
+            _MANUAL_SAVE_RETRY_COUNT = 0; _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+            _manual_save_state_update(manual_save_pending=False, manual_save_retry_count=0, manual_save_next_retry_at=None)
+            return
+        if _MANUAL_SAVE_PENDING_FINGERPRINT != fp:
+            _MANUAL_SAVE_PENDING_FINGERPRINT = fp
+            _MANUAL_SAVE_PENDING_SINCE = now
+            _MANUAL_SAVE_RETRY_COUNT = 0
+            _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+            _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso(), manual_save_pending=True, manual_save_retry_count=0, manual_save_next_retry_at=None)
+            return
+        if (now - float(_MANUAL_SAVE_PENDING_SINCE or now)) < _manual_save_watcher_debounce_seconds():
+            return
+        fp2 = _manual_save_file_fingerprint(master_path)
+        if fp2 != fp:
+            _MANUAL_SAVE_PENDING_FINGERPRINT = fp2
+            _MANUAL_SAVE_PENDING_SINCE = now
+            return
+        if now < _MANUAL_SAVE_NEXT_RETRY_AT:
+            return
         locked_fp = _manual_save_file_fingerprint(master_path)
         if locked_fp != fp2:
             _MANUAL_SAVE_PENDING_FINGERPRINT = locked_fp
@@ -1280,6 +1280,31 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
         _manual_save_state_update(manual_save_pending=True, manual_save_retry_count=_MANUAL_SAVE_RETRY_COUNT, manual_save_next_retry_at=datetime.fromtimestamp(_MANUAL_SAVE_NEXT_RETRY_AT, timezone.utc).isoformat())
     finally:
         _release_master_journal_workbook_sync()
+def _manual_save_startup_reconcile_once(master_path: Path) -> bool:
+    """Reserve before startup's first read, retaining reconciliation on deferral."""
+    global _MANUAL_SAVE_KNOWN_FINGERPRINT, _MANUAL_SAVE_PENDING_FINGERPRINT, _MANUAL_SAVE_PENDING_SINCE
+    global _MANUAL_SAVE_RETRY_COUNT, _MANUAL_SAVE_NEXT_RETRY_AT
+    rejected = _reserve_master_journal_workbook_sync(
+        master_path, f"manual-save-startup-{uuid4().hex[:12]}", "manual_save_watcher_startup",
+    )
+    if rejected is not None:
+        return False
+    try:
+        fp = _manual_save_file_fingerprint(master_path)
+        now = time.time()
+        _MANUAL_SAVE_KNOWN_FINGERPRINT = ("startup_unreconciled",)
+        _MANUAL_SAVE_PENDING_FINGERPRINT = fp
+        _MANUAL_SAVE_PENDING_SINCE = now - _manual_save_watcher_debounce_seconds()
+        _MANUAL_SAVE_RETRY_COUNT = 0
+        _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+        _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso(), manual_save_pending=True,
+                                  manual_save_retry_count=0, manual_save_next_retry_at=None)
+        _manual_save_scan_once(now, master_path)
+        return True
+    finally:
+        _release_master_journal_workbook_sync()
+
+
 def _manual_save_github_sync_watcher_loop() -> None:
     global _MANUAL_SAVE_KNOWN_FINGERPRINT, _MANUAL_SAVE_PENDING_FINGERPRINT, _MANUAL_SAVE_PENDING_SINCE
     global _MANUAL_SAVE_RETRY_COUNT, _MANUAL_SAVE_NEXT_RETRY_AT
@@ -1289,26 +1314,18 @@ def _manual_save_github_sync_watcher_loop() -> None:
     # Reconcile on every worker start instead of accepting the current bytes as
     # clean. This catches a workbook saved while the worker was stopped and a
     # locally committed workbook whose prior push never reached the target branch.
+    startup_pending = True
+    _manual_save_state_update(manual_save_pending=True)
     try:
-        fp = _manual_save_file_fingerprint(master_path)
-        now = time.time()
-        _MANUAL_SAVE_KNOWN_FINGERPRINT = ("startup_unreconciled",)
-        _MANUAL_SAVE_PENDING_FINGERPRINT = fp
-        _MANUAL_SAVE_PENDING_SINCE = now - _manual_save_watcher_debounce_seconds()
-        _MANUAL_SAVE_RETRY_COUNT = 0
-        _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
-        _manual_save_state_update(
-            manual_save_last_detected_save_at=_utc_now_iso(),
-            manual_save_pending=True,
-            manual_save_retry_count=0,
-            manual_save_next_retry_at=None,
-        )
-        _manual_save_scan_once(now, master_path)
+        startup_pending = not _manual_save_startup_reconcile_once(master_path)
     except Exception as exc:
         _manual_save_state_update(manual_save_last_error=str(exc), manual_save_last_error_type=type(exc).__name__, manual_save_pending=True)
     while not _MANUAL_SAVE_WATCHER_STOP.is_set():
         try:
-            _manual_save_scan_once(time.time(), master_path)
+            if startup_pending:
+                startup_pending = not _manual_save_startup_reconcile_once(master_path)
+            else:
+                _manual_save_scan_once(time.time(), master_path)
         except Exception as exc:
             _manual_save_state_update(manual_save_last_error=str(exc))
         _MANUAL_SAVE_WATCHER_STOP.wait(_manual_save_watcher_poll_seconds())
@@ -44302,6 +44319,15 @@ def _import_uploaded_trading_journal_file(
     timings: Dict[str, float] = {}
     try:
         workbook_path_for_preflight = _master_journal_path()
+        import_workbook_sync_id = f"mjsync-import-owner-{uuid4().hex[:12]}"
+        rejected = _reserve_master_journal_workbook_sync(
+            workbook_path_for_preflight, import_workbook_sync_id, "manual_import_transaction",
+        )
+        if rejected is not None:
+            return {**rejected, "uploaded_name": name, "file_type": suffix,
+                    "rows_parsed": 0, "rows_upserted": 0,
+                    "errors": ["workbook_sync_in_progress"], "warnings": []}
+        master_workbook_reserved = True
         if workbook_path_for_preflight.exists():
             lock_status = _master_journal_lock_status(workbook_path_for_preflight)
             if lock_status.get("locked"):
@@ -44422,23 +44448,6 @@ def _import_uploaded_trading_journal_file(
         duplicate_rows_merged = 0
         rows_upserted = 0
         workbook_path = _master_journal_path()
-        import_workbook_sync_id = f"mjsync-import-owner-{uuid4().hex[:12]}"
-        rejected = _reserve_master_journal_workbook_sync(
-            workbook_path,
-            import_workbook_sync_id,
-            "manual_import_transaction",
-        )
-        if rejected is not None:
-            return {
-                **rejected,
-                "uploaded_name": name,
-                "file_type": suffix,
-                "rows_parsed": len(rows),
-                "rows_upserted": 0,
-                "errors": ["workbook_sync_in_progress"],
-                "warnings": [],
-            }
-        master_workbook_reserved = True
         locked_after_reservation = (
             _master_journal_lock_status(workbook_path)
             if workbook_path.exists()
@@ -45907,11 +45916,17 @@ def _import_uploaded_trading_journal_file(
                     )
             try:
                 if workbook_had_original and workbook_backup_bytes is not None:
-                    owned_hash = str((sync_result or {}).get('published_sha256') or (sync_result or {}).get('candidate_sha256') or '')
                     current_bytes = workbook_path.read_bytes()
-                    if current_bytes != workbook_backup_bytes and (not owned_hash or hashlib.sha256(current_bytes).hexdigest() != owned_hash):
-                        raise RuntimeError('Newer workbook save retained; import rollback does not own current bytes')
-                    _atomic_write_bytes(workbook_path, workbook_backup_bytes)
+                    if current_bytes != workbook_backup_bytes:
+                        active = MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+                        if (not master_workbook_reserved
+                                or active.get('sync_id') != import_workbook_sync_id
+                                or active.get('owner_thread_id') != threading.get_ident()):
+                            raise RuntimeError('Import rollback reservation ownership lost')
+                        owned_hash = str((sync_result or {}).get('published_sha256') or (sync_result or {}).get('candidate_sha256') or '')
+                        if not owned_hash or hashlib.sha256(current_bytes).hexdigest() != owned_hash:
+                            raise RuntimeError('Newer workbook save retained; import rollback does not own current bytes')
+                        _atomic_write_bytes(workbook_path, workbook_backup_bytes)
                 elif not workbook_had_original and workbook_path.exists():
                     workbook_path.unlink()
             except Exception as restore_exc:
