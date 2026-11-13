@@ -13859,3 +13859,96 @@ def test_saved_journal_ownership_defined_name_literals_are_excel_safe(tmp_path):
     for i,start in enumerate(range(0,len(encoded),2000)):legacy.defined_names.add(DefinedName(journal._SAVED_JOURNAL_PREFIX+f'{i:05d}',attr_text='"'+encoded[start:start+2000]+'"'))
     assert journal._saved_journal_ownership(legacy)==record
     parsed.close();legacy.close()
+
+
+def _simulation_cache_fixture(path, existing=False):
+    import zipfile
+    from xml.etree import ElementTree as ET
+    from openpyxl import Workbook, load_workbook
+    wb = load_workbook(path) if existing else Workbook()
+    if not existing:
+        wb.active.title = 'Inputs'
+        for row in range(1, 101): wb['Inputs'].cell(row, 1, row)
+    ws = wb.create_sheet(' SIM')
+    ws['A1'] = '=RAND()'
+    for row in range(2, 107): ws.cell(row, 1, f'=A{row-1}+1')
+    ws['B1'] = '=COUNTIF(A1:A106,">0")'
+    ws['C1'] = '=STDEV(A1:A106)'
+    ws['L1'] = '=AVERAGE(A1:A106)'
+    ws['E1'] = '=A1+1'; ws['E2'] = '=A2+1'
+    if not existing:
+        ws['F1'] = '=Inputs!A1'
+        for row in range(2, 107): ws.cell(row, 6, f'=F{row-1}+1')
+    wb.save(path); wb.close()
+    with zipfile.ZipFile(path) as z:
+        parts = {i.filename: (i,z.read(i.filename)) for i in z.infolist()}
+        import tools.master_journal_workbook as j
+        part = j._worksheet_ooxml_part_name(z, ' SIM')
+    ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    root = ET.fromstring(parts[part][1])
+    for c in root.findall('.//'+ns+'c'):
+        f=c.find(ns+'f')
+        if f is None: continue
+        v=c.find(ns+'v')
+        if v is None:v=ET.SubElement(c,ns+'v')
+        v.text='0.5'
+        if c.get('r')=='E1':f.attrib.update(t='shared',si='0',ref='E1:E2')
+        if c.get('r')=='E2':f.attrib.update(t='shared',si='0');f.text=None
+    parts[part]=(parts[part][0],ET.tostring(root))
+    with zipfile.ZipFile(path,'w') as z:
+        for info,data in parts.values():z.writestr(info,data)
+    return part,parts[part][1]
+
+
+def test_saved_journal_patch_preserves_simulation_caches(tmp_path, monkeypatch):
+    import tools.master_journal_workbook as j
+    import zipfile, subprocess
+    from io import BytesIO
+    from openpyxl import load_workbook, Workbook
+    from xml.etree import ElementTree as ET
+    path=tmp_path/'synthetic.xlsx';part,sim=_simulation_cache_fixture(path)
+    original=path.read_bytes();wb=load_workbook(path)
+    wanted=Workbook().active;wanted['A2']=222
+    with zipfile.ZipFile(path) as z:input_xml=z.read(j._worksheet_ooxml_part_name(z,'Inputs'))
+    real=j.ET.fromstring;calls=[]
+    def counted(data,*a,**k):
+        if data==input_xml:calls.append(1)
+        return real(data,*a,**k)
+    monkeypatch.setattr(j.ET,'fromstring',counted)
+    out=tmp_path/'out.xlsx'
+    j._saved_journal_patch(original,out,wb,{'Inputs':{'A2':(wanted['A2'],wb['Inputs']['A2'])}}, {})
+    assert len(calls)<10, 'original-row membership reparses the worksheet per row'
+    with zipfile.ZipFile(out) as z:assert z.read(part)==sim
+    wanted['A1']=999
+    j._saved_journal_patch(original,out,wb,{'Inputs':{'A1':(wanted['A1'],wb['Inputs']['A1'])}}, {})
+    ns='{'+j._SPREADSHEETML_NAMESPACE+'}'
+    with zipfile.ZipFile(out) as z:
+        root=real(z.read(part));cells={c.get('r'):c for c in root.findall('.//'+ns+'c')}
+        assert cells['F106'].find(ns+'v') is None
+        assert cells['A1'].find(ns+'v').text=='0.5'
+        assert cells['E2'].find(ns+'f').attrib=={'t':'shared','si':'0'}
+    for formula in ['=INDIRECT("A1")','=Z1']:
+        wb[' SIM']['Z1']=formula
+        # Give the unsupported/cyclic formula a saved cache in original XML.
+        with zipfile.ZipFile(BytesIO(original)) as z:parts={i.filename:(i,z.read(i.filename)) for i in z.infolist()}
+        root=real(parts[part][1]);row=root.find(ns+'sheetData/'+ns+'row');c=ET.SubElement(row,ns+'c',r='Z1');ET.SubElement(c,ns+'f').text=formula[1:];ET.SubElement(c,ns+'v').text='1'
+        parts[part]=(parts[part][0],ET.tostring(root));buf=BytesIO()
+        with zipfile.ZipFile(buf,'w') as z:
+            for info,data in parts.values():z.writestr(info,data)
+        with pytest.raises(ValueError,match='Cannot prove cached'):
+            j._saved_journal_patch(buf.getvalue(),tmp_path/'refused.xlsx',wb,{'Inputs':{'A1':(wanted['A1'],wb['Inputs']['A1'])}}, {})
+        assert path.read_bytes()==original
+    wb.close()
+    # Exactly one pinned, read-only compatibility inspection; no live workbook.
+    pinned=subprocess.run(['git','cat-file','blob','8c60557a499da66cf38526173ba74096024c1c88'],capture_output=True,check=True).stdout
+    fixture=tmp_path/'pinned.xlsx';fixture.write_bytes(pinned);loaded=load_workbook(fixture)
+    cache={};count=0
+    with zipfile.ZipFile(fixture) as z:
+        root=real(z.read(j._worksheet_ooxml_part_name(z,' SIM')))
+        for c in root.findall('.//'+ns+'c'):
+            if c.find(ns+'f') is not None and c.find(ns+'v') is not None and c.find(ns+'v').text is not None:
+                result=j._saved_journal_dependencies(loaded,' SIM',loaded[' SIM'][c.get('r')].value,cache=cache)
+                assert result['safe'],(c.get('r'),result)
+                count+=1
+    assert count==511
+    loaded.close()

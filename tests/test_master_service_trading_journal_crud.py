@@ -9133,3 +9133,40 @@ def test_saved_excel_actual_import_and_incremental_recovery(temp_state_paths, mo
     replay=master_service._replay_trading_journal_incremental_recovery(dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE))
     assert replay['ok'],replay
     assert len(journal.read_master_journal_source(path)['items'])==2
+
+
+def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeypatch):
+    import tools.master_journal_workbook as journal
+    from test_master_journal_workbook import _simulation_cache_fixture, sample_snapshot
+    import zipfile
+    path=temp_state_paths/'Trading Journal.xlsx'
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026)
+    monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(master_service,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(master_service,'_journal_transaction_lock_path',lambda p:temp_state_paths/'transaction.lock')
+    snapshot=sample_snapshot();prior={str(r['id']) for r in snapshot['items']}
+    journal._counter_build(snapshot,path,publish_recommendation_assets=False)
+    part,sim=_simulation_cache_fixture(path,existing=True)
+    journal._saved_journal_seed(path)
+    master_service._set_trading_journal_rows(snapshot['items'])
+    csv=temp_state_paths/'synthetic.csv'
+    header=_bybit_csv_grouped_three_trades().splitlines()[0]
+    fills=[f'BTCUSDT,o{i},{side},Market,1,{price},{price},Trade,0,0,e{i},17/05/2026 22:{50+i:02d},1000' for i,(side,price) in enumerate([('Buy',100),('Sell',110),('Buy',120),('Sell',130)])]
+    csv.write_text(header+'\n'+'\n'.join(fills)+'\n')
+    expected={str(r['id']) for r in master_service._parse_bybit_trade_history_csv(csv,account_mode='demo')}
+    assert len(expected)==2 and all(x.startswith('bybit:demo:trade:') for x in expected)
+    calls=[];real=journal.update_master_journal_workbook_data_only
+    def writer(*a,**k):
+        calls.append(1);return real(*a,**k)
+    monkeypatch.setattr(master_service,'update_master_journal_workbook_data_only',writer)
+    def denied(*a,**k):raise AssertionError('external transport forbidden')
+    import requests
+    monkeypatch.setattr(requests.sessions.Session,'request',denied)
+    result=master_service._import_uploaded_trading_journal_file('bybit_demo.csv',csv.read_bytes(),account_mode='demo')
+    assert result['ok'],result
+    assert calls,'real data-only writer must execute'
+    source=journal.read_master_journal_source(path);ids=[str(r['id']) for r in source['items']]
+    assert prior.issubset(ids)
+    for identity in expected:assert ids.count(identity)==1
+    with zipfile.ZipFile(path) as z:assert z.read(part)==sim

@@ -23161,48 +23161,75 @@ def _saved_journal_identity(path):
     return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
 
 
-def _saved_journal_dependencies(wb, sheet, formula, active=None):
-    """Reuse the bounded deterministic formula contract, extending exact ranges
-    to explicitly named same-workbook sheets. Unknown dependencies fail closed.
+def _saved_journal_dependencies(wb, sheet, formula, active=None, cache=None):
+    """Bounded static precedents, separate from legacy deterministic evaluation.
+
+    The loaded workbook resolves shared followers; original OOXML is never
+    rewritten to expand them. Cache lifetime is one immutable workbook update.
     """
-    coordinates, active = set(), set(active or ())
+    cache = {} if cache is None else cache
+    parsed = cache.setdefault('parsed', {})
+    resolved = cache.setdefault('resolved', {})
+    visiting = set(active or ())
+    limit = _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS
+
+    def visit(owner, expression):
+        key = (owner, expression)
+        if key in visiting:
+            raise ValueError('circular dependency')
+        if key in resolved:
+            return resolved[key]
+        if len(visiting) >= 512:
+            raise ValueError('dependency traversal limit exceeded')
+        visiting.add(key)
+        try:
+            if key not in parsed:
+                tokens = [t for t in Tokenizer(expression).items if t.type != 'WHITE-SPACE']
+                if not expression.startswith('=') or not tokens:
+                    raise ValueError('unresolved formula')
+                direct = set()
+                for i, token in enumerate(tokens):
+                    if token.type == 'FUNC' and token.subtype == 'OPEN':
+                        name = token.value.rstrip('(').upper()
+                        if name not in _TRADE_LOG_FORMULA_CACHE_SAFE_FUNCTIONS | {'RAND', 'COUNTIF', 'STDEV'}:
+                            raise ValueError('unproven function ' + token.value)
+                        if name == 'RAND' and (i + 1 >= len(tokens) or tokens[i + 1].type != 'FUNC' or tokens[i + 1].subtype != 'CLOSE'):
+                            raise ValueError('RAND requires no arguments')
+                    if token.subtype == 'ERROR':
+                        raise ValueError('unresolved error reference')
+                    if token.type != 'OPERAND' or token.subtype != 'RANGE':
+                        continue
+                    ref = token.value; target = owner
+                    if '!' in ref:
+                        target, ref = ref.rsplit('!', 1)
+                        target = target.strip("'").replace("''", "'")
+                    if target not in wb.sheetnames or '[' in target or not _TRADE_LOG_FORMULA_CACHE_A1_RANGE.fullmatch(ref):
+                        raise ValueError('external, dynamic or unresolved dependency ' + token.value)
+                    a, b, c, d = range_boundaries(ref.replace('$', ''))
+                    if None in (a,b,c,d) or (c-a+1)*(d-b+1) > limit:
+                        raise ValueError('unbounded dependency')
+                    for row in range(b,d+1):
+                        for col in range(a,c+1):
+                            direct.add((target, f'{get_column_letter(col)}{row}'))
+                            cache['work'] = cache.get('work', 0) + 1
+                            if len(direct) > limit or cache['work'] > 1000000:
+                                raise ValueError('dependency work budget exceeded')
+                parsed[key] = direct
+            result = set(parsed[key])
+            for target, coordinate in parsed[key]:
+                cell = wb[target][coordinate]
+                if cell.data_type == 'f':
+                    result.update(visit(target, cell.value))
+                if len(result) > limit:
+                    raise ValueError('dependency budget exceeded')
+            resolved[key] = frozenset(result)
+            return resolved[key]
+        finally:
+            visiting.remove(key)
     try:
-        for token in Tokenizer(formula).items:
-            if token.type == 'FUNC' and token.subtype == 'OPEN':
-                if token.value.rstrip('(').upper() not in _TRADE_LOG_FORMULA_CACHE_SAFE_FUNCTIONS:
-                    raise ValueError('unproven function ' + token.value)
-            if token.type != 'OPERAND' or token.subtype != 'RANGE':
-                continue
-            ref = token.value
-            owner = sheet
-            if '!' in ref:
-                owner, ref = ref.rsplit('!', 1)
-                owner = owner.strip("'").replace("''", "'")
-            if owner not in wb.sheetnames or '[' in ref:
-                raise ValueError('external or missing sheet dependency')
-            try:
-                bounds = range_boundaries(ref.replace('$', ''))
-            except ValueError:
-                raise ValueError('unresolved named dependency ' + ref)
-            a, b, c, d = bounds
-            if None in bounds or (c - a + 1) * (d - b + 1) > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS:
-                raise ValueError('unbounded dependency')
-            for row in range(b, d + 1):
-                for col in range(a, c + 1):
-                    cell = wb[owner].cell(row, col); key = (owner, cell.coordinate)
-                    coordinates.add(key)
-                    if len(coordinates) > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS:
-                        raise ValueError('dependency budget exceeded')
-                    if cell.data_type == 'f':
-                        if key in active or len(active) > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_DEPTH:
-                            raise ValueError('circular/deep dependency')
-                        nested = _saved_journal_dependencies(wb, owner, cell.value, active | {key})
-                        if not nested['safe']:
-                            raise ValueError(nested['reason'])
-                        coordinates.update(nested['coordinates'])
-        return dict(safe=True, coordinates=coordinates)
+        return dict(safe=True, coordinates=visit(sheet, formula))
     except Exception as exc:
-        return dict(safe=False, coordinates=coordinates, reason=str(exc))
+        return dict(safe=False, coordinates=set(), reason=str(exc))
 
 
 def verify_saved_journal_workbook(path, *, expected_snapshot=None):
@@ -23767,13 +23794,14 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership):
                     for cell in list(row):
                         if cell.get('r') in updates:
                             row.remove(cell)
-                    if int(row.get('r')) not in {int(r.get('r')) for r in ET.fromstring(package.read(part)).find(ns + 'sheetData')}:
+                    if int(row.get('r')) not in original_rows:
                         sd.remove(row)
             if _journal_xml_signature(inverse) != _journal_xml_signature(before):
                 raise RuntimeError('Undeclared worksheet delta: ' + sheet)
             replacements[part] = _saved_journal_xml(root, package.read(part))
         # Preserve unchanged formula/cache bytes. Only proven dependencies of
         # actual changed inputs lose caches and request Excel recalculation.
+        dependency_cache = {}
         for ws in wb:
             part = _worksheet_ooxml_part_name(package, ws.title)
             root = ET.fromstring(replacements.get(part, package.read(part)))
@@ -23782,7 +23810,7 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership):
                 formula = cell.find(ns + 'f')
                 if formula is None or not changed:
                     continue
-                signature = _saved_journal_dependencies(wb, ws.title, '=' + (formula.text or ''))
+                signature = _saved_journal_dependencies(wb, ws.title, ws[cell.get('r')].value, cache=dependency_cache)
                 if not signature['safe']:
                     if cell.find(ns + 'v') is not None and cell.find(ns + 'v').text is not None:
                         raise ValueError('Cannot prove cached formula dependencies at ' + ws.title + '!' + cell.get('r') + ': ' + signature['reason'])
@@ -23796,12 +23824,6 @@ def _saved_journal_patch(original, candidate, wb, operations, ownership):
             if touched:
                 replacements[part] = _saved_journal_xml(root, package.read(part))
         workbook_xml = _saved_journal_names(package.read('xl/workbook.xml'), ownership)
-        if changed:
-            root = ET.fromstring(workbook_xml); calc = root.find(ns + 'calcPr')
-            if calc is None:
-                calc = ET.SubElement(root, ns + 'calcPr')
-            calc.set('fullCalcOnLoad', '1'); calc.set('forceFullCalc', '1')
-            workbook_xml = _saved_journal_xml(root, package.read('xl/workbook.xml'))
         replacements['xl/workbook.xml'] = workbook_xml
         with zipfile.ZipFile(candidate, 'w') as target:
             target.comment = package.comment
