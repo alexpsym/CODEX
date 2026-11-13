@@ -9145,6 +9145,9 @@ def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeyp
     monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
     monkeypatch.setattr(master_service,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
     monkeypatch.setattr(master_service,'_journal_transaction_lock_path',lambda p:temp_state_paths/'transaction.lock')
+    real_temp=master_service.tempfile.NamedTemporaryFile
+    def fixture_temp(*a,**k):k.setdefault('dir',str(temp_state_paths));return real_temp(*a,**k)
+    monkeypatch.setattr(master_service.tempfile,'NamedTemporaryFile',fixture_temp)
     snapshot=sample_snapshot();prior={str(r['id']) for r in snapshot['items']}
     journal._counter_build(snapshot,path,publish_recommendation_assets=False)
     part,sim=_simulation_cache_fixture(path,existing=True)
@@ -9153,9 +9156,16 @@ def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeyp
     csv=temp_state_paths/'synthetic.csv'
     header=_bybit_csv_grouped_three_trades().splitlines()[0]
     fills=[f'BTCUSDT,o{i},{side},Market,1,{price},{price},Trade,0,0,e{i},17/05/2026 22:{50+i:02d},1000' for i,(side,price) in enumerate([('Buy',100),('Sell',110),('Buy',120),('Sell',130)])]
+    fills.extend([
+        'XRPUSDT,xrp-open,Buy,Market,905.1,1.0786,1.0786,Trade,0,0.53693248,xrp-exec-open,17/05/2026 23:50,',
+        'XRPUSDT,xrp-close,Sell,Market,905.1,1.078,1.078,Trade,0,0.53663379,xrp-exec-close,17/05/2026 23:51,',
+    ])
     csv.write_text(header+'\n'+'\n'.join(fills)+'\n')
-    expected={str(r['id']) for r in master_service._parse_bybit_trade_history_csv(csv,account_mode='demo')}
-    assert len(expected)==2 and all(x.startswith('bybit:demo:trade:') for x in expected)
+    parsed=master_service._parse_bybit_trade_history_csv(csv,account_mode='demo')
+    expected={str(r['id']) for r in parsed}
+    assert len(expected)==3 and all(x.startswith('bybit:demo:trade:') for x in expected)
+    xrp=next(r for r in parsed if r['symbol']=='XRPUSDT')
+    assert xrp['commission'] != -1.07356627
     calls=[];real=journal.update_master_journal_workbook_data_only
     def writer(*a,**k):
         calls.append(1);return real(*a,**k)
@@ -9170,6 +9180,15 @@ def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeyp
     assert prior.issubset(ids)
     for identity in expected:assert ids.count(identity)==1
     with zipfile.ZipFile(path) as z:assert z.read(part)==sim
+    saved_xrp=next(r for r in source['items'] if r['id']==xrp['id'])
+    assert saved_xrp['commission']==-1.07356627
+    assert saved_xrp['commission'] != xrp['commission']
+    assert journal.verify_saved_journal_workbook(path,expected_snapshot={'items':parsed})['ok']
+    changed=dict(xrp,commission=xrp['commission']+0.00000001)
+    rejected=journal.verify_saved_journal_workbook(path,expected_snapshot={'items':[changed]})
+    assert not rejected['ok'] and rejected['error']=='generated_projection_inputs_changed'
+    assert rejected['diagnostics']=={'id':xrp['id'],'field':'Commission'}
+    print('projection_precision_verified',repr(xrp['commission']),repr(saved_xrp['commission']),sorted(expected),flush=True)
 
 
 def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(temp_state_paths, monkeypatch):

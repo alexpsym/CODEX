@@ -10,6 +10,7 @@ from openpyxl.comments import Comment
 from openpyxl.formula import Tokenizer
 from openpyxl.styles import Font
 from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.compat.strings import safe_string
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Pane, Selection
 import hashlib
@@ -23265,8 +23266,13 @@ def verify_saved_journal_workbook(path, *, expected_snapshot=None):
                     if field not in row or key in record.get('protected', {}) or key not in cells:
                         continue
                     actual, expected = _as_float(cells[key].value), _as_float(projected.get(header))
-                    if actual != expected and not (actual in (None,0) and expected in (None,0)):
-                        return dict(ok=False,error='generated_projection_inputs_changed',diagnostics={'id':identity,'field':header})
+                    if actual == expected or (actual in (None, 0) and expected in (None, 0)):
+                        continue
+                    # The generated workbook serializes numbers before readback.
+                    if expected is not None and math.isfinite(expected) and actual == float(safe_string(expected)):
+                        continue
+                    return dict(ok=False, error='generated_projection_inputs_changed',
+                                diagnostics={'id': identity, 'field': header})
         return dict(ok=True, diagnostics={'saved_package_projection_verified': True,
                     'protected_cell_count': len(record.get('protected', {})), 'mapping_issues': issues,
                     'sheet_order': wb.sheetnames})
