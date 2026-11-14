@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 
 
 PYTHON = Path(r"C:\Users\User\miniconda3\python.exe")
+NODE = Path(r"C:\Program Files\nodejs\node.exe")
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {
     "startup": "tests/test_windows_launchers.py::test_streamer_uses_core_readiness_as_the_only_startup_completion_gate",
@@ -99,6 +100,41 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
+def child_environment(fixture):
+    """Allowlist process essentials; never inherit application or injection settings."""
+    windows = Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
+    home, cache = fixture / "home", fixture / "cache"
+    directories = {
+        "MASTER_ENV_DIR": fixture / "config",
+        "TEMP": fixture / "temp", "TMP": fixture / "temp", "TMPDIR": fixture / "temp",
+        "HOME": home, "USERPROFILE": home,
+        "APPDATA": home / "AppData/Roaming", "LOCALAPPDATA": home / "AppData/Local",
+        "XDG_CONFIG_HOME": home / "config", "XDG_CACHE_HOME": cache,
+        "XDG_DATA_HOME": home / "data", "XDG_STATE_HOME": home / "state",
+        "MPLCONFIGDIR": cache / "matplotlib", "NUMBA_CACHE_DIR": cache / "numba",
+        "PYTHONPYCACHEPREFIX": cache / "pycache", "PYTHONUSERBASE": home / "python",
+        "IPYTHONDIR": cache / "ipython", "JUPYTER_CONFIG_DIR": home / "jupyter",
+        "JUPYTER_DATA_DIR": cache / "jupyter", "JUPYTER_RUNTIME_DIR": cache / "jupyter-runtime",
+        "SQLITE_TMPDIR": fixture / "temp", "JOBLIB_TEMP_FOLDER": fixture / "temp",
+        "NPM_CONFIG_CACHE": cache / "npm", "OUTPUT_DIR": fixture / "output",
+    }
+    environment = {name: str(path) for name, path in directories.items()}
+    environment.update(
+        SYSTEMROOT=str(windows), WINDIR=str(windows), SYSTEMDRIVE=windows.drive,
+        COMSPEC=str(windows / "System32/cmd.exe"),
+        PATH=os.pathsep.join(str(p) for p in (
+            PYTHON.parent, PYTHON.parent / "DLLs", PYTHON.parent / "Library/bin",
+            NODE.parent, windows / "System32", windows)),
+        PATHEXT=".COM;.EXE;.BAT;.CMD", PYTHONDONTWRITEBYTECODE="1",
+        PYTHONNOUSERSITE="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTEST_ADDOPTS="",
+        # An explicit absent file also suppresses the checkout .env fallback in
+        # shared.env_bootstrap. Set this before Python/pytest/application imports.
+        MASTER_ENV_FILE=str(fixture / "config/absent-master.env"),
+    )
+    return environment, set(directories.values())
+
+
 def selected_nodes(repo, profiles):
     if not profiles or len(set(profiles)) != len(profiles):
         raise ValueError("Select at least one profile, without duplicates")
@@ -174,9 +210,13 @@ def run_profiles(repo, profiles, timeout=300, *, process_runner=None):
         raise ValueError("Artifact manifest belongs to a different root/schema")
     token = uuid4().hex
     fixture = job / "fixtures" / token
+    environment, environment_dirs = child_environment(fixture)
+    environment_dirs |= {parent for directory in tuple(environment_dirs) for parent in directory.parents
+                         if parent == fixture or fixture in parent.parents}
     log, xml = fixture / "pytest.log", fixture / "junit.xml"
     events, completion, result = (fixture / n for n in ("creation.jsonl", "completion.json", "result.json"))
-    for path in [job / "fixtures", fixture, fixture / "basetemp", log, xml, events, completion, result]:
+    for path in [job / "fixtures", fixture, fixture / "basetemp", log, xml, events, completion, result,
+                 *sorted(environment_dirs), Path(environment["MASTER_ENV_FILE"])]:
         rel = path.relative_to(repo).as_posix()
         if not any(e["path"] == rel for e in plan["entries"]):
             plan["entries"].append(dict(path=rel, type="directory" if path.suffix == "" else "file",
@@ -186,13 +226,16 @@ def run_profiles(repo, profiles, timeout=300, *, process_runner=None):
                 release_condition="Review compact result; dispose with tools/cleanup_pytest_temp.py exact manifest"))
     save(manifest, plan)
     fixture.mkdir(parents=True)
+    for directory in sorted(environment_dirs):
+        directory.mkdir(parents=True, exist_ok=True)
+    if Path(environment["MASTER_ENV_FILE"]).exists():
+        raise ValueError("Isolated master environment sentinel must remain absent")
     plan["reconcile_roots"].append(dict(path=fixture.relative_to(repo).as_posix(), identity=identity(fixture)))
     save(manifest, plan)
     command = [str(PYTHON), "-B", "-u", "-c", WORKER, str(repo), str(manifest), str(fixture),
                str(events), str(completion), token, str(timeout), *nodes,
                "-q", "-s", "--tb=short", "-p", "no:cacheprovider",
                "--basetemp=" + str(fixture / "basetemp"), "--junitxml=" + str(xml)]
-    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTEST_ADDOPTS="")
     started = time.monotonic()
     actual_exit, timed_out, launch_error = None, False, None
     with log.open("x", encoding="utf-8") as stream:
