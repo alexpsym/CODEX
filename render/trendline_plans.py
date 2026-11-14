@@ -822,12 +822,20 @@ class TrendlinePlanStore:
     def can_delete(plan: Mapping[str, object]) -> bool:
         """Only unused records; execution_key alone is normal draft identity."""
         status = plan.get("status")
-        if status not in {"draft", "cancelled"}:
+        if status not in {"draft", "cancelled", "expired"}:
             return False
         if any(field not in plan or plan[field] is not None
                for field in ("trigger_claim", "execution_result", "live_authorization")):
             return False
         lifecycle = plan.get("lifecycle")
+        if plan.get("submission_refs") is not None or plan.get("broker_closure") is not None:
+            return False
+        if status == "expired":
+            expiry = plan.get("expiry_at_ms")
+            transitioned = lifecycle.get("last_transition_at_ms") if isinstance(lifecycle, Mapping) else None
+            return (isinstance(lifecycle, Mapping) and lifecycle.get("last_transition") == "expired"
+                    and type(expiry) is int and expiry >= 0
+                    and type(transitioned) is int and transitioned >= expiry)
         allowed = {"created", "updated"} if status == "draft" else {"cancelled"}
         return isinstance(lifecycle, Mapping) and lifecycle.get("last_transition") in allowed
 
@@ -889,7 +897,7 @@ class TrendlinePlanStore:
             if plan is None:
                 raise TrendlinePlanError("Unknown trendline plan.")
             if not self.can_delete(plan):
-                raise TrendlinePlanError("Only unused draft or cancelled plans without execution or authorization evidence may be deleted.")
+                raise TrendlinePlanError("Only unused draft, cancelled or confirmed expired plans without execution, authorization, submission or broker closure evidence may be deleted.")
             del registry["plans"][key]
             self._write(registry)
             return key

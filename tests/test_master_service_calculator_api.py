@@ -4127,17 +4127,29 @@ def test_unused_trendline_plan_delete_route_is_permanent_and_protected(tmp_path,
     monkeypatch.setattr(service.httpx.AsyncClient, "request", forbidden)
     monkeypatch.setattr(service, "_bybit_signed_post", forbidden)
     payload = runpy.run_path(str(ROOT / "tests/test_trendline_plans.py"))["_payload"]()
-    def create():
-        return store.create(copy.deepcopy(payload), now_ms=5000)
+    def create(**overrides):
+        settings = copy.deepcopy(payload)
+        settings.update(overrides)
+        return store.create(settings, now_ms=5000)
     def delete(pid):
         return json.loads(_run_immediate_route(service.trendline_plan_delete(pid)).body)
     keep = create()
     draft = create()
     cancelled = create()
     store.cancel(cancelled["plan_id"], now_ms=7000)
+    expired_draft = create(expiry_at_ms=30000)
+    expired_draft = store.expire(expired_draft["plan_id"], now_ms=30000)
+    expired_armed = create(expiry_at_ms=30000)
+    store.arm(expired_armed["plan_id"], now_ms=6000)
+    expired_armed = store.expire(expired_armed["plan_id"], now_ms=31000)
+    assert expired_armed["execution_key"] and expired_armed["execution_policy"] == "bybit-broker-v1"
+    assert expired_armed["trigger_claim"] is None and expired_armed["live_authorization"] is None
+    listed = json.loads(_run_immediate_route(service.trendline_plan_list()).body)["plans"]
+    capabilities = {plan["plan_id"]: plan["can_delete"] for plan in listed}
+    assert capabilities[expired_draft["plan_id"]] and capabilities[expired_armed["plan_id"]]
     assert service._trendline_plan_client_view(draft)["can_delete"] is True
     assert "can_delete" not in store.get(draft["plan_id"])
-    for pid in (draft["plan_id"], cancelled["plan_id"]):
+    for pid in (draft["plan_id"], cancelled["plan_id"], expired_draft["plan_id"], expired_armed["plan_id"]):
         before = store.load()
         result = delete(pid)
         assert result["ok"] is True and result["deleted_plan_id"] == pid
@@ -4165,6 +4177,39 @@ def test_unused_trendline_plan_delete_route_is_permanent_and_protected(tmp_path,
     assert service._trendline_plan_client_view(stale)["can_delete"]
     service.TrendlinePlanStore(store.path).arm(stale["plan_id"], now_ms=6000)
     protected = [stale["plan_id"]]
+    armed_past_deadline = create(expiry_at_ms=30000)
+    store.arm(armed_past_deadline["plan_id"], now_ms=6000)
+    assert store.get(armed_past_deadline["plan_id"])["status"] == "armed"
+    protected.append(armed_past_deadline["plan_id"])
+    # Only a persisted expiry transition is proof; neither the status label nor
+    # wall-clock passage can erase execution/submission evidence.
+    for kind in ("lifecycle", "missing_expiry", "early_transition", "submission_refs", "execution_result", "live_authorization"):
+        record = create(expiry_at_ms=30000)
+        record = store.expire(record["plan_id"], now_ms=30000)
+        if kind == "lifecycle":record["lifecycle"]["last_transition"] = "cancelled"
+        elif kind == "missing_expiry":record["expiry_at_ms"] = None
+        elif kind == "early_transition":record["lifecycle"]["last_transition_at_ms"] = 29999
+        elif kind == "submission_refs":record["submission_refs"] = {"order_id":"synthetic-order"}
+        elif kind == "execution_result":record["execution_result"] = {"outcome":"executed","recorded_at_ms":30000,"order_id":"synthetic-order"}
+        else:record["live_authorization"] = {"execution_key":record["execution_key"],"plan_revision":record["revision"],"authorized_at_ms":30000}
+        with store._locked():
+            registry = store._read();registry["plans"][record["plan_id"]] = record;store._write(registry)
+        protected.append(record["plan_id"])
+    # Invalid claim/closure combinations cannot be canonicalized; the capability
+    # also refuses these raw records before any persistence is attempted.
+    for field in ("trigger_claim", "broker_closure", "submission_refs"):
+        malformed = copy.deepcopy(expired_draft);malformed[field] = {}
+        assert store.can_delete(malformed) is False
+    for expiry,transitioned in [(None,30000),(True,30000),(30000,"30000"),(30000,29999)]:
+        malformed = copy.deepcopy(expired_draft);malformed["expiry_at_ms"] = expiry;malformed["lifecycle"]["last_transition_at_ms"] = transitioned
+        assert store.can_delete(malformed) is False
+    stale_expired = create(expiry_at_ms=30000)
+    stale_expired = store.expire(stale_expired["plan_id"], now_ms=30000)
+    assert service._trendline_plan_client_view(stale_expired)["can_delete"]
+    other_store = service.TrendlinePlanStore(store.path)
+    with other_store._locked():
+        registry = other_store._read();registry["plans"][stale_expired["plan_id"]]["submission_refs"] = {"order_link_id":"synthetic-submission"};other_store._write(registry)
+    protected.append(stale_expired["plan_id"])
     for status in ("claimed", "submitting", "submitted", "failed", "uncertain", "disabled", "expired"):
         record = create()
         if status in {"claimed", "submitting", "submitted", "failed", "uncertain"}:

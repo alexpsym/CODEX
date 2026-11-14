@@ -1155,7 +1155,8 @@ class Button {
   setAttribute(k,v){this.attrs[k]=String(v);} getAttribute(k){return this.attrs[k];} removeAttribute(k){delete this.attrs[k];}
 }
 class Element extends Button {
-  constructor(id){super('');this.id=id;this.value='';this.style={};this.textContent='';this.checked=false;this.buttons=[];this.actions=[];}
+  constructor(id){super('');this.id=id;this.value='';this.style={};this.textContent='';this.checked=false;this.buttons=[];this.actions=[];this.children=[];}
+  appendChild(node){this.children.push(node);return node;}
   set innerHTML(v){this.html=String(v);this.buttons=[...this.html.matchAll(/data-v="([^"]*)"/g)].map(m=>new Button(m[1]));this.actions=[...this.html.matchAll(/data-tl-action="([^"]*)" data-tl-id="([^"]*)"/g)].map(m=>new Button(m[2],m[1]));}
   get innerHTML(){return this.html||'';}
   querySelectorAll(s){return s==='button'?this.buttons:s==='[data-tl-action]'?this.actions:[];}
@@ -1165,13 +1166,14 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 async function run(){
  const el=Object.fromEntries(ids.filter(id=>process.argv[2]!=='deletion'||id!=='trendline-import-preview-btn').map(id=>[id,new Element(id)])),calls=[];
+ const dynamic=[];
  const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
  for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
  el['calc-symbol'].value='BTCUSDT';el['calc-risk'].value='2.5';el['calc-sl-ticks'].value='50';el['calc-rr'].value='3.25';
  let plans=[],deleteReply=null,deleteCalls=0,holdList=false,releaseList=null;
  if(process.argv[2]==='deletion'){
   const base={broker:'bybit',account:'demo',instrument:'BTCUSDT',action:'buy',order_intent:'limit',limit_entry_price:'99.25',test_trade:true,anchors:[{timestamp_ms:1793368797123,price:'100.25'},{timestamp_ms:1793368801987,price:'101.5'}],right_extension:true,trigger_mode:'confirmed_cross',cross_direction:'upward',trigger_price_basis:'midpoint',tolerance_ticks:2,risk_mode:'percent',risk_value:'7.25',stop_loss_ticks:80,rr_target:'4.5',timeframe:'1m',expiry_at_ms:1893456000000,order_metadata:{setup:'Pullback',pattern:'channel',ema:'20',vwap:'No',aths_atls:null,round_number:'Yes'}};
-  plans=[{...base,plan_id:'draft-a',status:'draft',can_delete:true},{...base,plan_id:'cancelled-c',status:'cancelled',can_delete:true},{...base,plan_id:'other-b',status:'draft',can_delete:true},{...base,plan_id:'protected-p',status:'armed',can_delete:false}];
+  plans=[{...base,plan_id:'draft-a',status:'draft',can_delete:true},{...base,plan_id:'cancelled-c',status:'cancelled',can_delete:true},{...base,plan_id:'other-b',status:'draft',can_delete:true},{...base,plan_id:'protected-p',status:'armed',can_delete:false},{...base,plan_id:'expired-e',status:'expired',can_delete:true},{...base,plan_id:'expired-protected',status:'expired',can_delete:false}];
  }
 
  const response=(data,status=200)=>({ok:status<400,status,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
@@ -1191,7 +1193,7 @@ async function run(){
   if(url==='/api/trendline-plans/anchor-draft'&&method==='PATCH'){plans[0]={...plans[0],...body};return response({plan:plans[0]});}
   throw new Error('Unexpected mocked request '+url);
  };
- vm.runInNewContext(source,{document:{getElementById:id=>el[id]},fetch,confirm:()=>{throw Error('No confirmation expected');},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
+ vm.runInNewContext(source,{document:{getElementById:id=>el[id]||dynamic.find(node=>node.id===id),createElement:tag=>{const node=new Element('');dynamic.push(node);return node;}},fetch,confirm:()=>{throw Error('No confirmation expected');},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
  await flush();el['calc-symbol'].listeners.input();await flush();
  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();
  el['order-toggle'].buttons.find(b=>b.dataset.v==='limit').click();el['calc-limit'].value='99.25';
@@ -1207,6 +1209,7 @@ async function run(){
   assert(!el['trendline-import-preview-btn'],'Removed Preview button is absent');
   const action=(id,name)=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlId===id&&b.dataset.tlAction===name);
   assert(action('draft-a','delete'));assert(action('cancelled-c','delete'));assert(!action('protected-p','delete'));assert(action('draft-a','cancel'));
+  assert(action('expired-e','delete'));assert(!action('expired-protected','delete'));
   await action('draft-a','edit').click();
   const noImportRequests=calls.length,initial=fields();preview(JSON.stringify(packet));assert.deepEqual(fields(),initial);assert(!el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('Right extension'));
   preview('');assert(el['trendline-import-apply'].disabled);assert.deepEqual(fields(),initial);preview('{bad');assert(el['trendline-import-apply'].disabled);assert.deepEqual(fields(),initial);
@@ -1218,6 +1221,7 @@ async function run(){
   assert.equal(calls.filter(c=>c.url==='/api/trendline-plans'&&c.method==='POST').length,0,'No automatic replacement Save');
   await el['trendline-save'].click();const created=calls.find(c=>c.url==='/api/trendline-plans'&&c.method==='POST').body;assert.equal(created.expiry_at_ms,1893456000000);assert.deepEqual(created.anchors,packet.anchors);assert.equal(created.risk_value,'7.25');assert.equal(Number(created.stop_loss_ticks),80);assert.equal(created.rr_target,'4.5');assert(!calls.some(c=>c.method==='PATCH'),'Deleted ID must never be patched');
   assert(action('other-b','edit'));assert(action('protected-p','cancel'));await action('other-b','edit').click();const otherSettings=settings();const beforeOther=calls.length;const other=action('cancelled-c','delete').click();deleteReply(true);await other;assert(!action('cancelled-c','delete'));assert(action('other-b','edit'));assert.equal(settings(),otherSettings);assert.equal(el['trendline-save'].textContent,'Update draft');assert(!calls.slice(beforeOther).some(c=>c.method==='POST'||c.method==='PATCH'));
+  const expiredControl=action('expired-e','delete'),beforeExpired=deleteCalls;const expiredPending=expiredControl.click();expiredControl.click();assert.equal(deleteCalls,beforeExpired+1);assert(action('expired-e','delete'),'Expired card remains until acknowledgement');assert.equal(settings(),otherSettings);assert(!action('expired-protected','delete'));deleteReply(true);await expiredPending;assert(!action('expired-e','delete'));await el['trendline-refresh'].click();assert(!action('expired-e','delete'),'Expired deletion survives refresh');assert(action('other-b','edit'));assert.equal(settings(),otherSettings);assert.equal(el['trendline-save'].textContent,'Update draft');assert(!action('expired-protected','delete'));
   assert(!calls.some(c=>c.url.endsWith('/arm')||c.url.endsWith('/cancel')||c.url.includes('/monitor/')&&c.method==='POST'||c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
   console.log('permanent delete UI and automatic preview passed');return;
  }
