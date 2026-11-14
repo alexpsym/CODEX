@@ -13999,7 +13999,11 @@ def test_saved_journal_append_uses_original_style_indices(tmp_path, monkeypatch)
     assert checked and checked['ok'],checked
     after=package(candidate);ids=row_ids(after)
     assert ids.count(new_id)==1 and set(prior).issubset(ids)
-    assert after['xl/styles.xml']==before['xl/styles.xml']
+    # New row formats may append definitions; every saved definition/index stays.
+    oldstyles=ET.fromstring(before['xl/styles.xml']);newstyles=ET.fromstring(after['xl/styles.xml'])
+    for group in oldstyles:
+        actual=newstyles.find(group.tag)
+        assert all(ET.tostring(a)==ET.tostring(b) for a,b in zip(group,actual))
     assert after[sim]==before[sim]
     oldsymbols={c.get('r'):c for c in ET.fromstring(before[symbols]).findall('.//'+ns+'c')}
     newsymbols={c.get('r'):c for c in ET.fromstring(after[symbols]).findall('.//'+ns+'c')}
@@ -14008,9 +14012,16 @@ def test_saved_journal_append_uses_original_style_indices(tmp_path, monkeypatch)
     for name,raw in before.items():
         if not name.startswith('xl/worksheets/sheet') or not name.endswith('.xml'):continue
         old=ET.fromstring(raw);new=ET.fromstring(after[name]);cells={c.get('r'):c for c in new.findall('.//'+ns+'c')}
+        row_map={}
+        if name==trade:
+            books=[load_workbook(path),load_workbook(candidate)]
+            maps=[journal._saved_journal_map(book)[1]['Trade Log'] for book in books]
+            row_map={row:maps[1][identity] for identity,row in maps[0].items()}
+            for book in books:book.close()
         for cell in old.findall('.//'+ns+'c'):
-            assert cell.get('r') in cells
-            assert cell.get('s','0')==cells[cell.get('r')].get('s','0'),(name,cell.get('r'))
+            row,col=coordinate_to_tuple(cell.get('r'));coord=get_column_letter(col)+str(row_map.get(row,row))
+            assert coord in cells
+            assert cell.get('s','0')==cells[coord].get('s','0'),(name,cell.get('r'))
         for field in ['cols','sheetViews','mergeCells','sheetFormatPr','pageMargins','pageSetup','drawing','legacyDrawing']:
             left=old.find(ns+field);right=new.find(ns+field)
             assert (ET.tostring(left) if left is not None else None)==(ET.tostring(right) if right is not None else None),(name,field)
@@ -14109,3 +14120,121 @@ def test_saved_journal_trade_log_filter_covers_owned_tail(tmp_path, monkeypatch)
         result=j.update_master_journal_workbook_data_only(custom,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids={row['id']})
         assert result['ok'];view=load_workbook(result['candidate_path']);assert view['Trade Log'].auto_filter.ref==authored;view.close()
     print('FILTER_ACCEPTANCE '+json.dumps(dict(candidate=str(candidate),sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),ids=1581,caches=511,filter='A3:AY1584',C385='preserved')),flush=True)
+
+
+def test_saved_journal_legacy_trade_order_and_formats(tmp_path, monkeypatch):
+    import subprocess, zipfile, hashlib, json, time
+    import tools.master_journal_workbook as j
+    from xml.etree import ElementTree as ET
+    from copy import deepcopy
+    ns='{'+j._SPREADSHEETML_NAMESPACE+'}'
+    started=time.monotonic()
+    def phase(message):print('trade_layout_phase',message,round(time.monotonic()-started,3),flush=True)
+    def parts(path):
+        with zipfile.ZipFile(path) as z:return {n:z.read(n) for n in z.namelist()}
+    original=subprocess.run(['git','cat-file','blob','a0b47cf2ceb79f7f2a7f0b786a56048b6f2a6fa8'],capture_output=True,check=True).stdout
+    historical=subprocess.run(['git','cat-file','blob','8c60557a499da66cf38526173ba74096024c1c88'],capture_output=True,check=True).stdout
+    path=tmp_path/'pinned.xlsx';path.write_bytes(original)
+    history=tmp_path/'historical.xlsx';history.write_bytes(historical)
+    before=parts(path);book=load_workbook(path);old=load_workbook(history)
+    ws=book['Trade Log'];headers=j._trade_log_header_map(ws);indices=j._saved_journal_map(book)[1]['Trade Log']
+    oldids=j._saved_journal_map(old)[1]['Trade Log'];tail=set(indices)-set(oldids);assert len(tail)==8 and len(indices)==1581
+    donor=old['Trade Log'].max_row
+    signature=[old['Trade Log'].cell(donor,c).style_id for c in range(1,52)]
+    for identity in tail:assert [ws.cell(indices[identity],c).style_id for c in range(1,52)]==signature
+    values={identity:[ws.cell(row,c).value for c in range(1,52)] for identity,row in indices.items()}
+    with zipfile.ZipFile(path) as z:
+        trade_part=j._worksheet_ooxml_part_name(z,'Trade Log')
+    def saved_styles(payload):
+        return {int(row.get('r')):{coordinate_to_tuple(c.get('r'))[1]:c.get('s','0') for c in row}
+            for row in ET.fromstring(payload).find(ns+'sheetData')}
+    original_styles=saved_styles(before[trade_part])
+    styles={identity:[original_styles[row].get(c,'0') for c in range(1,52)] for identity,row in indices.items()}
+    links={identity:deepcopy(ws.cell(row,1).hyperlink) for identity,row in indices.items()}
+    row_settings={identity:dict(ws.row_dimensions[row]) for identity,row in indices.items()}
+    old.close();book.close()
+    monkeypatch.setattr(j,'REPORT_START_YEAR',2026);monkeypatch.setattr(j,'REPORT_MIN_END_YEAR',2026)
+    empty=dict(items=[],balances=[],stats={'totals':{},'groups':{}})
+    phase('normal writer legacy repair')
+    result=j.update_master_journal_workbook_data_only(path,empty,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids=set())
+    assert result['ok'],result
+    candidate=Path(result['candidate_path']);assert j.verify_saved_journal_workbook(candidate)['ok']
+    after=parts(candidate)
+    candidate_styles=saved_styles(after[trade_part])
+    with zipfile.ZipFile(path) as z:
+        part=j._worksheet_ooxml_part_name(z,'Trade Log');sim=j._worksheet_ooxml_part_name(z,' SIM')
+    for name,raw in before.items():
+        if name not in (part,'xl/styles.xml','xl/workbook.xml'):assert after[name]==raw,name
+    assert after[sim]==before[sim]
+    assert sum(c.find(ns+'f') is not None and c.find(ns+'v') is not None and c.find(ns+'v').text is not None for c in ET.fromstring(after[sim]).findall('.//'+ns+'c'))==511
+    for group in ET.fromstring(before['xl/styles.xml']):
+        new=ET.fromstring(after['xl/styles.xml']).find(group.tag)
+        assert len(new)>=len(group)
+        assert all(j._journal_xml_signature(a)==j._journal_xml_signature(b) for a,b in zip(group,new))
+    for mode in (False,True):
+        check=load_workbook(candidate,data_only=mode);sheet=check['Trade Log'];actual=j._saved_journal_map(check)[1]['Trade Log']
+        assert set(actual)==set(indices) and len(actual)==1581
+        assert {actual[i] for i in tail}==set(range(4,12))
+        assert sheet['A11'].value=='C385'
+        assert sheet.auto_filter.ref=='A3:AY1584'
+        assert sheet['A11'].fill.fgColor.rgb[-6:]==j.LOSS_FILL
+        ake=next(i for i in tail if values[i][0]=='C388')
+        assert sheet.cell(actual[ake],1).fill.fgColor.rgb[-6:]==j.PROFIT_FILL
+        for identity,row in actual.items():
+            assert [sheet.cell(row,c).value for c in range(1,52)]==values[identity]
+            if identity not in tail:assert [candidate_styles[row].get(c,'0') for c in range(1,52)]==styles[identity]
+            link=sheet.cell(row,1).hyperlink
+            if links[identity]:
+                assert link.target==links[identity].target and link.location==links[identity].location and link.ref=='A'+str(row)
+            assert dict(sheet.row_dimensions[row])==row_settings[identity]
+        close=[sheet.cell(r,headers['Close Time']).value or sheet.cell(r,headers['Open Time']).value for r in range(4,1585)]
+        assert close==sorted(close,reverse=True)
+        cf=sheet.conditional_formatting._cf_rules
+        assert any(str(k.sqref)=='B12:AO12 AQ12:AY12' and any(r.priority==3 for r in rules) for k,rules in cf.items())
+        assert not any(str(k.sqref)=='B4:AO4 AQ4:AY4' for k in cf)
+        assert any(str(k.sqref)=='A4:AY1584' for k in cf)
+        assert any('AJ12:AO1556' in str(d.sqref) for d in sheet.data_validations.dataValidation)
+        check.close()
+    phase('repeat normal writer for idempotence')
+    repeat=j.update_master_journal_workbook_data_only(candidate,empty,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids=set())
+    assert repeat['ok'],repeat
+    repeated=parts(Path(repeat['candidate_path']))
+    for name in [part,'xl/styles.xml',sim]:assert repeated[name]==after[name],name
+    assert path.read_bytes()==original
+    phase('complete')
+    print('ORDER_FORMAT_ACCEPTANCE '+json.dumps(dict(candidate=str(candidate),sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),ids=1581,caches=511,first_rows='4-11',C385='row11 red',C388='green')),flush=True)
+
+
+def test_saved_journal_future_trade_order_and_authored_layout(tmp_path, monkeypatch):
+    import tools.master_journal_workbook as j
+    from copy import deepcopy
+    monkeypatch.setattr(j,'REPORT_START_YEAR',2026);monkeypatch.setattr(j,'REPORT_MIN_END_YEAR',2026)
+    snapshot=sample_snapshot()
+    cash=dict(id='cash-tail',row_type='cashflow',symbol='CASHFLOW',account='BYBIT',open_time='2018-01-01T00:00:00Z',close_time='2018-01-01T00:00:00Z',net_profit=0,qty=0)
+    snapshot['items'].append(cash)
+    snapshot['items'].sort(key=lambda row:row.get('close_time') or row.get('open_time') or '',reverse=True)
+    path=tmp_path/'small.xlsx';j._counter_build(snapshot,path,publish_recommendation_assets=False);j._saved_journal_seed(path)
+    book=load_workbook(path);before=j._saved_journal_map(book)[1]['Trade Log'];book.close()
+    older=dict(snapshot['items'][0],id='older-import',symbol='OLDERUSDT',account='Bybit Demo',qty=1.25,entry_price=0.00123,exit_price=0.00134,net_profit=10,close_time='2020-01-01T00:00:00Z',open_time='2020-01-01T00:00:00Z')
+    newest=dict(older,id='test-import',is_test_trade=True,close_time='2026-12-01T00:00:00Z',open_time='2026-12-01T00:00:00Z')
+    requested=dict(items=[older,newest],balances=[],stats={'totals':{},'groups':{}})
+    result=j.update_master_journal_workbook_data_only(path,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids={older['id'],newest['id']})
+    assert result['ok'],result
+    candidate=Path(result['candidate_path']);assert j.verify_saved_journal_workbook(candidate,expected_snapshot=requested)['ok']
+    check=load_workbook(candidate);ws=check['Trade Log'];index=j._saved_journal_map(check)[1]['Trade Log'];h=j._trade_log_header_map(ws)
+    order=[i for i,r in sorted(index.items(),key=lambda item:item[1])]
+    assert order[0]=='test-import' and order[-2:] == ['older-import','cash-tail']
+    assert [i for i in order if i in before]==list(sorted(before,key=before.get))
+    assert ws.cell(index['test-import'],1).fill.fgColor.rgb[-6:]==j.TEST_TRADE_FILL
+    assert ws.cell(index['older-import'],h['Entry Price']).number_format==j._trade_log_price_number_format(ws.cell(index['older-import'],h['Entry Price']))
+    assert ws.cell(index['older-import'],h['Qty']).value==1.25
+    check.close()
+    # An explicit sort, saved manual field/clear and authored row settings survive.
+    book=load_workbook(path);ws=book['Trade Log'];ws.auto_filter.add_sort_condition('E4:E6');ws.row_dimensions[4].height=31;ws.cell(4,h['Notes'],'authored note');ws.cell(5,h['Entry Price']).value=None;book.save(path);book.close()
+    custom=j.update_master_journal_workbook_data_only(path,requested,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids={older['id'],newest['id']})
+    assert custom['ok'],custom
+    check=load_workbook(custom['candidate_path']);ws=check['Trade Log'];index=j._saved_journal_map(check)[1]['Trade Log']
+    assert all(index[i]==r for i,r in before.items())
+    assert ws.auto_filter.sortState and ws.row_dimensions[4].height==31 and ws.cell(4,h['Notes']).value=='authored note'
+    assert ws.cell(5,h['Entry Price']).value is None
+    check.close()

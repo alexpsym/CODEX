@@ -23606,6 +23606,7 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
                                legacy=record.get('legacy', not bool(record['cells'])))
             audit = _saved_journal_patch(original, candidate, source, operations, next_record,
                 append_donor_rows=append_donor_rows)
+            _saved_journal_trade_layout(candidate, inserted)
         finally:
             desired_book.close()
         if _saved_journal_identity(path) != original_identity or path.read_bytes() != original:
@@ -23650,6 +23651,257 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
         # Failed candidates stay recoverable; only the consumed projection goes.
         if proposal.exists():
             proposal.unlink()
+
+
+def _saved_journal_trade_layout(path, inserted):
+    """Finish saved records, not a rebuilt sheet: audited row permutation and
+    append-only style definitions. A changed/authored layout is never sorted.
+    """
+    from io import BytesIO
+    from openpyxl.formula.tokenizer import Tokenizer
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    original = path.read_bytes()
+    wb = load_workbook(BytesIO(original), keep_links=True)
+    try:
+        ws = wb[TRADE_LOG_SHEET]
+        headers = _trade_log_header_map(ws)
+        _, indices, _, _ = _saved_journal_map(wb)
+        index = indices[TRADE_LOG_SHEET]
+        record = _saved_journal_ownership(wb)
+        # These identities and the complete 51-column saved style signature are
+        # established by a0b47cf and its predecessor 8c60557. No row number is an
+        # identity, and an edited style/clear/deleted record is not reconstructed.
+        legacy_ids = {
+            'bybit:demo:trade:ELSAUSDT:4a9735f719b4160d',
+            'bybit:demo:trade:XRPUSDT:90df50c8002cc546',
+            'bybit:demo:trade:PLAYSOUTUSDT:95491c33759eb92e',
+            'bybit:demo:trade:XRPUSDT:e7d9d58cc796d1bf',
+            'bybit:demo:trade:XRPUSDT:756d6cab791a9203',
+            'bybit:demo:trade:AKEUSDT:5de2f323179e29dc',
+            'bybit:demo:trade:AKEUSDT:fd080b4a27a8c9c4',
+            'bybit:demo:trade:XRPUSDT:0a53eb901f418f04',
+        }
+        with zipfile.ZipFile(BytesIO(original)) as package:
+            part = _worksheet_ooxml_part_name(package, TRADE_LOG_SHEET)
+            raw = package.read(part)
+            root = ET.fromstring(raw)
+            rows = {int(r.get('r')): r for r in root.find(ns+'sheetData')}
+            def signature(row):
+                styles = {coordinate_to_tuple(c.get('r'))[1]: c.get('s','0') for c in rows[row]}
+                return hashlib.sha256(json.dumps([styles.get(c,'0') for c in range(1,52)]).encode()).hexdigest()
+            legacy = {identity for identity in legacy_ids & set(index)
+                if signature(index[identity]) == 'fa76d06c6e90b6994ae06ac499eed60a373adc11eefa3224a748835382961803'
+                and record['cells'].get(json.dumps([TRADE_LOG_SHEET,identity,'Row ID'])) ==
+                    _saved_journal_value(ws.cell(index[identity],headers['Row ID']))}
+            targets = legacy | (set(inserted) & set(index))
+            if not targets:
+                return
+            physical = sorted(index, key=index.get)
+            prior = [identity for identity in physical if identity not in targets]
+            def stamp(identity):
+                row = index[identity]
+                value = ws.cell(row,headers['Close Time']).value or ws.cell(row,headers['Open Time']).value
+                # Excel's saved dates are naive; normalize aware inputs identically.
+                if isinstance(value, datetime):
+                    return value.replace(tzinfo=None)
+                return _trade_log_datetime_value(value) if value else datetime.min
+            start = _trade_log_data_start_row(ws)
+            end = max(index.values())
+            default_layout = (
+                sorted(index.values()) == list(range(start,end+1))
+                and ws.auto_filter.ref == f'A{start-1}:{get_column_letter(headers["Row ID"])}{end}'
+                and ws.auto_filter.sortState is None
+                and root.find(ns+'sortState') is None
+                and not any(r.max_row >= start for r in ws.merged_cells.ranges)
+                and prior == sorted(prior,key=stamp,reverse=True))
+            ordered = sorted(physical,key=stamp,reverse=True) if default_layout else physical
+            mapping = {index[identity]: row for row,identity in zip(sorted(index.values()),ordered)}
+            mapping = {a:b for a,b in mapping.items() if a != b}
+            # A bounded, reversible reference map. Disjoint formula ranges are
+            # refused rather than silently widened to unrelated records.
+            def refs(text, multiple=False, rm=None):
+                rm = mapping if rm is None else rm
+                if not rm or not text:
+                    return text
+                return _counter_stats1_ref(text,rm,multiple=multiple)
+            def formula(text, local, rm):
+                if not text or not rm:
+                    return text
+                prefix = '' if text.startswith('=') else '='
+                tokens = Tokenizer(prefix+text).items
+                for token in tokens:
+                    if token.type != 'OPERAND' or token.subtype != 'RANGE':
+                        continue
+                    owner,sep,ref = token.value.rpartition('!')
+                    if (sep and owner.strip("'").replace("''", "'").casefold() == TRADE_LOG_SHEET.casefold()) or (not sep and local):
+                        token.value = (owner+'!' if sep else '') + refs(ref,rm=rm)
+                return ('=' if not prefix else '') + ''.join(t.value for t in tokens)
+            generated = {str(key.sqref) for key,rules in ws.conditional_formatting._cf_rules.items()
+                if rules and all(_is_generated_trade_log_win_loss_row_rule(rule,str(key.sqref)) for rule in rules)
+                and range_boundaries(str(key.sqref))[2] == headers['Row ID']
+                and (range_boundaries(str(key.sqref))[3] == end-len(set(inserted)&set(index))
+                     or (legacy and str(key.sqref)=='A4:AY1576'))}
+            # New valid definitions are based on the actual saved xf. Never use
+            # an in-memory style_id as a package index.
+            style_raw = package.read('xl/styles.xml')
+            styles = ET.fromstring(style_raw)
+            xfs, fills = styles.find(ns+'cellXfs'), styles.find(ns+'fills')
+            formats = styles.find(ns+'numFmts')
+            if formats is None:
+                formats = ET.Element(ns+'numFmts',count='0');styles.insert(0,formats)
+            style_edits = {}
+            for identity in targets:
+                row = index[identity]
+                # Existing style edits prevent legacy adoption per cell, while
+                # saved values/manual fields are always used by format helpers.
+                saved = {c.column:copy(c._style) for c in ws[row]}
+                for cell in ws[row]:
+                    cell._style = copy(cell._style)
+                _apply_trade_log_win_loss_direct_row_fills_for_rows(ws,[row])
+                fields = {field:ws.cell(row,headers[header]).value for header,field in
+                    [('Currency','currency'),('Account','account'),('Symbol','symbol'),('Row Type','row_type')]
+                    if header in headers}
+                _apply_trade_log_row_number_formats(ws,row,fields)
+                for cell in rows[row]:
+                    col = coordinate_to_tuple(cell.get('r'))[1]
+                    wanted = ws.cell(row,col)._style
+                    old_style = saved[col]
+                    if wanted.fillId == old_style.fillId and wanted.numFmtId == old_style.numFmtId:
+                        continue
+                    xf = deepcopy(xfs[int(cell.get('s','0'))])
+                    fill = ET.fromstring(ET.tostring(wb._fills[wanted.fillId].to_tree()))
+                    # openpyxl style children are initially unqualified.
+                    for node in fill.iter():
+                        if not node.tag.startswith('{'):node.tag = ns+node.tag
+                    fill_id = next((i for i,f in enumerate(fills) if _journal_xml_signature(f)==_journal_xml_signature(fill)),None)
+                    if fill_id is None:fill_id=len(fills);fills.append(fill)
+                    xf.set('fillId',str(fill_id))
+                    number_id = wanted.numFmtId
+                    if number_id >= 164:
+                        code = ws.cell(row,col).number_format
+                        node = next((f for f in formats if f.get('formatCode')==code),None)
+                        if node is None:
+                            number_id = max([163,*[int(f.get('numFmtId')) for f in formats]])+1
+                            ET.SubElement(formats,ns+'numFmt',numFmtId=str(number_id),formatCode=code)
+                        else:number_id=int(node.get('numFmtId'))
+                    xf.set('numFmtId',str(number_id))
+                    style_id = next((i for i,x in enumerate(xfs) if _journal_xml_signature(x)==_journal_xml_signature(xf)),None)
+                    if style_id is None:style_id=len(xfs);xfs.append(xf)
+                    style_edits[cell.get('r')] = (cell.get('s'),str(style_id))
+            for node in (xfs,fills,formats):node.set('count',str(len(node)))
+            changes = {}
+            related = set()
+            relpart = _worksheet_relationship_part_name(part)
+            if relpart in package.namelist():
+                for rel in ET.fromstring(package.read(relpart)):
+                    if rel.get('TargetMode') != 'External':
+                        target = rel.get('Target')
+                        related.add(target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join(posixpath.dirname(part),target)))
+            def transform(payload,name,rm):
+                doc = ET.fromstring(payload)
+                local = name == part
+                for node in doc.iter():
+                    tag = node.tag.rsplit('}',1)[-1]
+                    scoped = local or (name=='xl/workbook.xml' and tag=='definedName' and node.get('localSheetId')==str(wb.sheetnames.index(TRADE_LOG_SHEET)))
+                    # Canonical range coverage and view position describe the
+                    # sheet, not a record. Leave these intact.
+                    if tag in {'autoFilter','dimension','pane','selection','sheetView'} or (tag=='definedName' and node.get('name')=='_xlnm._FilterDatabase'):
+                        continue
+                    if tag in {'f','formula','formula1','formula2','definedName','calculatedColumnFormula','totalsRowFormula'}:
+                        node.text = formula(node.text,scoped,rm)
+                    if local or name in related:
+                        for attr in ('r','ref','sqref','location'):
+                            value = node.get(attr)
+                            if not value:continue
+                            node.set(attr,str(rm.get(int(value),int(value))) if tag=='row' and attr=='r'
+                                else formula(value,True,rm) if attr=='location' and '!' in value
+                                else refs(value,attr=='sqref',rm))
+                        if name in related and tag in {'row','Row'} and node.text and node.text.isdigit():
+                            row=int(node.text)+1;node.text=str(rm.get(row,row)-1)
+                        if tag=='Anchor' and node.text:
+                            values=node.text.split(',')
+                            if len(values)==8:
+                                for i in (2,6):values[i]=str(rm.get(int(values[i])+1,int(values[i])+1)-1)
+                                node.text=','.join(values)
+                if local:
+                    data=doc.find(ns+'sheetData');data[:]=sorted(data,key=lambda r:int(r.get('r')))
+                return _saved_journal_xml(doc,payload)
+            inverse = {b:a for a,b in mapping.items()}
+            def reference_signature(payload):
+                doc = ET.fromstring(payload)
+                # A reversible row permutation can split one validation/CF
+                # range into adjacent pieces on the inverse trip. Compare the
+                # exact membership, without requiring the same spelling.
+                for node in doc.iter():
+                    if not node.get('sqref'):
+                        continue
+                    groups = {}
+                    for ref in node.get('sqref').split():
+                        left,top,right,bottom = range_boundaries(ref)
+                        groups.setdefault((left,right),[]).append((top,bottom))
+                    normalized = []
+                    for (left,right), intervals in sorted(groups.items()):
+                        merged = []
+                        for top,bottom in sorted(intervals):
+                            if merged and top <= merged[-1][1]+1:
+                                merged[-1] = (merged[-1][0],max(bottom,merged[-1][1]))
+                            else:
+                                merged.append((top,bottom))
+                        for top,bottom in merged:
+                            a = get_column_letter(left)+str(top)
+                            b = get_column_letter(right)+str(bottom)
+                            normalized.append(a if a==b else a+':'+b)
+                    node.set('sqref',' '.join(normalized))
+                return _journal_xml_signature(doc)
+            for name in package.namelist():
+                payload=package.read(name)
+                if not name.endswith(('.xml','.vml')) or (name!=part and name not in related and b'Trade Log' not in payload):continue
+                moved=transform(payload,name,mapping)
+                restored=transform(moved,name,inverse)
+                if reference_signature(restored) != reference_signature(transform(payload,name,{})):
+                    raise ValueError('Trade Log record/reference inverse audit failed: '+name)
+                if name==part:
+                    doc=ET.fromstring(moved)
+                    for cell in doc.findall('.//'+ns+'c'):
+                        row,col=coordinate_to_tuple(cell.get('r'));old_coord=get_column_letter(col)+str(inverse.get(row,row))
+                        if old_coord in style_edits:cell.set('s',style_edits[old_coord][1])
+                    for cf in doc.findall(ns+'conditionalFormatting'):
+                        if cf.get('sqref') in {refs(ref, multiple=True) for ref in generated}:
+                            # Keep exact rule definitions/priorities; translate
+                            # only their relative anchor back to the header end.
+                            old_anchor=mapping.get(start,start)
+                            from openpyxl.formula.translate import Translator
+                            for f in cf.findall('.//'+ns+'formula'):
+                                f.text=Translator('='+f.text,origin='A'+str(old_anchor)).translate_formula('A'+str(start))[1:]
+                            cf.set('sqref',f'A{start}:{get_column_letter(headers["Row ID"])}{end}')
+                    moved=_saved_journal_xml(doc,payload)
+                if _journal_xml_signature(ET.fromstring(moved)) != _journal_xml_signature(ET.fromstring(payload)):
+                    changes[name]=moved
+            # Prefix audit: existing style definitions retain their indices and
+            # exact XML; only independently valid definitions can be appended.
+            before_styles=ET.fromstring(style_raw)
+            for name in ('cellXfs','fills','numFmts'):
+                old=before_styles.find(ns+name);new=styles.find(ns+name)
+                if old is not None:
+                    assert all(_journal_xml_signature(a)==_journal_xml_signature(b) for a,b in zip(old,new))
+            if style_edits:changes['xl/styles.xml']=_saved_journal_xml(styles,style_raw)
+            output=BytesIO()
+            with zipfile.ZipFile(output,'w') as target:
+                target.comment=package.comment
+                for info in package.infolist():target.writestr(copy(info),changes.get(info.filename,package.read(info.filename)))
+            result=output.getvalue()
+            for mode in (False,True):
+                check=load_workbook(BytesIO(result),data_only=mode,keep_links=True)
+                try:
+                    _,actual,_,_=_saved_journal_map(check)
+                    assert actual[TRADE_LOG_SHEET]=={identity:mapping.get(row,row) for identity,row in index.items()}
+                    for row in check[TRADE_LOG_SHEET]:
+                        for cell in row:
+                            if cell.has_style:assert cell.style_id < len(check._cell_styles)
+                finally:check.close()
+            path.write_bytes(result)
+    finally:
+        wb.close()
 
 
 def _saved_journal_filter_name_matches(node, sheet, index, ref):
