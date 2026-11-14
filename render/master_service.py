@@ -30055,7 +30055,86 @@ def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
         "timestamp": item_timestamp,
         "source_path": source_path,
         "source": "Pepperstone Trader spread export",
+        "distance_metadata": dict(item),
+        "exported_account_mode": (payload.get("account") or {}).get("mode"),
+        "exported_account_currency": (payload.get("account") or {}).get("currency"),
     }
+
+
+def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", order_type="market",
+                              entry_price=None, risk_mode="fixed_aud", risk_value="10", account_type="razor", snapshot=None):
+    """Exact whole-TV-tick bounds for a single exported MT5 account; advisory only."""
+    from fractions import Fraction
+    from math import lcm
+    def number(value):
+        value = Decimal(str(value))
+        if not value.is_finite(): raise ValueError("Nonfinite metadata")
+        return Fraction(value)
+    def ceil(value): return -(-value.numerator // value.denominator)
+    result = dict(state="pending", minimum_ticks=None, maximum_ticks=None, step_ticks=None, first_valid_tick=None,
+                  source="Pepperstone Trader spread export", reason="Current matching MT5 distance metadata pending; Trader remains authoritative.",
+                  account_mode=account, pricing_choice=account_type, account_variant="Not independently known", quote_age_seconds=None,
+                  valid_for_seconds=0, limit_entry_state="pending", maximum_source=None)
+    try:
+        snap = snapshot if snapshot is not None else _load_pepperstone_symbol_point(symbol)
+        item = snap.get("distance_metadata", {})
+        result["mt5_symbol"] = snap["mt5_symbol"]
+        if snap.get("exported_account_mode") != account:
+            result["reason"] = "MT5 export account mode is missing or does not match the selected Demo/Live mode."
+            return result
+        point, chart, trade = number(snap["point"]), number(chart_tick_size), number(item.get("trade_tick_size"))
+        if min(point, chart, trade) <= 0: raise ValueError("Positive grids required")
+        levels = [item.get("stops_level"), item.get("freeze_level")]
+        if any(type(v) is not int or v < 0 for v in levels): raise ValueError("Successful stops/freeze reads required (zero is valid)")
+        stamp = _pepperstone_parse_snapshot_time(item.get("quote_timestamp"), "quote")
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds()
+        result["quote_age_seconds"] = round(age, 3)
+        if age < -2 or age > 60:
+            result["reason"] = "MT5 symbol quote is stale or its age is unproven; quote-dependent checks pending."
+            return result
+        bid, ask = number(item.get("bid")), number(item.get("ask"))
+        if bid <= 0 or ask < bid: raise ValueError("Valid Bid/Ask required")
+        if side not in {"buy", "sell"} or order_type not in {"market", "limit"}: raise ValueError("Invalid order context")
+        entry = number(entry_price) if order_type == "limit" else ask if side == "buy" else bid
+        step = lcm((chart / point).denominator, (chart / trade).denominator)
+        result.update(step_ticks=step, valid_for_seconds=max(0, 60-age), quote_timestamp=stamp,
+                      source="Pepperstone Trader exported " + account + " account (variant unknown)", limit_entry_state="not_applicable")
+        required = max(levels) * point
+        broker_floor = required if order_type == "limit" else ask - bid + required
+        minimum = max(1, ceil(broker_floor / chart))
+        if order_type == "market" and minimum * chart <= ask - bid: minimum += 1
+        buffer = None
+        if risk_mode == "fixed_aud" and number(risk_value) > 0:
+            buffer = _pepperstone_risk_buffer_preflight(stop_points=1, risk_target=Decimal(str(risk_value)))
+            minimum = max(minimum, ceil(number(buffer["minimum_compatible_stop_points"]) * point / chart))
+            result["automatic_buffer_floor_points"] = buffer["minimum_compatible_stop_points"]
+        maximum = int(Fraction(_MQL_INT_MAX) * point / chart)
+        sources = ["Trader representable MT5 point distance"]
+        if side == "buy":
+            price_maximum = ceil(entry / chart)-1
+            if price_maximum < maximum: maximum = price_maximum; sources = ["Strict positive SL price"]
+        if risk_mode == "fixed_aud" and snap.get("exported_account_currency") == "AUD":
+            lot, tick_value = number(item.get("minimum_lot", 0)), number(item.get("tick_value", 0))
+            if lot > 0 and tick_value > 0 and number(risk_value) > 0:
+                # Even zero commission/buffer cannot reduce this minimum-lot distance loss.
+                risk_cap = int(number(risk_value) * Fraction(6, 5) * trade / (lot * tick_value * chart))
+                if risk_cap < maximum: maximum = risk_cap; sources = ["Exported AUD minimum-lot/tick-value risk-band cap"]
+        result.update(minimum_ticks=ceil(Fraction(minimum, step))*step, maximum_ticks=maximum//step*step,
+                      first_valid_tick=ceil(Fraction(minimum, step))*step, maximum_source="; ".join(sources),
+                      reason="MT5 spread + stops/freeze and strict side/grid checks; LTT automatic slippage-buffer floor is separate.",
+                      broker_minimum_ticks=ceil(broker_floor/chart), state="ready")
+        if entry <= 0 or (entry / point).denominator != 1 or (entry / trade).denominator != 1:
+            result.update(state="blocked", reason="Entry price is not on both MT5 point and trade tick grids.")
+        if order_type == "limit":
+            gap = ask-entry if side == "buy" else entry-bid
+            valid = gap > 0 and gap >= required
+            result["limit_entry_state"] = "valid" if valid else "invalid"
+            if not valid: result.update(state="blocked", reason="Limit entry must be on the valid side and outside the quote stops/freeze distance; SL distance is measured from that entry.")
+        if result["maximum_ticks"] < result["minimum_ticks"]:
+            result.update(state="blocked", reason="No stop fits the proven minimum and upper bounds for this context.")
+        return result
+    except (HTTPException, ValueError, TypeError, ArithmeticError, KeyError):
+        return result
 
 
 def _pepperstone_positive_tick_count(value: object, field: str) -> int:
@@ -30179,12 +30258,11 @@ def _pepperstone_risk_buffer_preflight(
     preferred_maximum = _pepperstone_default_risk_slippage_buffer_points()
     minimum_automatic_buffer = min(preferred_maximum, _pepperstone_default_slippage_points())
     conservative_maximum = int(
-        (Decimal(stop_points) * ((risk_max / risk_min) - Decimal("1"))).to_integral_value(rounding=ROUND_FLOOR)
+        (Decimal(stop_points) * (risk_max - risk_min) / risk_min).to_integral_value(rounding=ROUND_FLOOR)
     )
     planned_buffer = min(preferred_maximum, conservative_maximum)
-    ratio = (risk_max / risk_min) - Decimal("1")
     minimum_compatible_stop = int(
-        (Decimal(minimum_automatic_buffer) / ratio).to_integral_value(rounding=ROUND_CEILING)
+        (Decimal(minimum_automatic_buffer) * risk_min / (risk_max - risk_min)).to_integral_value(rounding=ROUND_CEILING)
     ) if minimum_automatic_buffer > 0 else 1
     compatible = planned_buffer >= minimum_automatic_buffer
     explanation = (
@@ -31334,7 +31412,7 @@ def _calculator_effective_route(asset: object, broker: object, symbol: object) -
 
 
 @app.get("/api/calculator/instrument")
-async def calculator_instrument(asset: str, account: str, symbol: str, broker: str = "") -> JSONResponse:
+async def calculator_instrument(asset: str, account: str, symbol: str, broker: str = "", side: str = "buy", order_type: str = "market", entry_price: str = "", risk_mode: str = "fixed_aud", risk_value: str = "10", chart_tick_size: str = "", pepperstone_account_type: str = "razor") -> JSONResponse:
     account_norm = str(account or "live").strip().lower()
     try:
         asset_norm, broker_norm, routed_symbol = _calculator_effective_route(asset, broker, symbol)
@@ -31418,7 +31496,7 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
             except Exception as exc:
                 raise HTTPException(status_code=502, detail="OANDA chart-feed default tick size is unavailable; enter a positive TradingView tick-size override.") from exc
             chart_step, chart_source, _override, chart_profile = _pepperstone_resolve_chart_tick_size(
-                "", default_chart_step, resolved_symbol
+                chart_tick_size, default_chart_step, resolved_symbol
             )
             instrument_payload.update(
                 {
@@ -31427,6 +31505,9 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
                     "chart_tick_profile_id": chart_profile,
                 }
             )
+            instrument_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
+                symbol=resolved_symbol, account=account_norm, chart_tick_size=chart_step, side=side, order_type=order_type,
+                entry_price=entry_price, risk_mode=risk_mode, risk_value=risk_value, account_type=pepperstone_account_type)
             try:
                 point_snapshot = _load_pepperstone_symbol_point(resolved_symbol)
             except HTTPException as exc:
@@ -32602,6 +32683,10 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     }
                 )
             if broker == "pepperstone":
+                response_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
+                    symbol=symbol, account=account, chart_tick_size=pepperstone_chart_tick_size, side=side,
+                    order_type=order_type, entry_price=payload.get("entry_price"), risk_mode=risk_mode,
+                    risk_value=risk_val, account_type=account_type, snapshot=pepperstone_point_snapshot)
                 response_payload.update({
                     "pepperstone_account_type": account_type,
                     "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),

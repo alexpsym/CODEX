@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.46"
+#property version   "2.47"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -334,9 +334,25 @@ bool PriceLevelIsOnTradeGrid(double price, string &why)
 {
    double tradeTickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double unusedUnits = 0.0;
-   if(!MathIsValidNumber(price) || price <= 0.0 || !DistanceUnitsAreWhole(price, tradeTickSize, unusedUnits))
-   { why = "Entry or final price level is not representable on SYMBOL_TRADE_TICK_SIZE."; return false; }
+   if(!MathIsValidNumber(price) || price <= 0.0 || (!DistanceUnitsAreWhole(price, tradeTickSize, unusedUnits) || !DistanceUnitsAreWhole(price, _Point, unusedUnits)))
+   { why = "Entry or final price level is not representable on both broker point and trade tick grids."; return false; }
    return true;
+}
+
+bool BrokerMinimumDistancePoints(long &points, string &why)
+{
+   long stops=0, freeze=0;
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stops) ||
+      !SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL, freeze) || stops<0 || freeze<0)
+   { why="Broker stops/freeze metadata unavailable."; return false; }
+   points=(stops>freeze ? stops : freeze);
+   return true;
+}
+
+bool BrokerDistanceAtLeast(const double distance, const long points)
+{
+   // Compare in the symbol's decimal point units, avoiding a repeating ratio.
+   return _Point>0.0 && NormalizeDouble(distance/_Point, 8)>=(double)points;
 }
 
 bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
@@ -363,9 +379,15 @@ bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
       { if(why == "") why = "Normalized stop would change the requested price distance."; return false; }
    }
 
-   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   if(stopsLevel > 0 && MathAbs(entry - slOut) < stopsLevel * _Point)
-   { why = "SL too close to entry for broker stops-level."; return false; }
+   long requiredPoints=0;
+   if(!BrokerMinimumDistancePoints(requiredPoints, why)) return false;
+   double pointUnits=0.0;
+   if(!PriceLevelIsOnTradeGrid(entry, why) || !PriceLevelIsOnTradeGrid(slOut, why) ||
+      !DistanceUnitsAreWhole(slDist, _Point, pointUnits) || pointUnits>2147483647.0 ||
+      !(isBuy ? slOut<entry : slOut>entry))
+   { why="SL distance/side is invalid on broker point and trade grids."; return false; }
+   if(!BrokerDistanceAtLeast(MathAbs(entry-slOut), requiredPoints))
+   { why = "SL too close to entry for broker stops/freeze distance."; return false; }
 
    why = "";
    return true;
@@ -473,15 +495,13 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0 || bid <= 0){ why="Bid/Ask not available."; return false; }
 
-   int stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   int freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   int minDistancePoints = MathMax(stopsLevel, freezeLevel);
-   double minDistance = (double)minDistancePoints * _Point;
+   long minDistancePoints=0;
+   if(!BrokerMinimumDistancePoints(minDistancePoints, why) || !PriceLevelIsOnTradeGrid(entry, why)) return false;
 
    if(isBuyLimit)
    {
       if(!(entry < ask)){ why="Buy Limit entry is not below current Ask."; return false; }
-      if(minDistancePoints > 0 && (ask - entry) < minDistance)
+      if(minDistancePoints > 0 && !BrokerDistanceAtLeast(ask-entry, minDistancePoints))
       {
          why = "Buy Limit entry is too close to current Ask for broker stops/freeze distance.";
          return false;
@@ -490,7 +510,7 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
    else
    {
       if(!(entry > bid)){ why="Sell Limit entry is not above current Bid."; return false; }
-      if(minDistancePoints > 0 && (entry - bid) < minDistance)
+      if(minDistancePoints > 0 && !BrokerDistanceAtLeast(entry-bid, minDistancePoints))
       {
          why = "Sell Limit entry is too close to current Bid for broker stops/freeze distance.";
          return false;
@@ -593,7 +613,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       double riskBandRatio = (riskMax / riskMin) - 1.0;
       if(!MathIsValidNumber(riskBandRatio) || riskBandRatio < 0.0)
       { why="Risk band cannot derive a conservative stop-distance buffer cap."; return false; }
-      double conservativeDistanceCapRaw = stopPoints * riskBandRatio;
+      double conservativeDistanceCapRaw = stopPoints * (riskMax-riskMin) / riskMin;
       if(!MathIsValidNumber(conservativeDistanceCapRaw) || conservativeDistanceCapRaw < 0.0)
       { why="Risk band cannot derive a finite conservative stop-distance buffer cap."; return false; }
       maximumBuffer = configuredPreferredBuffer;
@@ -765,24 +785,23 @@ bool ValidateMarketStopsAtLiveQuote(const bool isBuy,
                                     const double tp,
                                     string &why)
 {
-   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   int freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   int requiredPoints = MathMax(stopsLevel, freezeLevel);
-   double requiredDistance = (double)requiredPoints * _Point;
+   long requiredPoints=0;
+   if(!BrokerMinimumDistancePoints(requiredPoints, why) || bid<=0.0 || ask<bid ||
+      !PriceLevelIsOnTradeGrid(sl, why) || !PriceLevelIsOnTradeGrid(tp, why)) return false;
    double closeSideAnchor = isBuy ? bid : ask;
 
    if(isBuy)
    {
       if(!(sl < closeSideAnchor && tp > closeSideAnchor))
       { why = "Buy SL/TP are on an invalid side of the live Bid."; return false; }
-      if(requiredPoints > 0 && ((closeSideAnchor - sl) < requiredDistance || (tp - closeSideAnchor) < requiredDistance))
+      if(requiredPoints > 0 && (!BrokerDistanceAtLeast(closeSideAnchor-sl, requiredPoints) || !BrokerDistanceAtLeast(tp-closeSideAnchor, requiredPoints)))
       { why = "Buy SL/TP violate the broker stop/freeze distance at the live Bid."; return false; }
    }
    else
    {
       if(!(sl > closeSideAnchor && tp < closeSideAnchor))
       { why = "Sell SL/TP are on an invalid side of the live Ask."; return false; }
-      if(requiredPoints > 0 && ((sl - closeSideAnchor) < requiredDistance || (closeSideAnchor - tp) < requiredDistance))
+      if(requiredPoints > 0 && (!BrokerDistanceAtLeast(sl-closeSideAnchor, requiredPoints) || !BrokerDistanceAtLeast(closeSideAnchor-tp, requiredPoints)))
       { why = "Sell SL/TP violate the broker stop/freeze distance at the live Ask."; return false; }
    }
    why = "";
@@ -3341,6 +3360,22 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
       DoubleToString(point, 10),
       generated
    );
+   long stops=0, freeze=0;
+   bool stopsOk=SymbolInfoInteger(mt5Symbol, SYMBOL_TRADE_STOPS_LEVEL, stops);
+   bool freezeOk=SymbolInfoInteger(mt5Symbol, SYMBOL_TRADE_FREEZE_LEVEL, freeze);
+   MqlTick quoteTick;
+   datetime serverNow=TimeTradeServer();
+   bool quoteKnown=TerminalInfoInteger(TERMINAL_CONNECTED)!=0 && SymbolInfoTick(mt5Symbol, quoteTick) && quoteTick.time>0 && serverNow>=quoteTick.time;
+   string quoteStamp="null";
+   if(quoteKnown) quoteStamp="\""+IsoTimeUTC(TimeGMT()-(serverNow-quoteTick.time))+"\"";
+   // Preserve schema-1 fields; new readers require successful level reads and the symbol tick's age.
+   entries=StringSubstr(entries,0,StringLen(entries)-1);
+   entries+=",\"stops_level\":"+(stopsOk ? IntegerToString(stops) : "null");
+   entries+=",\"freeze_level\":"+(freezeOk ? IntegerToString(freeze) : "null");
+   entries+=",\"trade_tick_size\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_TRADE_TICK_SIZE),10);
+   entries+=",\"minimum_lot\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_VOLUME_MIN),8);
+   entries+=",\"tick_value\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_TRADE_TICK_VALUE),10);
+   entries+=",\"quote_timestamp\":"+quoteStamp+"}";
    written++;
 }
 
@@ -3404,7 +3439,16 @@ string BuildPepperstoneSpreadJson(datetime generatedAt)
    json += "  \"account\": {\n";
    json += "    \"server\": \"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",\n";
    json += "    \"company\": \"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",\n";
-   json += "    \"login\": " + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "\n";
+   string mode="unknown";
+   if(TerminalInfoInteger(TERMINAL_CONNECTED)!=0)
+   {
+      long accountMode=AccountInfoInteger(ACCOUNT_TRADE_MODE);
+      if(accountMode==ACCOUNT_TRADE_MODE_DEMO) mode="demo";
+      else if(accountMode==ACCOUNT_TRADE_MODE_REAL) mode="live";
+   }
+   json += "    \"mode\": \""+mode+"\",\n";
+   json += "    \"currency\": \""+JsonEscape(AccountInfoString(ACCOUNT_CURRENCY))+"\",\n";
+   json += "    \"login\": \"redacted\"\n";
    json += "  },\n";
    json += "  \"symbols\": [\n" + entries + "\n  ]\n";
    json += "}\n";

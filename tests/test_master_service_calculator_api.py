@@ -2386,7 +2386,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert conversion["take_profit_price_distance"] == "0.0025"
     assert conversion["take_profit_mt5_points"] == 250
     assert manual_quote["pepperstone_risk_buffer_preflight"]["stop_points"] == 430
-    assert manual_quote["pepperstone_risk_buffer_preflight"]["minimum_compatible_stop_ticks"] == 4
+    assert manual_quote["pepperstone_risk_buffer_preflight"]["minimum_compatible_stop_ticks"] == 3
     assert Decimal(manual_quote["quantity"]) > 0
     assert "estimate from OANDA price/conversion data" in manual_quote["position_size_estimate_note"]
     assert manual_quote["market_data_source"] == "OANDA FX pricing/conversion only; no Pepperstone account or margin data."
@@ -2425,6 +2425,64 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert net_values["StandardLimitSide"] == "0"
     assert net_values["StandardLimitEntryPrice"] == "1.3"
     assert calls["account_summary"] == 0
+
+    # Exact distance guidance uses exported account evidence, not the historical screenshot.
+    from datetime import datetime, timezone, timedelta
+    monkeypatch.setattr(master_service.httpx.Client,"request",lambda *a,**k: (_ for _ in ()).throw(AssertionError("No transport")))
+    monkeypatch.setattr(master_service.httpx.AsyncClient,"request",lambda *a,**k: (_ for _ in ()).throw(AssertionError("No transport")))
+    now = datetime.now(timezone.utc)
+    item = dict(_pepperstone_point_entry("USDJPY","USDJPY.a","0.001"),bid="150.000",ask="150.010",stops_level=20,freeze_level=10,
+                trade_tick_size="0.001",minimum_lot="0.01",tick_value="1",quote_timestamp=now.isoformat())
+    def exported(**changes):
+        data=dict(version=1,broker="pepperstone",generated_at=datetime.now(timezone.utc).isoformat(),account=dict(mode="demo",currency="AUD",login="must-not-display"),symbols=[dict(item,**changes)])
+        export_path.write_text(json.dumps(data),encoding="utf-8")
+    exported()
+    common=dict(symbol="USD_JPY",account="demo",chart_tick_size="0.001",side="buy",risk_mode="fixed_aud",risk_value="10",account_type="standard")
+    guidance=master_service._pepperstone_stop_guidance(**common)
+    assert guidance["state"]=="ready" and guidance["minimum_ticks"]==30 and guidance["step_ticks"]==1
+    assert guidance["maximum_ticks"]==1200 and "minimum-lot" in guidance["maximum_source"]
+    assert "must-not-display" not in json.dumps(guidance) and guidance["pricing_choice"]=="standard" and guidance["account_variant"]=="Not independently known"
+    assert master_service._pepperstone_stop_guidance(**dict(common,side="sell"))["minimum_ticks"]==30
+    for ticks in (5,29,30):
+        request=_pepperstone_quote_payload(symbol="USDJPY",stop_loss_ticks=str(ticks),pepperstone_account_type="standard")
+        quote=json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        g=quote["pepperstone_stop_guidance"]
+        assert (ticks>=g["minimum_ticks"]) == (ticks==30)
+        assert g["minimum_ticks"]==30 and g["step_ticks"]==1
+        assert quote["pepperstone_risk_buffer_preflight"]["compatible"] == (ticks==30)
+    instrument=json.loads(asyncio.run(master_service.calculator_instrument("fx","demo","USDJPY","pepperstone",pepperstone_account_type="standard")).body)
+    assert instrument["pepperstone_stop_guidance"]["minimum_ticks"]==30
+    assert master_service._pepperstone_stop_guidance(**common,order_type="limit",entry_price="150.005")["limit_entry_state"]=="invalid"
+    assert master_service._pepperstone_stop_guidance(**common,order_type="limit",entry_price="149.990")["limit_entry_state"]=="valid"
+    assert master_service._pepperstone_stop_guidance(**dict(common,side="sell"),order_type="limit",entry_price="150.020")["limit_entry_state"]=="valid"
+    exported(trade_tick_size="0.002")
+    assert master_service._pepperstone_stop_guidance(**common)["step_ticks"]==2
+    exported(trade_tick_size="0.002",ask="150.011")
+    assert master_service._pepperstone_stop_guidance(**common)["state"]=="blocked"
+    exported(stops_level=0,freeze_level=0)
+    with monkeypatch.context() as patch:
+        patch.setenv("PEPPERSTONE_TRADER_RISK_SLIPPAGE_BUFFER_POINTS","0")
+        zero=master_service._pepperstone_stop_guidance(**common)
+        assert zero["minimum_ticks"]==11  # Strict close-side check survives valid zero levels.
+    exported(stops_level=None)
+    assert master_service._pepperstone_stop_guidance(**common)["state"]=="pending"
+    exported(quote_timestamp=(now-timedelta(seconds=120)).isoformat())
+    assert master_service._pepperstone_stop_guidance(**common)["state"]=="pending"
+    exported()
+    assert master_service._pepperstone_stop_guidance(**dict(common,account="live"))["state"]=="pending"
+    legacy=json.loads(export_path.read_text());legacy.pop("account");export_path.write_text(json.dumps(legacy))
+    assert master_service._pepperstone_stop_guidance(**common)["state"]=="pending"
+    export_path.unlink()
+    assert master_service._pepperstone_stop_guidance(**common)["state"]=="pending"
+    # A different chart grid/override has exact point/trade divisibility.
+    gbp=dict(_pepperstone_point_entry("GBPUSD","GBPUSD.a","0.00001"),bid="1.30000",ask="1.30020",stops_level=0,freeze_level=0,
+             trade_tick_size="0.00002",quote_timestamp=datetime.now(timezone.utc).isoformat())
+    export_path.write_text(json.dumps(dict(version=1,broker="pepperstone",generated_at=now.isoformat(),account=dict(mode="demo",currency="USD"),symbols=[gbp])))
+    g=master_service._pepperstone_stop_guidance(symbol="GBP_USD",account="demo",chart_tick_size="0.0001")
+    assert g["minimum_ticks"]==3 and g["step_ticks"]==1
+    assert master_service._pepperstone_stop_guidance(symbol="GBP_USD",account="demo",chart_tick_size="0.00001")["step_ticks"]==2
+    assert master_service._pepperstone_risk_buffer_preflight(stop_points=30,risk_target=Decimal("10"))["minimum_compatible_stop_points"]==30
+    assert calls["account_summary"]==0
 
 
 def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_quote_before_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

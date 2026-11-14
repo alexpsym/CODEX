@@ -1401,6 +1401,7 @@
         if (typeof onChange === 'function') onChange();
         syncAllToggleStates();
         syncExpiryControls();
+        if(['pepperstone_account_type','side','order_type','risk_mode'].includes(key))refreshStopContext();else renderStopGuidance();
       });
     });
   }
@@ -1487,8 +1488,34 @@
     root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.round_number=btn.dataset.v||''; setRoundNumberButtons(); invalidateQuote();}));
   }
 
+  let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0;
+  const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
+  function renderStopGuidance() {
+    const el=$('calc-stop-guidance');if(!el)return;
+    el.style.display=isPepperstoneFx()?'':'none';if(!isPepperstoneFx())return;
+    const g=stopGuidance;
+    if(!g || stopGuidanceKey!==stopContext()){el.textContent='Stop distance: resolving current context; MT5 checks pending.';return;}
+    const elapsed=(Date.now()-stopGuidanceReceived)/1000;
+    if(g.state==='pending' || elapsed>=g.valid_for_seconds){el.textContent='Stop distance pending: '+g.reason;return;}
+    let text=`Minimum ${g.minimum_ticks} TradingView ticks; maximum ${g.maximum_ticks} (${g.maximum_source}); step ${g.step_ticks}. ${g.source}; quote age ${Math.max(0,Math.round((g.quote_age_seconds||0)+elapsed))}s. ${g.reason}`;
+    const raw=String($('calc-sl-ticks').value).trim();
+    // Bounds and lattice are exact whole integers from the server, never binary-price arithmetic.
+    if(/^\d+$/.test(raw)){
+      const n=BigInt(raw),lo=BigInt(g.minimum_ticks),hi=BigInt(g.maximum_ticks),step=BigInt(g.step_ticks);
+      if(n<lo)text+=` Too tight; next valid value ${lo} ticks.`;
+      else if(n>hi)text+=` Too wide; next valid value ${hi} ticks.`;
+      else if(n%step!==0n)text+=` Off-grid; next valid value ${n+(step-n%step)<=hi?n+(step-n%step):n-n%step} ticks.`;
+      else text+=' Stop input is within these distance bounds; Trader final checks remain authoritative.';
+    }else text+=' Enter a positive whole number of TradingView ticks; next valid value '+g.minimum_ticks+'.';
+    el.textContent=text;
+  }
+  function receiveStopGuidance(g,key) {if(key!==stopContext())return;stopGuidance=g||null;stopGuidanceKey=key;stopGuidanceReceived=Date.now();renderStopGuidance();}
+  function refreshStopContext(){renderStopGuidance();if(isPepperstoneFx())resolveSymbolAndLoad();}
+
   async function resolveSymbolAndLoad() {
     const symbol = currentSymbolInput();
+    const guidanceKey=stopContext();
+    renderStopGuidance();
     invalidateQuote();
     canonicalEl.textContent = '';
     if (!symbol) {
@@ -1501,14 +1528,15 @@
     resolveController = controller;
     try {
       const requestedBroker = state.asset === 'fx' ? state.broker : 'bybit';
-      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: controller.signal });
+      const guidanceParams=new URLSearchParams({side:state.side,order_type:state.order_type,entry_price:$('calc-limit')?.value||'',risk_mode:state.risk_mode,risk_value:$('calc-risk')?.value||'',pepperstone_account_type:state.pepperstone_account_type||'razor',chart_tick_size:$('calc-chart-tick-size-override-enabled')?.checked?$('calc-chart-tick-size')?.value||'':''});
+      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}&${guidanceParams}`, { signal: controller.signal });
       const instrument = await resolveInFlight;
-      if (resolveController !== controller || !adoptEffectiveRoute(instrument, symbol)) return;
+      if (resolveController !== controller || guidanceKey!==stopContext() || !adoptEffectiveRoute(instrument, symbol)) return;
+      receiveStopGuidance(instrument.pepperstone_stop_guidance,stopContext());
       loadJournalSummary(state.resolvedSymbol);
       loadInstrumentSpecs(state.resolvedSymbol);
       prewarmQuoteDependencies(state.resolvedSymbol);
     } catch (e) {
-      if (seq !== state.quoteRequestSeq) return;
       if (e.name === 'AbortError') {
         return;
       }
@@ -1618,6 +1646,7 @@
         if (key && $('calc-chart-tick-size-override-enabled')?.checked) state.chartTickOverrides[key] = String(el.value || '').trim();
       }
       invalidateQuote({ clearResults: false });
+      if(id==='calc-sl-ticks')renderStopGuidance();else if(['calc-limit','calc-risk','calc-chart-tick-size'].includes(id))refreshStopContext();
     }));
   });
   $('calc-chart-tick-size-override-enabled')?.addEventListener('change', () => {
@@ -1631,6 +1660,7 @@
     const key = chartSymbolKey($('calc-symbol')?.value);
     if (key) state.chartTickOverrides[key] = enabled ? String(field?.value || '').trim() : '';
     invalidateQuote({ clearResults: false });
+    refreshStopContext();
   });
   $('calc-target-mode')?.addEventListener('change', () => {
     syncTargetUi();
@@ -1735,6 +1765,7 @@
       payload.broker = state.broker;
       payload.symbol = state.resolvedSymbol;
       state.quote = quote;
+      if(isPepperstoneFx())receiveStopGuidance(quote.pepperstone_stop_guidance,stopContext());
       state.resolvedVenue = quote?.resolved_venue || quote?.venue || (state.asset === 'crypto' ? 'Bybit' : state.broker);
       loadJournalSummary(state.resolvedSymbol);
       loadInstrumentSpecs(state.resolvedSymbol);
@@ -1968,6 +1999,10 @@
   setVwapButtons();
   setAthsAtlsButtons();
   setRoundNumberButtons();
+  if(!$('calc-stop-guidance') && typeof document.createElement==='function' && $('calc-sl-ticks')?.insertAdjacentElement){
+    const guide=document.createElement('div');guide.id='calc-stop-guidance';guide.className='muted';guide.setAttribute('role','status');$('calc-sl-ticks').insertAdjacentElement('afterend',guide);
+  }
+  renderStopGuidance();
   initializeTrendlinePlans();
   state.activeChartTickSymbol = chartSymbolKey(currentSymbolInput());
   syncChartTickOverrideForSymbol();
