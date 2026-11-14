@@ -14,6 +14,116 @@ from urllib.parse import unquote
 import pytest
 from openpyxl import Workbook
 from openpyxl import load_workbook
+@pytest.mark.skipif(os.name!='nt',reason='Windows publication sharing failures')
+def test_publication_final_sharing_failure_records_bounded_identity_evidence(tmp_path, monkeypatch, caplog):
+    import time, copy, logging
+    import tools.master_journal_workbook as journal
+    for mode in ['probe','replace','unknown']:
+        ms,path=_publication_fixture_service(monkeypatch,tmp_path/mode,delivery=True)
+        monkeypatch.setattr(ms,'_journal_transaction_lock_path',lambda _p:tmp_path/mode/'transaction-marker')
+        book=Workbook();book.active['A1']='original';book.save(path);book.close();original=path.read_bytes()
+        candidate=path.with_suffix('.update-candidate.tmp.xlsx');book=load_workbook(path);book.active['A1']='candidate';book.save(candidate);book.close();prepared=candidate.read_bytes()
+        record=dict(schema=1,canonical=str(path),candidate=str(candidate),candidate_bytes=len(prepared),
+            source_sha256=ms._publication_file_hash(path),candidate_sha256=ms._publication_file_hash(candidate),
+            source=ms._resync_source_fingerprint(path),phase='verified',snapshot={},payload={'master_journal_ok':True},validation={'ok':True},bundle={'files':{},'links':[]})
+        publisher=dict(pid=700,process_start_filetime=100,started_at='fixture-start',source_stamp='loaded-source',startup_commit='loaded-commit')
+        monkeypatch.setattr(ms,'_journal_publisher_identity',lambda:copy.deepcopy(publisher))
+        queried=[]
+        def query(p,deadline):
+            queried.append((str(p),deadline,time.monotonic()))
+            if mode=='unknown':return dict(path=str(p),attribution='unknown',reason='query_error',owners=[])
+            return dict(path=str(p),attribution='reported_resource_users',query_pid=888,
+                owners=[dict(pid=700,process_start_filetime=100,same_pid=False),
+                        dict(pid=700,process_start_filetime=999,same_pid=False),dict(pid=701,process_start_filetime=200,same_pid=False)])
+        monkeypatch.setattr(ms,'_journal_resource_query_with_deadline',query)
+        monkeypatch.setattr(ms,'_master_journal_lock_status',lambda p:dict(locked=mode!='replace',code='WORKBOOK_IN_USE',reason='sharing_violation',winerror=32,path=str(p),owner='unknown'))
+        replacements=[];real_replace=os.replace
+        def replace(source,destination):
+            if Path(source)==candidate and Path(destination)==path:
+                replacements.append((source,destination))
+                raise OSError(13,'fixture sharing violation',str(candidate),32,str(path))
+            return real_replace(source,destination)
+        monkeypatch.setattr(ms.os,'replace',replace)
+        monkeypatch.setattr(ms,'_rollback_journal_publication',lambda *a,**k:(_ for _ in ()).throw(AssertionError('No rollback write on retained sharing failure')))
+        assert ms._reserve_master_journal_workbook_sync(path,'fixture-lock','fixture') is None
+        caplog.clear();caplog.set_level(logging.WARNING)
+        deadline=time.monotonic()+2
+        try:response=ms._publish_verified_journal(path,record,sync_id='fixture-lock',resumed=True,deadline=deadline)
+        finally:ms._release_master_journal_workbook_sync()
+        assert response['status_code']==423 and response['code']=='WORKBOOK_IN_USE'
+        operation='replace_candidate' if mode=='replace' else 'exclusive_access_probe'
+        assert response['blocked_stage']=='final_replace' and response['blocked_operation']==operation
+        assert record['phase']=='verified' and path.read_bytes()==original and candidate.read_bytes()==prepared
+        assert len(replacements)==(1 if mode=='replace' else 0)
+        assert ms._read_pending_publication(path)['phase']=='verified'
+        logs=[r.getMessage() for r in caplog.records if r.getMessage().startswith('journal_publication_lock_evidence ')]
+        assert len(logs)==1
+        evidence=json.loads(logs[0].split(' ',1)[1]);assert evidence['publisher']==publisher
+        assert evidence['stage']=='final_replace' and evidence['sync_id']=='fixture-lock' and evidence['operation']==operation and evidence['winerror']==32
+        assert evidence['proven_readers']==[] and evidence['reader_attribution'].startswith('unknown')
+        assert len(queried)==(2 if mode=='replace' else 1)
+        assert all(end<=deadline and end-now<=5 for _,end,now in queried)
+        assert evidence['rename_path_ambiguous']==(mode=='replace')
+        if mode=='replace':
+            assert evidence['exception_source']==str(candidate) and evidence['exception_destination']==str(path)
+            assert [(q['role'],q['path']) for q in evidence['queries']]==[('source_candidate',str(candidate)),('canonical_destination',str(path))]
+        for q in evidence['queries']:
+            if mode=='unknown':assert q['attribution']=='unknown' and q['owners']==[]
+            else:
+                assert q['owners'][0]['publisher_identity_match'] is True
+                assert q['owners'][1]['publisher_pid_match'] is True and q['owners'][1]['publisher_identity_match'] is False
+                assert q['owners'][2]['publisher_pid_match'] is False
+                assert all('same_pid' not in owner for owner in q['owners'])
+        assert 'journal_publication_lock_evidence' not in json.dumps(response) and not ms._fixture_external_attempts
+        monkeypatch.setattr(ms.os,'replace',real_replace)
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows exact-file Restart Manager query')
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows exact-file Restart Manager query')
+def test_journal_resource_query_controlled_handle_and_budget(tmp_path, monkeypatch):
+    import time
+    ms=master_service
+    path=tmp_path/'controlled.xlsx';book=Workbook();book.save(path);book.close();original=path.read_bytes()
+    publisher=ms._journal_publisher_identity()
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.CreateFileW.argtypes=[ctypes.c_wchar_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_void_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_void_p];kernel.CreateFileW.restype=ctypes.c_void_p
+    kernel.CloseHandle.argtypes=[ctypes.c_void_p];kernel.CloseHandle.restype=ctypes.c_int
+    handle=kernel.CreateFileW(str(path),0x80000000,0,None,3,0x80,None)
+    assert handle not in (None,ctypes.c_void_p(-1).value)
+    started=time.monotonic()
+    try:observed=ms._journal_resource_query_with_deadline(path,started+5)
+    finally:assert kernel.CloseHandle(handle)
+    elapsed=time.monotonic()-started
+    assert elapsed<5.5 and observed['path']==str(path)
+    if observed['attribution']=='reported_resource_users':
+        assert observed['end_exit']==0 and observed['list_exit']==0
+        matching=[owner for owner in observed['owners'] if owner['pid']==publisher['pid']]
+        assert all(owner['process_start_filetime']==publisher['process_start_filetime'] for owner in matching)
+    else:assert observed['attribution']=='unknown'
+    assert path.read_bytes()==original
+    print('EXACT_FILE_NATIVE_QUERY '+json.dumps(dict(elapsed_seconds=elapsed,publisher=publisher,query=observed)),flush=True)
+    def forbidden(*a,**k):raise AssertionError('No query after deadline')
+    monkeypatch.setattr(ms.subprocess,'run',forbidden)
+    assert ms._journal_resource_query_with_deadline(path,time.monotonic())['reason']=='deadline_exhausted'
+    def timed_out(*a,**k):raise subprocess.TimeoutExpired('controlled-query',k['timeout'])
+    monkeypatch.setattr(ms.subprocess,'run',timed_out)
+    assert ms._journal_resource_query_with_deadline(path,time.monotonic()+1)['attribution']=='unknown'
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MODULE_PATH = ROOT / 'render' / 'master_service.py'
+_HTTPX_SPEC = importlib.util.find_spec("httpx")
+HTTPX_AVAILABLE = _HTTPX_SPEC is not None and _HTTPX_SPEC.loader is not None
+master_service = None
+if HTTPX_AVAILABLE:
+    spec = importlib.util.spec_from_file_location('ms_sync_test', MODULE_PATH)
+    master_service = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = master_service
+    spec.loader.exec_module(master_service)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'render' / 'master_service.py'
 _HTTPX_SPEC = importlib.util.find_spec("httpx")

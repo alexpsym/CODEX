@@ -2657,7 +2657,19 @@ def _workbook_access_failure_status(exc: BaseException, path: Path, *, stage: st
     return None
 
 
-def _log_master_journal_access_block(lock_status: Dict[str, object], *, sync_id: Optional[str], stage: str, operation: str) -> None:
+def _log_master_journal_access_block(lock_status: Dict[str, object], *, sync_id: Optional[str], stage: str, operation: str, canonical: Optional[Path] = None, candidate: Optional[Path] = None, deadline: Optional[float] = None) -> None:
+    if stage == 'final_replace' and lock_status.get('winerror') in (32, 33) and os.name == 'nt':
+        try:
+            evidence = _journal_publication_lock_evidence(lock_status, canonical or _master_journal_path(),
+                candidate, sync_id=sync_id, operation=operation, deadline=deadline)
+        except Exception as exc:
+            evidence = dict(sync_id=sync_id,stage=stage,operation=operation,publisher_pid=os.getpid(),
+                publisher=dict(pid=os.getpid(),process_start_filetime=None,started_at=LOCAL_BUILD_INFO.get('started_at'),
+                    source_stamp=LOCAL_BUILD_INFO.get('source_stamp'),startup_commit=LOCAL_BUILD_INFO.get('git_commit')),
+                winerror=lock_status.get('winerror'),blocked_path=lock_status.get('path'),
+                exception_source=lock_status.get('filename'),exception_destination=lock_status.get('filename2'),
+                attribution='unknown',diagnostic_error_type=type(exc).__name__)
+        APP_LOGGER.warning('journal_publication_lock_evidence %s', json.dumps(evidence,sort_keys=True))
     APP_LOGGER.warning(
         "journal_workbook_access_blocked sync_id=%s stage=%s operation=%s pid=%s code=%s reason=%s winerror=%s error_type=%s filename=%r filename2=%r resource=%r owner=%s",
         sync_id, stage, operation, os.getpid(), lock_status.get('code'), lock_status.get('reason'),
@@ -48018,6 +48030,126 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
         _release_master_journal_workbook_sync()
 
 
+def _journal_resource_owners(path: Path) -> Dict[str, object]:
+    """Exact-file query at the blocked boundary; no shutdown/restart API."""
+    from ctypes import wintypes as w
+    class Process(ctypes.Structure):
+        _fields_ = [('pid', w.DWORD), ('started', w.FILETIME)]
+    class Info(ctypes.Structure):
+        _fields_ = [('process', Process), ('name', w.WCHAR * 256), ('service', w.WCHAR * 64),
+                    ('kind', ctypes.c_int), ('status', w.ULONG), ('session', w.DWORD), ('restartable', w.BOOL)]
+    result = {'path': str(path), 'query_pid': os.getpid(), 'owners': []}
+    rm = ctypes.WinDLL('rstrtmgr', use_last_error=True)
+    rm.RmStartSession.argtypes = [ctypes.POINTER(w.DWORD), w.DWORD, w.LPWSTR]
+    rm.RmRegisterResources.argtypes = [w.DWORD, w.UINT, ctypes.POINTER(w.LPCWSTR), w.UINT, ctypes.c_void_p, w.UINT, ctypes.c_void_p]
+    rm.RmGetList.argtypes = [w.DWORD, ctypes.POINTER(w.UINT), ctypes.POINTER(w.UINT), ctypes.POINTER(Info), ctypes.POINTER(w.DWORD)]
+    rm.RmEndSession.argtypes = [w.DWORD]
+    for name in ('RmStartSession', 'RmRegisterResources', 'RmGetList', 'RmEndSession'): getattr(rm, name).restype = w.DWORD
+    session = w.DWORD(); key = ctypes.create_unicode_buffer(33)
+    result['start_exit'] = rm.RmStartSession(ctypes.byref(session), 0, key)
+    if result['start_exit']: return result
+    try:
+        result['register_exit'] = rm.RmRegisterResources(session, 1, (w.LPCWSTR * 1)(str(path)), 0, None, 0, None)
+        if result['register_exit']: return result
+        needed, count, reasons = w.UINT(), w.UINT(), w.DWORD()
+        code = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None, ctypes.byref(reasons))
+        if code == 234 and 0 < needed.value <= 64:
+            count.value = needed.value; items = (Info * count.value)()
+            code = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), items, ctypes.byref(reasons))
+            if code == 0:
+                for item in items[:count.value]:
+                    result['owners'].append(dict(pid=item.process.pid, process_start_filetime=(item.process.started.dwHighDateTime << 32) | item.process.started.dwLowDateTime, name=item.name, service=item.service, same_pid=item.process.pid == os.getpid()))
+        result['list_exit'] = code
+        return result
+    finally:
+        result['end_exit'] = rm.RmEndSession(session)
+
+
+def _journal_publisher_identity() -> Dict[str, object]:
+    """Startup build identity plus the publishing process's OS creation time."""
+    result = dict(pid=os.getpid(),process_start_filetime=None,
+        started_at=LOCAL_BUILD_INFO.get('started_at'),source_stamp=LOCAL_BUILD_INFO.get('source_stamp'),
+        startup_commit=LOCAL_BUILD_INFO.get('git_commit'))
+    if os.name != 'nt':return result
+    from ctypes import wintypes as w
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];kernel.OpenProcess.restype=w.HANDLE
+    kernel.GetProcessTimes.argtypes=[w.HANDLE,*([ctypes.POINTER(w.FILETIME)]*4)]
+    kernel.GetProcessTimes.restype=w.BOOL
+    kernel.CloseHandle.argtypes=[w.HANDLE];kernel.CloseHandle.restype=w.BOOL
+    handle=kernel.OpenProcess(0x1000,False,os.getpid())
+    if not handle:
+        result['identity_error']=ctypes.get_last_error();return result
+    try:
+        times=[w.FILETIME() for _ in range(4)]
+        if kernel.GetProcessTimes(handle,*[ctypes.byref(value) for value in times]):
+            result['process_start_filetime']=(times[0].dwHighDateTime<<32)|times[0].dwLowDateTime
+        else:result['identity_error']=ctypes.get_last_error()
+    finally:kernel.CloseHandle(handle)
+    return result
+
+
+def _journal_resource_query_with_deadline(path: Path, deadline: float) -> Dict[str, object]:
+    """Isolate the existing query-only RM function from publication's deadline.
+
+    Marshal the loaded function, not today's on-disk source. The child closes
+    every completed query session in its existing finally. A hung native call
+    cannot delay publication: timeout is unknown attribution/cleanup, never a
+    successful query, and only that disposable query worker is terminated.
+    """
+    import base64, marshal, sys
+    budget=deadline-time.monotonic()-0.05
+    if budget<=0:return dict(path=str(path),attribution='unknown',reason='deadline_exhausted')
+    code=base64.b64encode(marshal.dumps(_journal_resource_owners.__code__)).decode('ascii')
+    script=('import base64,ctypes,json,marshal,os,sys,types;from pathlib import Path;'
+        'query=types.FunctionType(marshal.loads(base64.b64decode(sys.argv[1])),globals());'
+        'print(json.dumps(query(Path(sys.argv[2]))))')
+    budget=deadline-time.monotonic()-0.05
+    if budget<=0:return dict(path=str(path),attribution='unknown',reason='deadline_exhausted')
+    try:
+        completed=subprocess.run([sys.executable,'-S','-c',script,code,str(path)],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=budget,check=False,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    except subprocess.TimeoutExpired:
+        return dict(path=str(path),attribution='unknown',reason='query_timeout',session_cleanup='unconfirmed_after_timeout')
+    except Exception as exc:
+        return dict(path=str(path),attribution='unknown',reason='query_error',error_type=type(exc).__name__)
+    if completed.returncode:
+        return dict(path=str(path),attribution='unknown',reason='query_worker_error',child_exit=completed.returncode)
+    try:result=json.loads(completed.stdout)
+    except (ValueError,TypeError):
+        return dict(path=str(path),attribution='unknown',reason='invalid_query_result')
+    result['attribution']='reported_resource_users' if result.get('owners') and result.get('list_exit')==0 and result.get('end_exit')==0 else 'unknown'
+    if result['attribution']=='unknown':result['reason']='empty_or_unsuccessful_query'
+    return result
+
+
+def _journal_publication_lock_evidence(status: Dict[str, object], canonical: Path, candidate: Optional[Path], *, sync_id: Optional[str], operation: str, deadline: Optional[float] = None) -> Dict[str, object]:
+    started=time.monotonic();end=min(started+5.0,deadline) if deadline is not None else started+5.0
+    publisher=_journal_publisher_identity()
+    # Rename argument names identify the two operands, not which operand denied
+    # sharing. Keep these exact-path queries separate instead of blaming the
+    # canonical workbook for a possibly blocked source candidate.
+    ambiguous=operation=='replace_candidate' and candidate is not None and candidate!=canonical
+    targets=[('source_candidate',candidate),('canonical_destination',canonical)] if ambiguous else [('canonical_destination',canonical)]
+    queries=[]
+    for role,path in targets:
+        query=_journal_resource_query_with_deadline(path,end)
+        users=[]
+        for user in query.get('owners',[]):
+            user=dict(user);user.pop('same_pid',None)
+            user['publisher_pid_match']=user.get('pid')==publisher['pid']
+            user['publisher_identity_match']=bool(user['publisher_pid_match'] and publisher.get('process_start_filetime')
+                and user.get('process_start_filetime')==publisher['process_start_filetime'])
+            users.append(user)
+        query=dict(query,role=role,owners=users);queries.append(query)
+    return dict(sync_id=sync_id,stage='final_replace',operation=operation,winerror=status.get('winerror'),
+        blocked_path=status.get('path'),exception_source=status.get('filename'),exception_destination=status.get('filename2'),
+        publisher=publisher,rename_path_ambiguous=ambiguous,queries=queries,
+        proven_readers=[],reader_attribution='unknown;Restart Manager reports path users,not individual reader handles',
+        elapsed_seconds=round(time.monotonic()-started,6),budget_seconds=max(0.0,end-started))
+
+
 def _pending_publication_path(path: Path) -> Path:
     return TRADING_JOURNAL_RESYNC_CACHE_PATH.with_suffix('.pending.json')
 
@@ -48247,7 +48379,7 @@ def _publish_verified_journal(path: Path, record: Dict[str, object], *, sync_id:
     candidate = Path(record['candidate'])
     status = _master_journal_lock_status(path)
     if status.get('locked'):
-        _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='exclusive_access_probe')
+        _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='exclusive_access_probe', canonical=path, candidate=candidate, deadline=deadline)
         record['last_block'] = dict(stage='final_replace', operation='exclusive_access_probe', status=status, request_id=sync_id)
         _save_pending_publication(path, record)
         return _excel_workbook_open_payload(extra=dict(master_journal_ok=False, master_journal_path=str(path), lock_status=status, blocked_stage='final_replace', blocked_operation='exclusive_access_probe', pending_publication=True, publication_phase='verified', publication_only=resumed, candidate_sha256=record['candidate_sha256'], sync_id=sync_id))
@@ -48264,7 +48396,7 @@ def _publish_verified_journal(path: Path, record: Dict[str, object], *, sync_id:
         except OSError as exc:
             status = _workbook_access_failure_status(exc, path, stage='final_replace', operation='replace_candidate')
             if status is not None:
-                _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='replace_candidate')
+                _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='replace_candidate', canonical=path, candidate=candidate, deadline=deadline)
                 if getattr(exc, 'winerror', None) in (32, 33) and candidate.exists() and _publication_file_hash(path) == record['source_sha256'] and _publication_file_hash(candidate) == record['candidate_sha256']:
                     record['phase'] = 'verified'
                 record['last_block'] = dict(stage='final_replace', operation='replace_candidate', status=status, request_id=sync_id)
