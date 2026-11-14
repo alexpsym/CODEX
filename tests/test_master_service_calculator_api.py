@@ -4251,6 +4251,76 @@ def test_unused_trendline_plan_delete_route_is_permanent_and_protected(tmp_path,
     assert store.path.read_bytes() == before
     assert not external and "can_delete" not in store.path.read_text()
 
+    # Finished cards retain the complete durable execution and dashboard history.
+    def finish(*, simulated=False, closed=False, reference=True):
+        record = create(broker="oanda" if simulated else "bybit", test_trade=True)
+        store.arm(record["plan_id"], now_ms=6000)
+        record = store.claim_trigger(record["plan_id"], {"trigger_timestamp_ms":20000,"trigger_price":"1.2","trigger_kind":"entered_band"}, now_ms=20000)["plan"]
+        if not simulated:
+            store.begin_submission(record["plan_id"], execution_key=record["execution_key"], now_ms=21000,
+                submission_refs={"order_link_id":record["execution_key"],"category":"linear"})
+        outcome = {"outcome":"simulated" if simulated else "executed"}
+        if reference and not simulated:outcome["order_id"] = "accepted-" + record["plan_id"]
+        record = store.resolve_claim(record["plan_id"], status="submitted", outcome=outcome, now_ms=22000)
+        if closed:
+            proof = dict(kind="bybit_full_execution_ledger",account=record["account"],instrument=record["instrument"],category="linear",
+                settlement_currency="USDT",position_idx=0,order_id=record["execution_result"]["order_id"],order_link_id=record["execution_key"],
+                closed_at_ms=23000,closing_order_id="close-"+record["plan_id"],opening_quantity="1")
+            record = store.record_broker_closure(record["plan_id"], expected_revision=record["revision"], execution_key=record["execution_key"], order_id=proof["order_id"], proof=proof)
+        return record
+    def dismiss(record, **extra):
+        return json.loads(_run_immediate_route(service.trendline_plan_dismiss_calculator(record["plan_id"], {"revision":record["revision"], **extra})).body)
+    closed, simulated, accepted, missing = finish(closed=True), finish(simulated=True), finish(), finish(reference=False)
+    assert accepted["test_trade"] is True and accepted["execution_result"]["outcome"] == "executed"
+    assert service._trendline_plan_client_view(closed)["calculator_finish_kind"] == "closed"
+    assert service._trendline_plan_client_view(simulated)["calculator_finish_kind"] == "simulated"
+    assert service._trendline_plan_client_view(accepted)["calculator_finish_kind"] == "confirm_finished"
+    assert "calculator_dismissal" not in keep and "calculator_dismissal" not in store.get(keep["plan_id"])
+    for record,extra in [(accepted,{}),(accepted,{"confirm_finished":"true"}),(closed,{"revision":closed["revision"]-1}),(missing,{"confirm_finished":True})]:
+        before = store.path.read_bytes()
+        with pytest.raises(service.HTTPException) as blocked:dismiss(record, **extra)
+        assert blocked.value.status_code == 409 and store.path.read_bytes() == before
+    for pid in protected:
+        record = store.get(pid)
+        assert not service._trendline_plan_client_view(record)["can_dismiss_calculator"]
+        before = store.path.read_bytes()
+        with pytest.raises(service.HTTPException) as blocked:dismiss(record, confirm_finished=True)
+        assert blocked.value.status_code == 409 and store.path.read_bytes() == before
+    before = store.path.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_write", lambda data: (_ for _ in ()).throw(service.TrendlinePlanPersistenceError("synthetic disk failure")))
+        with pytest.raises(service.HTTPException) as failure:dismiss(accepted, confirm_finished=True)
+        assert failure.value.status_code == 500
+    assert store.path.read_bytes() == before
+    for record in (closed,simulated,accepted):
+        result = dismiss(record, **({"confirm_finished":True} if record is accepted else {}))
+        assert result["ok"] and result["dismissed_plan_id"] == record["plan_id"]
+        saved = service.TrendlinePlanStore(store.path).get(record["plan_id"])
+        assert {k:v for k,v in saved.items() if k != "calculator_dismissal"} == record
+        assert saved["calculator_dismissal"]["plan_revision"] == record["revision"]
+        before = store.path.read_bytes()
+        with monkeypatch.context() as patch:
+            patch.setattr(store,"_write",lambda data: (_ for _ in ()).throw(AssertionError("Duplicate must not write")))
+            assert dismiss(record, **({"confirm_finished":True} if record is accepted else {}))["ok"]
+        assert store.path.read_bytes() == before
+    listed = json.loads(_run_immediate_route(service.trendline_plan_list()).body)["plans"]
+    assert any(p["plan_id"] == accepted["plan_id"] and p["calculator_dismissal"] for p in listed)
+    # Native broker rows still project, and simulation dashboard dismissal is independent.
+    native = dict(broker="Bybit",account=accepted["account"],instrument=accepted["instrument"],category="linear",side=accepted["action"],type="order",id=accepted["execution_result"]["order_id"])
+    projected = service._trendline_dashboard_rows([native],plans=[store.get(accepted["plan_id"])],contexts=[])
+    assert any(row.get("id") == native["id"] for row in projected)
+    assert service._trendline_dashboard_rows([],plans=[store.get(simulated["plan_id"])],contexts=[])
+    assert store.get(simulated["plan_id"])["dashboard_dismissal"] is None
+    # Exact later broker closure is still recorded on a manually dismissed plan.
+    proof = dict(closed["broker_closure"],order_id=accepted["execution_result"]["order_id"],order_link_id=accepted["execution_key"],closing_order_id="later-close")
+    later = store.record_broker_closure(accepted["plan_id"],expected_revision=accepted["revision"],execution_key=accepted["execution_key"],order_id=proof["order_id"],proof=proof)
+    assert later["broker_closure"] == proof and later["calculator_dismissal"] == store.get(accepted["plan_id"])["calculator_dismissal"]
+    for action in (lambda:store.create({**payload,"calculator_dismissal":{}},now_ms=5000),lambda:store.update(keep["plan_id"],{"calculator_dismissal":{}},now_ms=6000),lambda:_run_immediate_route(service.trendline_plan_create({"calculator_dismissal":{}})),lambda:_run_immediate_route(service.trendline_plan_update(keep["plan_id"],{"calculator_dismissal":{}}))):
+        before=store.path.read_bytes()
+        with pytest.raises((service.TrendlinePlanError,service.HTTPException)):action()
+        assert store.path.read_bytes()==before
+    assert not external
+
 
 @pytest.fixture
 def pepperstone_account_fixture(monkeypatch, tmp_path):

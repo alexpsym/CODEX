@@ -31036,7 +31036,7 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
-    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "broker_closure", "risk_update", "classification_overrides", "classification_version", "classification_updated_at_ms"}.intersection(payload):
+    if {"display_snapshot", "submission_refs", "execution_policy", "dashboard_dismissal", "calculator_dismissal", "broker_closure", "risk_update", "classification_overrides", "classification_version", "classification_updated_at_ms"}.intersection(payload):
         raise TrendlinePlanError("Display and submission records are server-owned.")
     forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
@@ -31163,7 +31163,9 @@ def _trendline_saved_display(payload, plan):
 
 
 def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]:
-    return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan), latest_evaluation=TRENDLINE_EXECUTOR.latest_evaluations.get(str(plan["plan_id"])), monitor_generation=TRENDLINE_EXECUTOR.generation,
+    return dict(plan, calculator_finish_kind=TrendlinePlanStore.calculator_finish_kind(plan),
+                can_dismiss_calculator=TrendlinePlanStore.calculator_finish_kind(plan) is not None and not plan.get("calculator_dismissal"),
+                can_delete=TrendlinePlanStore.can_delete(plan), latest_evaluation=TRENDLINE_EXECUTOR.latest_evaluations.get(str(plan["plan_id"])), monitor_generation=TRENDLINE_EXECUTOR.generation,
                 monitoring_eligible=TRENDLINE_EXECUTOR.eligible(str(plan["plan_id"])) and bool(TRENDLINE_EXECUTOR.status()["running"]))
 
 
@@ -31266,6 +31268,20 @@ async def trendline_plan_update_risk(plan_id: str, payload: Dict[str, object] = 
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
+
+
+@app.post("/api/trendline-plans/{plan_id}/dismiss-calculator")
+async def trendline_plan_dismiss_calculator(plan_id: str, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        if set(payload) - {"revision", "confirm_finished"} or "revision" not in payload or type(payload.get("confirm_finished", False)) is not bool:
+            raise TrendlinePlanError("Exact calculator revision and literal confirmation required.")
+        plan = TRENDLINE_PLAN_STORE.dismiss_calculator(plan_id, expected_revision=payload["revision"],
+            confirm_finished=payload.get("confirm_finished", False))
+        return JSONResponse({"ok": True, "dismissed_plan_id": plan_id, "plan": _trendline_plan_client_view(plan)})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
+
 
 
 @app.post("/api/trendline-plans/{plan_id}/dismiss-dashboard")

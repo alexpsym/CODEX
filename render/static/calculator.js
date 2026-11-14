@@ -1035,8 +1035,8 @@
     let actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
     if(plan.status==='armed' && plan.monitoring_eligible!==true) actions=`<button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button>`+actions;
     if(plan.status==='armed' && plan.monitoring_eligible===true) actions+=`<button type="button" data-tl-action="risk-edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit stop and target</button>`;
-    if(plan.can_delete===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Permanently delete this unused plan">Delete</button>`;
-    return `<strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}${trendlineEvaluationDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div>`;
+    if(plan.can_delete===true || plan.can_dismiss_calculator===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Remove this card">Delete</button>`;
+    return `<strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.calculator_finish_kind==='closed'?'Closed':plan.calculator_finish_kind==='simulated'?'Simulated':plan.calculator_finish_kind==='confirm_finished'?'Submitted: close unverified':plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}${trendlineEvaluationDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div>`;
   }
   function updateRiskEditor() {
     const edit=state.trendlineRiskEdit;if(!edit)return;
@@ -1117,7 +1117,7 @@
   async function refreshTrendlinePlans() {
     if (!state.trendlinePlansAvailable || state.trendlineRiskEdit?.pending) return;
     const seq=++state.trendlineListRequestSeq;
-    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; if(typeof response.monitoring_active==='boolean') renderTrendlineMonitor({...state.trendlineMonitorStatus,running:response.monitoring_active}); renderTrendlinePlans(); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
+    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=(response.plans||[]).filter(plan=>!plan.calculator_dismissal); if(typeof response.monitoring_active==='boolean') renderTrendlineMonitor({...state.trendlineMonitorStatus,running:response.monitoring_active}); renderTrendlinePlans(); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
   }
   async function saveTrendlinePlan() {
     if (!state.trendlinePlansAvailable || state.trendlineMutationPending || state.trendlineMonitorPending) return;
@@ -1191,11 +1191,14 @@
     if(action==='edit') return editTrendlinePlan(plan);
     if(action==='risk-edit') return openTrendlineRiskEditor(plan);
     if(action==='delete') {
-      if(!plan || plan.can_delete!==true) { trendlineStatus('This plan is protected from deletion. Refresh the list.');return; }
+      if(!plan || (plan.can_delete!==true && plan.can_dismiss_calculator!==true)) { trendlineStatus('This plan is protected from deletion. Refresh the list.');return; }
+      const finished=plan.can_dismiss_calculator===true;
+      const needsConfirmation=finished && plan.calculator_finish_kind==='confirm_finished';
+      if(needsConfirmation && (typeof confirm!=='function' || !confirm('I verified this trade is finished and has no remaining broker order. Remove only this calculator card?'))) return;
       ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
       try {
-        const response=await request(`/api/trendline-plans/${encodeURIComponent(planId)}`,{method:'DELETE'});
-        if(response.ok!==true || response.deleted_plan_id!==planId) throw new Error('Deletion was not confirmed; plan retained.');
+        const response=finished ? await post(`/api/trendline-plans/${encodeURIComponent(planId)}/dismiss-calculator`,{revision:plan.revision,...(needsConfirmation?{confirm_finished:true}:{})}) : await request(`/api/trendline-plans/${encodeURIComponent(planId)}`,{method:'DELETE'});
+        if(response.ok!==true || (finished ? response.dismissed_plan_id!==planId || response.plan?.plan_id!==planId || response.plan?.calculator_dismissal?.plan_id!==planId || response.plan?.calculator_dismissal?.plan_revision!==plan.revision : response.deleted_plan_id!==planId)) throw new Error('Deletion was not confirmed; plan retained.');
         ++state.trendlineListRequestSeq;
         state.trendlinePlans=state.trendlinePlans.filter(item=>item.plan_id!==planId);
         if(state.trendlineEditId===planId) {
@@ -1204,8 +1207,8 @@
           clearAnchorImport('Plan deleted. Entered settings retained; Save draft explicitly to create a new draft.');
           $('trendline-save').textContent='Save draft';
           trendlineStatus('Plan permanently deleted. Entered settings retained; the next explicit Save draft creates a new draft.');
-        } else trendlineStatus('Unused plan permanently deleted.');
-        renderTrendlinePlans(); notifyOpenOrdersStateChanged({action:"trendline"}); state.trendlineMutationPending=false; await refreshTrendlinePlans();
+        } else trendlineStatus(finished?'Finished card removed; execution history retained.':'Unused plan permanently deleted.');
+        renderTrendlinePlans(); if(!finished) notifyOpenOrdersStateChanged({action:"trendline"}); state.trendlineMutationPending=false; await refreshTrendlinePlans();
       } catch(err) { trendlineStatus('Delete failed: '+String(err.message||err)); }
       finally { state.trendlineMutationPending=false; }
       return;

@@ -45,7 +45,7 @@ _IMMUTABLE_FIELDS = {
     "schema_version", "plan_id", "execution_key", "revision", "created_at_ms",
     "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result", "live_authorization",
     "display_snapshot", "submission_refs",
-    "execution_policy", "dashboard_dismissal",
+    "execution_policy", "dashboard_dismissal", "calculator_dismissal",
     "broker_closure",
     "risk_update", "classification_overrides", "classification_version", "classification_updated_at_ms",
 }
@@ -240,6 +240,17 @@ def _normalise_live_authorization(value: object, execution_key: str, revision: i
     return {"execution_key": execution_key, "plan_revision": arm_revision, "authorized_at_ms": _int_ms(value.get("authorized_at_ms"), "live_authorization.authorized_at_ms")}
 
 
+def _calculator_finish_kind(plan: Mapping[str, object]) -> Optional[str]:
+    if plan.get("status") != "submitted" or not isinstance(plan.get("trigger_claim"), Mapping):
+        return None
+    result = plan.get("execution_result") or {}
+    if result.get("outcome") == "simulated":
+        return "simulated"
+    if result.get("outcome") == "executed" and isinstance(result.get("order_id"), str) and result["order_id"].strip():
+        return "closed" if plan.get("broker_closure") is not None else "confirm_finished"
+    return None
+
+
 def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     """Return a canonical, JSON-safe plan record or raise without mutation."""
     if not isinstance(record, Mapping):
@@ -321,6 +332,20 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
                      "plan_revision": _positive_int(dismissal.get("plan_revision"), "dismissal.plan_revision")}
         if dismissal["plan_revision"] > revision or status != "submitted" or not execution_result or execution_result.get("outcome") != "simulated" or record["test_trade"] is not True or claim is None:
             raise TrendlinePlanError("Only a completed local simulation can be dismissed.")
+    calculator_dismissal = record.get("calculator_dismissal")
+    if "calculator_dismissal" in record:
+        if (not isinstance(calculator_dismissal, Mapping)
+                or set(calculator_dismissal) != {"plan_id", "plan_revision", "dismissed_at_ms", "confirmed_finished"}
+                or calculator_dismissal.get("plan_id") != plan_id
+                or type(calculator_dismissal.get("confirmed_finished")) is not bool
+                or _calculator_finish_kind(record) is None
+                or (_calculator_finish_kind(record) == "confirm_finished" and calculator_dismissal["confirmed_finished"] is not True)):
+            raise TrendlinePlanError("Invalid calculator-only dismissal.")
+        calculator_dismissal = dict(calculator_dismissal)
+        saved_revision = _positive_int(calculator_dismissal["plan_revision"], "calculator dismissal revision")
+        if saved_revision > revision:
+            raise TrendlinePlanError("Calculator dismissal revision changed.")
+        calculator_dismissal["dismissed_at_ms"] = _int_ms(calculator_dismissal["dismissed_at_ms"], "calculator dismissed_at_ms")
     display_snapshot = _display_numbers(record.get("display_snapshot"))
     if display_snapshot is not None:
         source = record["display_snapshot"]
@@ -382,6 +407,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "classification_version": _positive_int(record.get("classification_version", 0), "classification_version", allow_zero=True),
         "classification_updated_at_ms": None if record.get("classification_updated_at_ms") is None else _int_ms(record["classification_updated_at_ms"], "classification_updated_at_ms"),
         "dashboard_dismissal": dismissal,
+        **({"calculator_dismissal": calculator_dismissal} if "calculator_dismissal" in record else {}),
     }
 
 
@@ -844,6 +870,33 @@ class TrendlinePlanStore:
         return (plan.get("status") == "submitted" and plan.get("test_trade") is True
                 and plan.get("trigger_claim") is not None
                 and (plan.get("execution_result") or {}).get("outcome") == "simulated")
+
+    @staticmethod
+    def calculator_finish_kind(plan: Mapping[str, object]) -> Optional[str]:
+        return _calculator_finish_kind(plan)
+
+    def dismiss_calculator(self, plan_id: str, *, expected_revision: int, confirm_finished: bool = False, now_ms: Optional[int] = None) -> Dict[str, object]:
+        """Hide one calculator card; retain execution history for every other reader."""
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None:
+                raise TrendlinePlanError("Unknown trendline plan.")
+            kind = self.calculator_finish_kind(plan)
+            if kind is None or (kind == "confirm_finished" and confirm_finished is not True):
+                raise TrendlinePlanError("Finished execution evidence or explicit finished/no remaining broker order confirmation required.")
+            previous = plan.get("calculator_dismissal")
+            if type(expected_revision) is not int or (expected_revision != plan["revision"] and not (previous and expected_revision == previous["plan_revision"])):
+                raise TrendlinePlanError("Plan changed; refresh before removal.")
+            if previous:
+                return copy.deepcopy(plan)
+            updated = copy.deepcopy(plan)
+            updated["calculator_dismissal"] = dict(plan_id=plan_id, plan_revision=plan["revision"],
+                dismissed_at_ms=_transition_time(plan, utc_epoch_ms() if now_ms is None else now_ms), confirmed_finished=confirm_finished is True)
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
 
     def record_broker_closure(self, plan_id: str, *, expected_revision: int, execution_key: str, order_id: str, proof: Mapping[str, object]) -> Dict[str, object]:
         with self._locked():
