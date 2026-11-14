@@ -14142,6 +14142,13 @@ def test_saved_journal_legacy_trade_order_and_formats(tmp_path, monkeypatch):
     donor=old['Trade Log'].max_row
     signature=[old['Trade Log'].cell(donor,c).style_id for c in range(1,52)]
     for identity in tail:assert [ws.cell(indices[identity],c).style_id for c in range(1,52)]==signature
+    from collections import Counter
+    saved_trade=old['Trade Log'];saved_headers=j._trade_log_header_map(saved_trade)
+    ordinary=[row for row in oldids.values() if str(saved_trade.cell(row,saved_headers['Row Type']).value or '').lower()=='trade']
+    baseline_borders=[copy(old._borders[Counter(saved_trade.cell(row,c)._style.borderId for row in ordinary).most_common(1)[0][0]]) for c in range(1,52)]
+    plain=[row for row in ordinary if not saved_trade.cell(row,1).hyperlink]
+    base_font=copy(old._fonts[Counter(saved_trade.cell(row,1)._style.fontId for row in plain).most_common(1)[0][0]])
+    linked_font=j._trade_number_link_font(base_font)
     values={identity:[ws.cell(row,c).value for c in range(1,52)] for identity,row in indices.items()}
     with zipfile.ZipFile(path) as z:
         trade_part=j._worksheet_ooxml_part_name(z,'Trade Log')
@@ -14149,6 +14156,9 @@ def test_saved_journal_legacy_trade_order_and_formats(tmp_path, monkeypatch):
         return {int(row.get('r')):{coordinate_to_tuple(c.get('r'))[1]:c.get('s','0') for c in row}
             for row in ET.fromstring(payload).find(ns+'sheetData')}
     original_styles=saved_styles(before[trade_part])
+    source_cells={c.get('r'):c for c in ET.fromstring(before[trade_part]).findall('.//'+ns+'c')}
+    elsa=next(i for i in tail if values[i][0]=='C385')
+    original_entry=source_cells[get_column_letter(headers['Entry Price'])+str(indices[elsa])].find(ns+'v').text.encode('ascii')
     styles={identity:[original_styles[row].get(c,'0') for c in range(1,52)] for identity,row in indices.items()}
     links={identity:deepcopy(ws.cell(row,1).hyperlink) for identity,row in indices.items()}
     row_settings={identity:dict(ws.row_dimensions[row]) for identity,row in indices.items()}
@@ -14176,6 +14186,7 @@ def test_saved_journal_legacy_trade_order_and_formats(tmp_path, monkeypatch):
         assert set(actual)==set(indices) and len(actual)==1581
         assert {actual[i] for i in tail}==set(range(4,12))
         assert sheet['A11'].value=='C385'
+        assert sheet.cell(11,headers['Entry Price']).number_format=='0.00000'
         assert sheet.auto_filter.ref=='A3:AY1584'
         assert sheet['A11'].fill.fgColor.rgb[-6:]==j.LOSS_FILL
         ake=next(i for i in tail if values[i][0]=='C388')
@@ -14186,6 +14197,13 @@ def test_saved_journal_legacy_trade_order_and_formats(tmp_path, monkeypatch):
             link=sheet.cell(row,1).hyperlink
             if links[identity]:
                 assert link.target==links[identity].target and link.location==links[identity].location and link.ref=='A'+str(row)
+            if identity in tail:
+                for col in range(1,52):
+                    cell=sheet.cell(row,col)
+                    assert cell.border==baseline_borders[col-1],(identity,col,'complete saved border')
+                    if cell.value not in (None,''):assert cell.alignment.horizontal=='left',(identity,col)
+                if links[identity]:assert copy(sheet.cell(row,1).font)==linked_font
+                else:assert copy(sheet.cell(row,1).font)==base_font
             assert dict(sheet.row_dimensions[row])==row_settings[identity]
         close=[sheet.cell(r,headers['Close Time']).value or sheet.cell(r,headers['Open Time']).value for r in range(4,1585)]
         assert close==sorted(close,reverse=True)
@@ -14194,7 +14212,10 @@ def test_saved_journal_legacy_trade_order_and_formats(tmp_path, monkeypatch):
         assert not any(str(k.sqref)=='B4:AO4 AQ4:AY4' for k in cf)
         assert any(str(k.sqref)=='A4:AY1584' for k in cf)
         assert any('AJ12:AO1556' in str(d.sqref) for d in sheet.data_validations.dataValidation)
+        assert {values[i][0] for i in tail if links[i]}=={'C389','C388','C386','C385'}
         check.close()
+    after_cells={c.get('r'):c for c in ET.fromstring(after[part]).findall('.//'+ns+'c')}
+    assert after_cells[get_column_letter(headers['Entry Price'])+'11'].find(ns+'v').text.encode('ascii')==original_entry
     phase('repeat normal writer for idempotence')
     repeat=j.update_master_journal_workbook_data_only(candidate,empty,preserve_existing_layout=True,publish_recommendation_assets=False,_new_row_ids=set())
     assert repeat['ok'],repeat
@@ -14210,11 +14231,19 @@ def test_saved_journal_future_trade_order_and_authored_layout(tmp_path, monkeypa
     from copy import deepcopy
     monkeypatch.setattr(j,'REPORT_START_YEAR',2026);monkeypatch.setattr(j,'REPORT_MIN_END_YEAR',2026)
     snapshot=sample_snapshot()
+    ordinary=dict(snapshot['items'][0],id='ordinary-third',close_time='2026-03-01T00:00:00Z',open_time='2026-03-01T00:00:00Z')
+    snapshot['items'].append(ordinary)
     cash=dict(id='cash-tail',row_type='cashflow',symbol='CASHFLOW',account='BYBIT',open_time='2018-01-01T00:00:00Z',close_time='2018-01-01T00:00:00Z',net_profit=0,qty=0)
     snapshot['items'].append(cash)
     snapshot['items'].sort(key=lambda row:row.get('close_time') or row.get('open_time') or '',reverse=True)
-    path=tmp_path/'small.xlsx';j._counter_build(snapshot,path,publish_recommendation_assets=False);j._saved_journal_seed(path)
-    book=load_workbook(path);before=j._saved_journal_map(book)[1]['Trade Log'];book.close()
+    path=tmp_path/'small.xlsx';j._counter_build(snapshot,path,publish_recommendation_assets=False)
+    book=load_workbook(path);ws=book['Trade Log'];before=j._saved_journal_map(book)[1]['Trade Log'];h=j._trade_log_header_map(ws)
+    baseline=[copy(ws.cell(before['t1'],c).border) for c in range(1,52)]
+    for cell in ws[before['cash-tail']]:
+        cell.border=Border();cell.alignment=Alignment()
+    manual=ws.cell(before['ordinary-third'],h['Entry Price']);manual.border=Border(left=Side(style='double',color='123456'));manual.font=Font(name='Arial',italic=True,color='123456')
+    manual_style=copy(manual._style)
+    book.save(path);book.close();j._saved_journal_seed(path)
     older=dict(snapshot['items'][0],id='older-import',symbol='OLDERUSDT',account='Bybit Demo',qty=1.25,entry_price=0.00123,exit_price=0.00134,net_profit=10,close_time='2020-01-01T00:00:00Z',open_time='2020-01-01T00:00:00Z')
     newest=dict(older,id='test-import',is_test_trade=True,close_time='2026-12-01T00:00:00Z',open_time='2026-12-01T00:00:00Z')
     requested=dict(items=[older,newest],balances=[],stats={'totals':{},'groups':{}})
@@ -14228,6 +14257,19 @@ def test_saved_journal_future_trade_order_and_authored_layout(tmp_path, monkeypa
     assert ws.cell(index['test-import'],1).fill.fgColor.rgb[-6:]==j.TEST_TRADE_FILL
     assert ws.cell(index['older-import'],h['Entry Price']).number_format==j._trade_log_price_number_format(ws.cell(index['older-import'],h['Entry Price']))
     assert ws.cell(index['older-import'],h['Qty']).value==1.25
+    for identity in ['older-import','test-import']:
+        for col in range(1,52):
+            cell=ws.cell(index[identity],col)
+            assert cell.border==baseline[col-1],(identity,col,'saved trade border')
+            if cell.value not in (None,''):assert cell.alignment.horizontal=='left',(identity,col)
+    assert ws.cell(index['ordinary-third'],h['Entry Price']).border==Border(left=Side(style='double',color='123456'))
+    assert ws.cell(index['ordinary-third'],h['Entry Price']).font.italic
+    probe=Workbook().active['A1']
+    for value,expected in [(0.09849000000000001,'0.00000'),(0.000000000012345,'0.000000000000000'),(1.23456789012345e-20,'0.'+'0'*34)]:
+        probe.value=value
+        actual_format=j._trade_log_price_number_format(probe)
+        assert actual_format==expected if len(expected)<=32 else 'E+' in actual_format
+    probe.value='=1/3';assert 'E+' in j._trade_log_price_number_format(probe)
     check.close()
     # An explicit sort, saved manual field/clear and authored row settings survive.
     book=load_workbook(path);ws=book['Trade Log'];ws.auto_filter.add_sort_condition('E4:E6');ws.row_dimensions[4].height=31;ws.cell(4,h['Notes'],'authored note');ws.cell(5,h['Entry Price']).value=None;book.save(path);book.close()

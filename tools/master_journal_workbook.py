@@ -4966,6 +4966,9 @@ def _trade_log_price_number_format(cell) -> str:
         return adaptive_number_format(cell.value)
     if number.is_zero():
         return "0"
+    # Size the display at Excel's numeric precision, not a binary float's
+    # decimal tail. This changes only the format, never the saved value.
+    number = Decimal(format(number, '.15g'))
     # Strip trailing zeros from the decimal-string representation without a
     # context-sensitive Decimal.normalize() or binary-float expansion.
     digits = number.as_tuple().digits
@@ -23653,6 +23656,110 @@ def _saved_journal_update(path, snapshot, *, incremental, account_balance=None,
             proposal.unlink()
 
 
+def _saved_journal_partial_trade_style(wb, ws, row, headers, xml_row, styles):
+    """Recognize only the previous fill/format-only generated cashflow base.
+
+    Any other font, border, alignment, flag or number-format edit refuses
+    adoption. Recompute expectations from saved values; never replay inputs.
+    """
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    donors = [141,256,256,257,257,257,145,145,145,145,143,145,143,144,144,143,145,
+              258,0,142,0,145,143,143,142,0,145,143,143,257,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,259,0,257,257,257,257]
+    xfs, fills = styles.find(ns+'cellXfs'), styles.find(ns+'fills')
+    if len(xfs)<730 or max(headers.values())!=51 or len(xml_row)!=51:
+        return False
+    cells = {coordinate_to_tuple(c.get('r'))[1]:c for c in xml_row}
+    def structural(xf):
+        xf=deepcopy(xf)
+        for attr in ('fillId','numFmtId'):xf.attrib.pop(attr,None)
+        return _journal_xml_signature(xf)
+    if any(structural(xfs[int(cells[c].get('s','0'))])!=structural(xfs[donors[c-1]]) for c in range(1,52)):
+        return False
+    saved = {c:copy(ws.cell(row,c)._style) for c in range(1,52)}
+    try:
+        for c in saved:ws.cell(row,c)._style=copy(wb._cell_styles[donors[c-1]])
+        _apply_trade_log_win_loss_direct_row_fills_for_rows(ws,[row])
+        fields={field:ws.cell(row,headers[header]).value for header,field in
+            [('Account','account'),('Symbol','symbol'),('Row Type','row_type')] if header in headers}
+        _apply_trade_log_row_number_formats(ws,row,fields)
+        formats={int(f.get('numFmtId')):f.get('formatCode') for f in styles.findall(ns+'numFmts/'+ns+'numFmt')}
+        from openpyxl.styles.numbers import BUILTIN_FORMATS
+        labels={col:label for label,col in headers.items()}
+        for c in saved:
+            actual=xfs[int(cells[c].get('s','0'))];cell=ws.cell(row,c)
+            if PatternFill.from_tree(fills[int(actual.get('fillId','0'))])!=copy(cell.fill):
+                return False
+            number_id=int(actual.get('numFmtId','0'));actual_format=formats.get(number_id,BUILTIN_FORMATS.get(number_id))
+            allowed={cell.number_format}
+            if labels[c] in TRADE_LOG_PRICE_HEADERS and cell.data_type!='f':
+                number=_decimal_from_value(cell.value)
+                if number is not None and number:
+                    exponent=number.as_tuple().exponent;digits=number.as_tuple().digits
+                    trailing=0
+                    for digit in reversed(digits):
+                        if digit:break
+                        trailing+=1
+                    places=max(0,-(exponent+trailing))
+                    allowed.add(_PRICE_SCIENTIFIC_FORMAT if places>_PRICE_FIXED_DECIMALS or number.adjusted()>30 else '0'+('.'+'0'*places if places else ''))
+            if actual_format not in allowed:return False
+        return True
+    finally:
+        for c,style in saved.items():ws.cell(row,c)._style=style
+
+
+def _saved_journal_trade_style_bases(wb, ws, rows, styles, index, headers, excluded):
+    """Resolve per-column saved trade presentation by a strict majority.
+
+    Cashflow/monthly rows, malformed borderless imports and isolated manual
+    exceptions cannot become donors. Raw xf/font/border definitions remain the
+    authority; openpyxl's registered style indices are never package indices.
+    """
+    from collections import Counter
+    ns = '{' + _SPREADSHEETML_NAMESPACE + '}'
+    xfs, borders = styles.find(ns+'cellXfs'), styles.find(ns+'borders')
+    last = max(headers.values())
+    saved = {row:{coordinate_to_tuple(c.get('r'))[1]:int(c.get('s','0')) for c in cells}
+             for row,cells in rows.items()}
+    eligible = []
+    for identity,row in index.items():
+        if identity in excluded or str(ws.cell(row,headers['Row Type']).value or '').lower() != 'trade':
+            continue
+        if _trade_log_monthly_aud_row(ws,row,headers) or not ws.cell(row,headers['Symbol']).value:
+            continue
+        if headers.get('Test') and _is_test_trade_value(ws.cell(row,headers['Test']).value):
+            continue
+        # An ordinary saved row has a grid across its blank cells too.
+        grid = sum(any(side.get('style') for side in borders[int(xfs[saved[row].get(col,0)].get('borderId','0'))])
+                   for col in range(1,last+1))
+        if grid * 2 > last:
+            eligible.append(row)
+    if not eligible:
+        raise ValueError('Cannot prove ordinary saved Trade Log presentation')
+    def majority(items, label):
+        counts = Counter(items); winner,count = counts.most_common(1)[0]
+        if count * 2 <= len(items):
+            raise ValueError('No consistent saved Trade Log '+label)
+        return winner
+    result = {}
+    for label,col in headers.items():
+        signatures = {}
+        for row in eligible:
+            sid = saved[row].get(col,0); xf = xfs[sid]; alignment = xf.find(ns+'alignment')
+            signature = (xf.get('borderId','0'),
+                         _journal_xml_signature(alignment) if alignment is not None else None)
+            signatures[row] = (signature,sid)
+        signature = majority([value[0] for value in signatures.values()],label+' border/alignment')
+        donors = [row for row,(value,_) in signatures.items() if value==signature]
+        # Trade-number link decoration is applied only to actual links below.
+        plain = [row for row in donors if not _is_linked_trade_number(ws.cell(row,col))] if label==TRADE_NUMBER_HEADER else donors
+        if not plain:
+            raise ValueError('Cannot prove unlinked Trade Log base font')
+        font_id = majority([xfs[signatures[row][1]].get('fontId','0') for row in plain],label+' base font')
+        donor = next(row for row in plain if xfs[signatures[row][1]].get('fontId','0')==font_id)
+        result[col] = signatures[donor][1]
+    return result
+
+
 def _saved_journal_trade_layout(path, inserted):
     """Finish saved records, not a rebuilt sheet: audited row permutation and
     append-only style definitions. A changed/authored layout is never sorted.
@@ -23686,11 +23793,14 @@ def _saved_journal_trade_layout(path, inserted):
             raw = package.read(part)
             root = ET.fromstring(raw)
             rows = {int(r.get('r')): r for r in root.find(ns+'sheetData')}
+            style_raw = package.read('xl/styles.xml')
+            styles = ET.fromstring(style_raw)
             def signature(row):
                 styles = {coordinate_to_tuple(c.get('r'))[1]: c.get('s','0') for c in rows[row]}
                 return hashlib.sha256(json.dumps([styles.get(c,'0') for c in range(1,52)]).encode()).hexdigest()
             legacy = {identity for identity in legacy_ids & set(index)
-                if signature(index[identity]) == 'fa76d06c6e90b6994ae06ac499eed60a373adc11eefa3224a748835382961803'
+                if (signature(index[identity]) == 'fa76d06c6e90b6994ae06ac499eed60a373adc11eefa3224a748835382961803'
+                    or _saved_journal_partial_trade_style(wb,ws,index[identity],headers,rows[index[identity]],styles))
                 and record['cells'].get(json.dumps([TRADE_LOG_SHEET,identity,'Row ID'])) ==
                     _saved_journal_value(ws.cell(index[identity],headers['Row ID']))}
             targets = legacy | (set(inserted) & set(index))
@@ -23743,39 +23853,55 @@ def _saved_journal_trade_layout(path, inserted):
                      or (legacy and str(key.sqref)=='A4:AY1576'))}
             # New valid definitions are based on the actual saved xf. Never use
             # an in-memory style_id as a package index.
-            style_raw = package.read('xl/styles.xml')
-            styles = ET.fromstring(style_raw)
             xfs, fills = styles.find(ns+'cellXfs'), styles.find(ns+'fills')
             formats = styles.find(ns+'numFmts')
             if formats is None:
                 formats = ET.Element(ns+'numFmts',count='0');styles.insert(0,formats)
+            fonts = styles.find(ns+'fonts')
+            known_fonts = [Font.from_tree(deepcopy(node)) for node in fonts]
+            bases = _saved_journal_trade_style_bases(wb,ws,rows,styles,index,headers,
+                legacy_ids | set(inserted))
+            def qualified(node):
+                node = ET.fromstring(ET.tostring(node))
+                for child in node.iter():
+                    if not child.tag.startswith('{'):child.tag = ns+child.tag
+                return node
             style_edits = {}
-            for identity in targets:
+            for identity in sorted(targets):
                 row = index[identity]
                 # Existing style edits prevent legacy adoption per cell, while
                 # saved values/manual fields are always used by format helpers.
-                saved = {c.column:copy(c._style) for c in ws[row]}
-                for cell in ws[row]:
-                    cell._style = copy(cell._style)
+                for col,sid in bases.items():
+                    cell = ws.cell(row,col)
+                    cell._style = copy(wb._cell_styles[sid])
+                    if cell.value not in (None,''):
+                        _set_cell_horizontal_alignment(cell,'left')
                 _apply_trade_log_win_loss_direct_row_fills_for_rows(ws,[row])
                 fields = {field:ws.cell(row,headers[header]).value for header,field in
                     [('Currency','currency'),('Account','account'),('Symbol','symbol'),('Row Type','row_type')]
                     if header in headers}
                 _apply_trade_log_row_number_formats(ws,row,fields)
+                number = ws.cell(row,headers[TRADE_NUMBER_HEADER])
+                if _is_linked_trade_number(number):
+                    number.font = _trade_number_link_font(number.font)
                 for cell in rows[row]:
                     col = coordinate_to_tuple(cell.get('r'))[1]
                     wanted = ws.cell(row,col)._style
-                    old_style = saved[col]
-                    if wanted.fillId == old_style.fillId and wanted.numFmtId == old_style.numFmtId:
-                        continue
-                    xf = deepcopy(xfs[int(cell.get('s','0'))])
-                    fill = ET.fromstring(ET.tostring(wb._fills[wanted.fillId].to_tree()))
-                    # openpyxl style children are initially unqualified.
-                    for node in fill.iter():
-                        if not node.tag.startswith('{'):node.tag = ns+node.tag
+                    xf = deepcopy(xfs[bases[col]])
+                    fill = qualified(wb._fills[wanted.fillId].to_tree())
                     fill_id = next((i for i,f in enumerate(fills) if _journal_xml_signature(f)==_journal_xml_signature(fill)),None)
                     if fill_id is None:fill_id=len(fills);fills.append(fill)
                     xf.set('fillId',str(fill_id))
+                    font = copy(ws.cell(row,col).font)
+                    font_id = next((i for i,known in enumerate(known_fonts) if known==font),None)
+                    if font_id is None:
+                        font_id=len(fonts);fonts.append(qualified(font.to_tree()))
+                        known_fonts.append(font)
+                    xf.set('fontId',str(font_id))
+                    for alignment in list(xf.findall(ns+'alignment')):xf.remove(alignment)
+                    xf.insert(0,qualified(ws.cell(row,col).alignment.to_tree()))
+                    for flag in ('Font','Fill','Border','Alignment','NumberFormat'):
+                        xf.set('apply'+flag,'1')
                     number_id = wanted.numFmtId
                     if number_id >= 164:
                         code = ws.cell(row,col).number_format
@@ -23787,8 +23913,9 @@ def _saved_journal_trade_layout(path, inserted):
                     xf.set('numFmtId',str(number_id))
                     style_id = next((i for i,x in enumerate(xfs) if _journal_xml_signature(x)==_journal_xml_signature(xf)),None)
                     if style_id is None:style_id=len(xfs);xfs.append(xf)
-                    style_edits[cell.get('r')] = (cell.get('s'),str(style_id))
-            for node in (xfs,fills,formats):node.set('count',str(len(node)))
+                    if str(style_id)!=cell.get('s','0'):
+                        style_edits[cell.get('r')] = (cell.get('s'),str(style_id))
+            for node in (xfs,fills,formats,fonts):node.set('count',str(len(node)))
             changes = {}
             related = set()
             relpart = _worksheet_relationship_part_name(part)
@@ -23880,10 +24007,11 @@ def _saved_journal_trade_layout(path, inserted):
             # Prefix audit: existing style definitions retain their indices and
             # exact XML; only independently valid definitions can be appended.
             before_styles=ET.fromstring(style_raw)
-            for name in ('cellXfs','fills','numFmts'):
+            for name in ('cellXfs','fills','numFmts','fonts','borders'):
                 old=before_styles.find(ns+name);new=styles.find(ns+name)
                 if old is not None:
-                    assert all(_journal_xml_signature(a)==_journal_xml_signature(b) for a,b in zip(old,new))
+                    assert len(new)>=len(old), ('Existing style definitions removed',name)
+                    assert all(_journal_xml_signature(a)==_journal_xml_signature(b) for a,b in zip(old,new)), ('Existing style definition changed',name)
             if style_edits:changes['xl/styles.xml']=_saved_journal_xml(styles,style_raw)
             output=BytesIO()
             with zipfile.ZipFile(output,'w') as target:
