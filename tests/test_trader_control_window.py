@@ -190,7 +190,7 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
         launch = _function(trader, "bool LaunchDesktopTraderControls")
         owner = _function(trader, "string TraderControlOwnerId")
         executable = _function(trader, "string TraderControlLaunchExecutable")
-        assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
+        assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
         assert 'const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;' in trader
         assert '" --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId)' in launch
         assert "TRADER_CONTROL_SW_SHOWMINNOACTIVE" in launch
@@ -472,7 +472,7 @@ def test_controls_close_only_when_verified_owning_terminal_exits(
     process_identity = _function(trader, "bool TraderControlTerminalProcessIdentity")
     launch = _function(trader, "bool LaunchDesktopTraderControls")
     status = _function(trader, "bool WriteDesktopTraderStatus")
-    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
+    assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
     assert "GetCurrentProcessId()" in process_identity
     assert "GetCurrentProcess()" in process_identity
     assert "GetProcessTimes(processHandle" in process_identity
@@ -729,8 +729,12 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert "if(AutoFitRiskSlippageBuffer && riskWorst > riskMax)" in risk
     assert "int low = minimumBuffer" in risk and "int high = maximumBuffer" in risk
     assert "configuredPreferredBuffer" in risk and "conservativeDistanceCap" in risk
-    assert risk.index("minimumBuffer = AutoFitRiskSlippageBuffer") < risk.index("conservativeDistanceCap")
+    assert risk.index("minimumBuffer = portableAutoFit ? 0") < risk.index("conservativeDistanceCap")
     assert "if(maximumBuffer < minimumBuffer)" in risk
+    assert "portableAutoFit = UsePriceDistanceInputs && AutoFitRiskSlippageBuffer" in risk
+    assert "while(!portableAutoFit && riskWorst > riskMax && vol - step >= vmin)" in risk
+    assert risk.index("outVol = vol") < risk.index("portableAutoFit =")
+    assert "MathMin(configuredPreferredBuffer, MathMax(0, SlippagePoints))" in risk
     assert "while(low <= high)" in risk
     assert "chosenBuffer = mid" in risk
     assert "No automatic risk buffer at or above SlippagePoints fits RiskAUD_Max." in risk
@@ -740,7 +744,22 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert "chosenRiskBuffer" in market and "Automatic risk buffer selected" in market
     assert market.index("ComputeVolumeFromRisk") < market.index("trade.Buy(")
     assert fixed_market.index("ComputeVolumeFromRisk") < fixed_market.index("ConsumeStandardMarketToken") < fixed_market.index("trade.Buy(")
-    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
+    assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
+
+    # Arithmetic/source regression, not a native MT5 risk/order execution test.
+    from decimal import Decimal, ROUND_FLOOR
+    D=Decimal
+    def fit(stop, nominal, per_point, preferred=50):
+        cap=min(preferred,int((D(stop)*(D(12)-D(9))/D(9)).to_integral_value(rounding=ROUND_FLOOR)))
+        affordable=[n for n in range(cap+1) if D(nominal)+D(n)*D(per_point)<=D(12)]
+        return max(affordable),cap
+    for stop,nominal,per_point,expected in [(5,'10','2',1),(5,'11.9','0.3',0),(2,'10','5',0),(43,'9.5','0.2',12)]:
+        chosen,cap=fit(stop,nominal,per_point)
+        assert chosen==expected and D(nominal)>=9 and D(nominal)<=12
+        assert D(nominal)+D(chosen)*D(per_point)<=12
+        assert chosen==cap or D(nominal)+D(chosen+1)*D(per_point)>12
+        if chosen==0:assert cap==0 or D(nominal)+D(per_point)>12
+    assert 'trade.SetDeviationInPoints(SlippagePoints)' in trader
 
 
 def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections() -> None:
@@ -831,7 +850,7 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
+    assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
 
 
 def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_token() -> None:
@@ -920,4 +939,4 @@ def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_toke
     assert standard_limit_maintenance.index("if(UsePriceDistanceInputs) return;") < standard_limit_maintenance.index("StandardLimitShouldBeActive")
     assert r'\"orders_enabled\":' in status
     assert "UseDesktopTraderControls" in trader and "if(!OrdersEnabled) return false;" in trader
-    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
+    assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader

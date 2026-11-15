@@ -326,27 +326,14 @@
 
   function renderPepperstoneRiskPreflight(preflight, exportStatus) {
     if (!pepperstoneRiskPreflightEl) return false;
-    const fileReady = !!exportStatus && (exportStatus.file_ready === true || exportStatus.ready === true);
-    if (!fileReady) {
-      pepperstoneRiskPreflightEl.style.display = '';
-      if (exportStatus?.code === 'PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE' && preflight && typeof preflight === 'object') {
-        pepperstoneRiskPreflightEl.textContent = `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} MT5 points (about ${preflight.minimum_compatible_stop_ticks ?? '-'} TradingView ticks). Widen the stop and Calculate again.`;
-      } else {
-        const reason = String(exportStatus?.reason || 'the quote is not ready for export');
-        pepperstoneRiskPreflightEl.textContent = `Position-size estimate ready. MT5 download unavailable: ${reason}`;
-      }
-      return false;
+    const fileReady=!!exportStatus && (exportStatus.file_ready===true || exportStatus.ready===true);
+    pepperstoneRiskPreflightEl.style.display='';
+    if(!fileReady){pepperstoneRiskPreflightEl.textContent='Position-size estimate ready. MT5 download unavailable: '+String(exportStatus?.reason||'quote is not ready for export');return false;}
+    if(!preflight || preflight.state==='pending' || exportStatus.broker_check_state==='pending'){
+      pepperstoneRiskPreflightEl.textContent='Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader.';return true;
     }
-    pepperstoneRiskPreflightEl.style.display = '';
-    if (!preflight || typeof preflight !== 'object' || preflight.state === 'pending' || exportStatus.broker_check_state === 'pending') {
-      pepperstoneRiskPreflightEl.textContent = 'Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader.';
-      return true;
-    }
-    const compatible = preflight.compatible === true;
-    pepperstoneRiskPreflightEl.textContent = compatible
-      ? `Position-size estimate ready. .set file prepared; final broker checks run in Trader. Offline buffer preview: ${preflight.planned_buffer_points} points maximum.`
-      : `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} MT5 points (about ${preflight.minimum_compatible_stop_ticks ?? '-'} TradingView ticks). Widen the stop and Calculate again.`;
-    return compatible;
+    pepperstoneRiskPreflightEl.textContent=`Position-size estimate ready. .set file prepared. Distance-only buffer preview: ${preflight.planned_buffer_points} MT5 points maximum${preflight.planned_buffer_points===0?' (zero)':''}; Trader fits actual rounded-lot/commission risk headroom. Request deviation remains ${preflight.request_deviation_points} MT5 points.`;
+    return true;
   }
 
   function clearSubmitStateResetTimer() {
@@ -1490,6 +1477,14 @@
 
   let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0, stopRefreshTimer=null, guidanceController=null;
   const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
+  function stopBufferPreview(g,raw){
+    const p=g.buffer_policy;if(!p)return '';
+    const deviation=` Request deviation remains ${p.request_deviation_points} MT5 points.`;
+    if(!/^\d+$/.test(raw) || p.points_per_chart_tick_numerator===undefined)return ' Automatic cushion auto-fits; distance-cap preview pending matching point/grid metadata.'+deviation;
+    const distanceCap=BigInt(raw)*BigInt(p.points_per_chart_tick_numerator)*BigInt(p.distance_cap_numerator)/(BigInt(p.points_per_chart_tick_denominator)*BigInt(p.distance_cap_denominator));
+    const cap=BigInt(p.preferred_maximum_buffer_points),preview=distanceCap<cap?distanceCap:cap;
+    return ` Distance-only buffer preview: ${preview} MT5 points maximum${preview===0n?' (zero)':''}; Trader fits actual rounded-lot/commission headroom. No automatic-cushion stop floor.`+deviation;
+  }
   function renderStopGuidance() {
     const el=$('calc-stop-guidance');if(!el)return;
     el.style.display=isPepperstoneFx()?'':'none';if(!isPepperstoneFx())return;
@@ -1498,7 +1493,7 @@
     const elapsed=(Date.now()-stopGuidanceReceived)/1000;
     const partial=g.state==='pending' || elapsed>=g.valid_for_seconds;
     const minimum=partial?(g.static_minimum_ticks??g.minimum_ticks):g.minimum_ticks;
-    let text=partial?`LTT automatic buffer floor: ${g.automatic_buffer_floor_points} MT5 points. `:`Minimum ${g.minimum_ticks} TradingView ticks; maximum ${g.maximum_ticks} (${g.maximum_source}); step ${g.step_ticks}. `;
+    let text=partial?'Known price grid; no automatic-cushion stop floor. ':`Minimum ${g.minimum_ticks} TradingView ticks; maximum ${g.maximum_ticks} (${g.maximum_source}); step ${g.step_ticks}. `;
     if(partial && minimum!==null)text+=`Static lower bound ${minimum} TradingView ticks; known step ${g.step_ticks}. `;
     if(partial)text+='Broker quote-dependent minimum pending. ';
     text+=`${g.source}; ${g.quote_age_seconds===null?'symbol quote age unavailable':`quote age ${Math.max(0,Math.round(g.quote_age_seconds+elapsed))}s`}. ${g.reason}`;
@@ -1512,6 +1507,7 @@
       else if(n%step!==0n)text+=` Off-grid; next valid value ${hi===null || n+(step-n%step)<=hi?n+(step-n%step):n-n%step} ticks.`;
       else text+=partial?' Static floor/grid satisfied; broker quote checks pending.':' Stop input is within these distance bounds; Trader final checks remain authoritative.';
     }else if(!/^\d+$/.test(raw))text+=' Enter a positive whole number of TradingView ticks.';
+    text+=stopBufferPreview(g,raw);
     el.textContent=text;
   }
   function receiveStopGuidance(g,key) {if(key!==stopContext())return;stopGuidance=g||null;stopGuidanceKey=key;stopGuidanceReceived=Date.now();renderStopGuidance();scheduleStopGuidanceRefresh();}

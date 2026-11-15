@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.48"
+#property version   "2.49"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -175,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.48";
+string EA_VERSION = "2.49";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -600,13 +600,14 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    if(riskTotal < riskMin){ why="Rounded risk is below RiskAUD_Min filter."; return false; }
    if(riskTotal > riskMax){ why="Rounded risk exceeds RiskAUD_Max filter."; return false; }
 
-   // Fixed mode preserves the configured buffer. Automatic mode caps that
-   // preference by the stop-distance risk band before fitting, while retaining
-   // the minimum derived from the original preference and SlippagePoints.
+   // Portable auto-fit keeps the selected nominal lot and fits its cushion.
+   // SlippagePoints remains request deviation, never a portable cushion floor.
+   // Fixed buffers and nonportable automatic presets retain their legacy path.
+   bool portableAutoFit = UsePriceDistanceInputs && AutoFitRiskSlippageBuffer;
    int configuredPreferredBuffer = MathMax(0, RiskSlippageBufferPoints);
-   int minimumBuffer = AutoFitRiskSlippageBuffer
+   int minimumBuffer = portableAutoFit ? 0 : (AutoFitRiskSlippageBuffer
       ? (int)MathMin(configuredPreferredBuffer, MathMax(0, SlippagePoints))
-      : configuredPreferredBuffer;
+      : configuredPreferredBuffer);
    int maximumBuffer = configuredPreferredBuffer;
    if(AutoFitRiskSlippageBuffer && configuredPreferredBuffer > 0)
    {
@@ -632,7 +633,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       if(!CalcBufferedRiskForVolume(stopPoints, maximumBuffer, vol, commissionRTPerLot, riskWorst))
       { why="Failed to compute worst-case risk for 1 lot."; return false; }
 
-      while(riskWorst > riskMax && vol - step >= vmin)
+      while(!portableAutoFit && riskWorst > riskMax && vol - step >= vmin)
       {
          double vNext = NormalizeDouble(vol - step, digits);
          double riskNext = IncludeCommissionInRisk
@@ -656,7 +657,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
          { why="Failed to compute automatic buffered risk for 1 lot."; return false; }
          if(minimumRisk > riskMax)
          {
-            why = "No automatic risk buffer at or above SlippagePoints fits RiskAUD_Max.";
+            why = portableAutoFit ? "Nominal risk leaves no affordable automatic cushion." : "No automatic risk buffer at or above SlippagePoints fits RiskAUD_Max.";
             return false;
          }
          int low = minimumBuffer;

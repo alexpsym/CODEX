@@ -2386,7 +2386,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert conversion["take_profit_price_distance"] == "0.0025"
     assert conversion["take_profit_mt5_points"] == 250
     assert manual_quote["pepperstone_risk_buffer_preflight"]["stop_points"] == 430
-    assert manual_quote["pepperstone_risk_buffer_preflight"]["minimum_compatible_stop_ticks"] == 3
+    assert manual_quote["pepperstone_risk_buffer_preflight"]["minimum_compatible_stop_ticks"] == 0
     assert Decimal(manual_quote["quantity"]) > 0
     assert "estimate from OANDA price/conversion data" in manual_quote["position_size_estimate_note"]
     assert manual_quote["market_data_source"] == "OANDA FX pricing/conversion only; no Pepperstone account or margin data."
@@ -2449,7 +2449,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
         g=quote["pepperstone_stop_guidance"]
         assert (ticks>=g["minimum_ticks"]) == (ticks==30)
         assert g["minimum_ticks"]==30 and g["step_ticks"]==1
-        assert quote["pepperstone_risk_buffer_preflight"]["compatible"] == (ticks==30)
+        assert quote["pepperstone_risk_buffer_preflight"]["compatible"] is True
     instrument=json.loads(asyncio.run(master_service.calculator_instrument("fx","demo","USDJPY","pepperstone",pepperstone_account_type="standard")).body)
     assert instrument["pepperstone_stop_guidance"]["minimum_ticks"]==30
     assert master_service._pepperstone_stop_guidance(**common,order_type="limit",entry_price="150.005")["limit_entry_state"]=="invalid"
@@ -2481,7 +2481,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     g=master_service._pepperstone_stop_guidance(symbol="GBP_USD",account="demo",chart_tick_size="0.0001")
     assert g["minimum_ticks"]==3 and g["step_ticks"]==1
     assert master_service._pepperstone_stop_guidance(symbol="GBP_USD",account="demo",chart_tick_size="0.00001")["step_ticks"]==2
-    assert master_service._pepperstone_risk_buffer_preflight(stop_points=30,risk_target=Decimal("10"))["minimum_compatible_stop_points"]==30
+    assert master_service._pepperstone_risk_buffer_preflight(stop_points=30,risk_target=Decimal("10"))["minimum_compatible_stop_points"]==0
     assert calls["account_summary"]==0
 
     # Default selection uses only the two documented paths; explicit configuration is exclusive.
@@ -2499,7 +2499,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     write_snapshot(fallback)
     g=master_service._pepperstone_stop_guidance(**common)
     assert g["state"]=="ready" and g["minimum_ticks"]==30 and g["source"]==str(fallback)
-    assert g["mt5_symbol"]=="USDJPY.a" and g["automatic_buffer_floor_points"]==30
+    assert g["mt5_symbol"]=="USDJPY.a" and g["automatic_buffer_floor_points"]==0
     write_snapshot(primary,mode=None)  # New producer time cannot make legacy evidence usable.
     assert master_service._pepperstone_stop_guidance(**common)["source"]==str(fallback)
     write_snapshot(primary,mode="live")
@@ -2509,7 +2509,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     write_snapshot(primary,fields={"stops_level":40})
     write_snapshot(fallback,stamp=(current-timedelta(seconds=20)).isoformat())
     bounds=master_service._pepperstone_stop_guidance(**common)
-    assert bounds["minimum_ticks"]==50 and bounds["static_minimum_ticks"]==30
+    assert bounds["minimum_ticks"]==50 and bounds["static_minimum_ticks"]==1
     write_snapshot(fallback)
     write_snapshot(primary)  # Exact quote-time tie has deterministic repository precedence.
     assert master_service._pepperstone_stop_guidance(**common)["source"]==str(primary)
@@ -2526,11 +2526,11 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH",str(primary))
     write_snapshot(primary,mode="live")
     g=master_service._pepperstone_stop_guidance(**common)
-    assert g["state"]=="pending" and g["automatic_buffer_floor_points"]==30 and "does not match" in g["reason"]
+    assert g["state"]=="pending" and g["automatic_buffer_floor_points"]==0 and "does not match" in g["reason"]
     assert len(g["source_diagnostics"])==1 and g["minimum_ticks"] is None
     write_snapshot(primary,fields={"quote_timestamp":None})
     g=master_service._pepperstone_stop_guidance(**common)
-    assert g["state"]=="pending" and "quote_timestamp is missing" in g["reason"] and g["minimum_ticks"]==30
+    assert g["state"]=="pending" and "quote_timestamp is missing" in g["reason"] and g["minimum_ticks"]==1
     write_snapshot(primary,fields={"stops_level":None})
     assert "stops_level" in master_service._pepperstone_stop_guidance(**common)["reason"]
     write_snapshot(primary,fields={"bid":None})
@@ -2538,7 +2538,7 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     write_snapshot(primary,stamp=(current-timedelta(seconds=120)).isoformat(),fields={"trade_tick_size":"0.002"})
     g=master_service._pepperstone_stop_guidance(**common)
     assert g["state"]=="pending" and "stale" in g["reason"] and g["quote_age_seconds"]>=120
-    assert g["minimum_ticks"]==30 and g["step_ticks"]==2 and g["broker_minimum_state"]=="pending"
+    assert g["minimum_ticks"]==2 and g["step_ticks"]==2 and g["broker_minimum_state"]=="pending"
     write_snapshot(primary)
     assert master_service._pepperstone_stop_guidance(**common)["state"]=="ready"
     primary.write_text("{")
@@ -2547,8 +2547,33 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert "mapping" in master_service._pepperstone_stop_guidance(**common)["reason"]
     primary.unlink()
     g=master_service._pepperstone_stop_guidance(**common)
-    assert g["automatic_buffer_floor_points"]==30 and "missing" in g["reason"] and str(primary) in g["reason"]
+    assert g["automatic_buffer_floor_points"]==0 and "missing" in g["reason"] and str(primary) in g["reason"]
     assert "never-display" not in json.dumps(g)
+
+    # Five points can be valid on either pricing choice; the cushion adds no floor.
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH",str(primary))
+    write_snapshot(primary,fields={"bid":"150.000","ask":"150.002","stops_level":2,"freeze_level":0})
+    for variant,commission in [("standard","0"),("razor","4.2")]:
+        request=_pepperstone_quote_payload(symbol="USDJPY",stop_loss_ticks="5",pepperstone_account_type=variant)
+        quote=json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        g=quote["pepperstone_stop_guidance"];preview=quote["pepperstone_risk_buffer_preflight"]
+        assert g["minimum_ticks"]==4 and g["step_ticks"]==1 and g["automatic_buffer_floor_points"]==0
+        assert preview["planned_buffer_points"]==1 and preview["compatible"] is True and preview["request_deviation_points"]==10
+        assert quote["pepperstone_mt5_export_status"]["file_ready"] is True
+        values=_parse_set_file(asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(request,quote))).body.decode())
+        assert values["AutoFitRiskSlippageBuffer"]=="true" and values["UsePriceDistanceInputs"]=="true"
+        assert values["RiskSlippageBufferPoints"]=="50" and values["SlippagePoints"]=="10"
+        assert values["RiskAUD_Min"]=="9" and values["RiskAUD_Max"]=="12" and values["RiskAUD_Target"]=="10"
+        assert Decimal(values["CommissionPerLotPerSide"])==Decimal(commission) and values["SL_PriceDistance"]=="0.005"
+        assert values["AutoTP_NetRR_Enabled"]=="true" and values["NetRR_Target"]=="2"
+    zero=master_service._pepperstone_risk_buffer_preflight(stop_points=2,risk_target=Decimal("10"))
+    assert zero["planned_buffer_points"]==0 and zero["compatible"] is True
+    write_snapshot(primary,fields={"bid":"150.000","ask":"150.010","stops_level":2,"freeze_level":0})
+    assert master_service._pepperstone_stop_guidance(**common)["minimum_ticks"]==12
+    write_snapshot(primary,stamp=(current-timedelta(seconds=120)).isoformat(),fields={"trade_tick_size":"0.002"})
+    pending=master_service._pepperstone_stop_guidance(**common)
+    assert pending["state"]=="pending" and pending["minimum_ticks"]==2 and pending["step_ticks"]==2
+    assert pending["buffer_policy"]["distance_cap_numerator"]==1 and pending["buffer_policy"]["distance_cap_denominator"]==3
 
 
 def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_quote_before_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

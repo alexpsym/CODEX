@@ -30133,11 +30133,13 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         if not value.is_finite(): raise ValueError("Nonfinite metadata")
         return Fraction(value)
     def ceil(value): return -(-value.numerator // value.denominator)
-    floor = _pepperstone_risk_buffer_preflight(stop_points=1, risk_target=Decimal("1"))["minimum_compatible_stop_points"]
+    policy = _pepperstone_risk_buffer_preflight(stop_points=1, risk_target=Decimal("1"))
+    floor = 0
     result = dict(state="pending", minimum_ticks=None, maximum_ticks=None, step_ticks=None, first_valid_tick=None,
                   source="Pepperstone Trader spread export", reason="MT5 export is missing.", automatic_buffer_floor_points=floor,
                   account_mode=account, pricing_choice=account_type, account_variant="Not independently known", quote_age_seconds=None,
-                  valid_for_seconds=0, limit_entry_state="pending", maximum_source=None, broker_minimum_state="pending")
+                  valid_for_seconds=0, limit_entry_state="pending", maximum_source=None, broker_minimum_state="pending",
+                  buffer_policy={key:policy[key] for key in ("preferred_maximum_buffer_points","distance_cap_numerator","distance_cap_denominator","request_deviation_points")})
     try:
         if snapshot is None and snapshot_diagnostics is None:
             snapshot, snapshot_diagnostics = _pepperstone_guidance_snapshot(symbol, account)
@@ -30158,7 +30160,9 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
                 trade = number(item.get("trade_tick_size"))
                 if trade > 0: step = lcm(step, (chart/trade).denominator)
             except (ValueError, TypeError, ArithmeticError): pass
-            result.update(step_ticks=step, minimum_ticks=ceil(Fraction(ceil(Fraction(floor)*point/chart),step))*step)
+            result.update(step_ticks=step, minimum_ticks=step)
+            per_tick = chart/point
+            result["buffer_policy"].update(points_per_chart_tick_numerator=per_tick.numerator,points_per_chart_tick_denominator=per_tick.denominator)
             result["first_valid_tick"] = result["minimum_ticks"]
             result["static_minimum_ticks"] = result["minimum_ticks"]
         if code != "ready": return result
@@ -30176,11 +30180,6 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         broker_floor = required if order_type == "limit" else ask - bid + required
         minimum = max(1, ceil(broker_floor / chart))
         if order_type == "market" and minimum * chart <= ask - bid: minimum += 1
-        buffer = None
-        if risk_mode == "fixed_aud" and number(risk_value) > 0:
-            buffer = _pepperstone_risk_buffer_preflight(stop_points=1, risk_target=Decimal(str(risk_value)))
-            minimum = max(minimum, ceil(number(buffer["minimum_compatible_stop_points"]) * point / chart))
-            result["automatic_buffer_floor_points"] = buffer["minimum_compatible_stop_points"]
         maximum = int(Fraction(_MQL_INT_MAX) * point / chart)
         sources = ["Trader representable MT5 point distance"]
         if side == "buy":
@@ -30194,7 +30193,7 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
                 if risk_cap < maximum: maximum = risk_cap; sources = ["Exported AUD minimum-lot/tick-value risk-band cap"]
         result.update(minimum_ticks=ceil(Fraction(minimum, step))*step, maximum_ticks=maximum//step*step,
                       first_valid_tick=ceil(Fraction(minimum, step))*step, maximum_source="; ".join(sources),
-                      reason="MT5 spread + stops/freeze and strict side/grid checks; LTT automatic slippage-buffer floor is separate.",
+                      reason="MT5 spread + stops/freeze and strict side/grid checks; LTT automatic cushion adds no stop floor; Trader fits rounded-lot/commission headroom.",
                       broker_minimum_ticks=ceil(broker_floor/chart), broker_minimum_state="ready", state="ready")
         if entry <= 0 or (entry / point).denominator != 1 or (entry / trade).denominator != 1:
             result.update(state="blocked", reason="Entry price is not on both MT5 point and trade tick grids.")
@@ -30324,36 +30323,29 @@ def _pepperstone_default_slippage_points() -> int:
 def _pepperstone_risk_buffer_preflight(
     *, stop_points: int, risk_target: Decimal
 ) -> Dict[str, object]:
-    """Derive an automatic distance-only cap; Trader remains the live authority."""
+    """Distance-cap preview only; Trader fits actual rounded-lot risk headroom."""
+    from fractions import Fraction
     if stop_points <= 0 or risk_target <= 0:
         raise ValueError("Pepperstone risk preflight requires positive stop points and risk target.")
     risk_min = risk_target * Decimal("0.90")
     risk_max = risk_target * Decimal("1.20")
     preferred_maximum = _pepperstone_default_risk_slippage_buffer_points()
-    minimum_automatic_buffer = min(preferred_maximum, _pepperstone_default_slippage_points())
-    conservative_maximum = int(
-        (Decimal(stop_points) * (risk_max - risk_min) / risk_min).to_integral_value(rounding=ROUND_FLOOR)
-    )
+    ratio = Fraction(risk_max-risk_min) / Fraction(risk_min)
+    conservative_maximum = (stop_points * ratio.numerator) // ratio.denominator
     planned_buffer = min(preferred_maximum, conservative_maximum)
-    minimum_compatible_stop = int(
-        (Decimal(minimum_automatic_buffer) * risk_min / (risk_max - risk_min)).to_integral_value(rounding=ROUND_CEILING)
-    ) if minimum_automatic_buffer > 0 else 1
-    compatible = planned_buffer >= minimum_automatic_buffer
-    explanation = (
-        "Automatic risk buffer ready. Trader will choose the exact live value within the planned range."
-        if compatible
-        else "Stop is too tight for the configured minimum automatic protection. Widen the stop and Calculate again."
-    )
     return {
         "stop_points": stop_points,
         "preferred_maximum_buffer_points": preferred_maximum,
-        "minimum_automatic_buffer_points": minimum_automatic_buffer,
+        "minimum_automatic_buffer_points": 0,
         "conservative_max_buffer_points": conservative_maximum,
         "planned_buffer_points": planned_buffer,
-        "minimum_compatible_stop_points": minimum_compatible_stop,
-        "compatible": compatible,
-        "state": "compatible" if compatible else "incompatible",
-        "explanation": explanation,
+        "minimum_compatible_stop_points": 0,
+        "distance_cap_numerator": ratio.numerator,
+        "distance_cap_denominator": ratio.denominator,
+        "request_deviation_points": _pepperstone_default_slippage_points(),
+        "compatible": True,
+        "state": "compatible",
+        "explanation": "Distance-only automatic buffer preview; Trader fits the largest whole-point cushion, including zero, to actual rounded-lot/commission risk headroom without changing the nominal lot. Request deviation is independent.",
     }
 
 
@@ -30520,17 +30512,6 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
     risk_min = risk_target * Decimal("0.90")
     risk_max = risk_target * Decimal("1.20")
-    preflight = quote_snapshot.get("risk_buffer_preflight")
-    if isinstance(preflight, dict) and preflight.get("state") != "pending" and preflight.get("compatible") is False:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE",
-                "message": str(preflight.get("explanation") or "Verified broker metadata shows the configured risk buffer is incompatible."),
-                "preflight": preflight,
-            },
-        )
-
     values = {
         "Strategy": "2" if order_type == "limit" else "3",
         "OrdersEnabled": _pepperstone_trader_set_bool(True),
@@ -32805,16 +32786,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     pepperstone_preflight["minimum_compatible_stop_ticks"] = int(minimum_ticks)
                     pepperstone_preflight["submitted_stop_ticks"] = int(stop_ticks)
                     response_payload["pepperstone_risk_buffer_preflight"] = pepperstone_preflight
-                    if pepperstone_preflight["compatible"]:
-                        pepperstone_export_status["broker_check_state"] = "compatible"
-                    else:
-                        pepperstone_export_status = {
-                            "ready": False,
-                            "file_ready": False,
-                            "broker_check_state": "incompatible",
-                            "code": "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE",
-                            "reason": str(pepperstone_preflight["explanation"]),
-                        }
+                    pepperstone_export_status["broker_check_state"] = "compatible"
                 elif pepperstone_export_status and pepperstone_export_status.get("broker_check_state") == "pending":
                     response_payload["pepperstone_risk_buffer_preflight"] = {
                         "state": "pending",
