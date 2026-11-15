@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.47"
+#property version   "2.48"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -107,7 +107,7 @@ input bool   EnforceOneTradeAtATime   = true;
 // -------------------- Pepperstone spread export --------------------
 input group "Pepperstone Spread Export"
 input bool   EnablePepperstoneSpreadExport = true;
-input int    PepperstoneSpreadExportIntervalSeconds = 300;
+input int    PepperstoneSpreadExportIntervalSeconds = 30;
 input string PepperstoneSpreadExportSymbols = "";
 input string PepperstoneSpreadExportPath = "C:\\GPT\\CODEX-master\\mt5-clone\\pepperstone_spreads_latest.json";
 
@@ -175,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.46";
+string EA_VERSION = "2.48";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -3323,34 +3323,25 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
 {
    double bid = 0.0;
    double ask = 0.0;
-   bool available = TryGetPepperstoneBidAsk(mt5Symbol, bid, ask);
+   MqlTick quoteTick;
+   bool tickRead=SymbolInfoTick(mt5Symbol, quoteTick);
+   bool available=tickRead && quoteTick.bid>0.0 && quoteTick.ask>=quoteTick.bid;
+   if(available){bid=quoteTick.bid;ask=quoteTick.ask;}
    int symbolSpread = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_SPREAD);
 
    if(written > 0) entries += ",\n";
 
-   if(!available)
-   {
-      entries += StringFormat(
-         "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":false,\"symbol_spread\":%d,\"error\":\"bid/ask unavailable\",\"timestamp\":\"%s\"}",
-         JsonEscape(symbol),
-         JsonEscape(mt5Symbol),
-         symbolSpread,
-         generated
-      );
-      written++;
-      return;
-   }
-
    double midpoint = (ask + bid) / 2.0;
-   double spreadPct = ((ask - bid) / midpoint) * 100.0;
+   double spreadPct = midpoint>0.0 ? ((ask-bid)/midpoint)*100.0 : 0.0;
    int digits = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_DIGITS);
    double point = SymbolInfoDouble(mt5Symbol, SYMBOL_POINT);
    double spreadPoints = point > 0.0 ? ((ask - bid) / point) : 0.0;
 
    entries += StringFormat(
-      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":true,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"symbol_spread\":%d,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
+      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":%s,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"symbol_spread\":%d,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
       JsonEscape(symbol),
       JsonEscape(mt5Symbol),
+      (available ? "true" : "false"),
       DoubleToString(bid, digits),
       DoubleToString(ask, digits),
       DoubleToString(spreadPct, 10),
@@ -3363,9 +3354,8 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
    long stops=0, freeze=0;
    bool stopsOk=SymbolInfoInteger(mt5Symbol, SYMBOL_TRADE_STOPS_LEVEL, stops);
    bool freezeOk=SymbolInfoInteger(mt5Symbol, SYMBOL_TRADE_FREEZE_LEVEL, freeze);
-   MqlTick quoteTick;
    datetime serverNow=TimeTradeServer();
-   bool quoteKnown=TerminalInfoInteger(TERMINAL_CONNECTED)!=0 && SymbolInfoTick(mt5Symbol, quoteTick) && quoteTick.time>0 && serverNow>=quoteTick.time;
+   bool quoteKnown=TerminalInfoInteger(TERMINAL_CONNECTED)!=0 && available && tickRead && quoteTick.time>0 && serverNow>=quoteTick.time;
    string quoteStamp="null";
    if(quoteKnown) quoteStamp="\""+IsoTimeUTC(TimeGMT()-(serverNow-quoteTick.time))+"\"";
    // Preserve schema-1 fields; new readers require successful level reads and the symbol tick's age.
@@ -3496,6 +3486,7 @@ void MaybeExportPepperstoneSpreads(const bool force=false)
    }
    int interval = PepperstoneSpreadExportIntervalSeconds;
    if(interval < 1) interval = 1;
+   if(TerminalInfoInteger(TERMINAL_CONNECTED)!=0 && interval>30) interval=30;
    datetime now = TimeGMT();
    if(!force && g_lastPepperstoneSpreadExport > 0 && (now - g_lastPepperstoneSpreadExport) < interval)
       return;

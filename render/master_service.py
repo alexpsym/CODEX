@@ -47,6 +47,7 @@ from shared import oanda_risk
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_PEPPERSTONE_SPREAD_EXPORT_PATH = BASE_DIR / "mt5-clone" / "pepperstone_spreads_latest.json"
+PEPPERSTONE_TERMINAL_SPREAD_EXPORT_PATH = Path(r"C:\Users\User\AppData\Roaming\MetaQuotes\Terminal\73B7A2420D6397DFF9014A20F1201F97\MQL5\Files\pepperstone_spreads_latest.json")
 
 LOCAL_BUILD_FILES = (
     "render/master_service.py",
@@ -29983,16 +29984,16 @@ def _pepperstone_parse_snapshot_time(value: object, field: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
+def _load_pepperstone_symbol_point(symbol: str, *, source_path=None, allow_unavailable=False) -> Dict[str, object]:
     """Read one unambiguous MT5 SYMBOL_POINT from the configured EA export."""
-    path = _pepperstone_spread_export_path()
+    path = Path(source_path) if source_path is not None else _pepperstone_spread_export_path()
     try:
         raw = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Pepperstone MT5 point metadata is unavailable. Enable the Trader EA spread export and make its "
+                f"Pepperstone MT5 export file {'missing' if isinstance(exc, FileNotFoundError) else 'unreadable'} at {path}. Enable the Trader EA spread export and make its "
                 f"PepperstoneSpreadExportPath match PEPPERSTONE_SPREAD_EXPORT_PATH or the project default: {path}"
             ),
         ) from exc
@@ -30018,7 +30019,8 @@ def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
         if not isinstance(item, dict):
             continue
         canonical = item.get("symbol") or item.get("name") or item.get("instrument") or item.get("mt5_symbol")
-        if _pepperstone_symbol_key(canonical) == requested_key:
+        suffix_match = re.fullmatch(r"([A-Za-z]{6})([^A-Za-z0-9].*)?", str(canonical or ""))
+        if _pepperstone_symbol_key(canonical) == requested_key or (suffix_match and suffix_match.group(1).upper() == requested_key):
             matches.append(item)
     if len(matches) != 1:
         reason = "missing" if not matches else "ambiguous"
@@ -30028,7 +30030,7 @@ def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
         )
 
     item = matches[0]
-    if item.get("available") is False or str(item.get("available") or "true").strip().lower() in {"0", "false", "n", "no"}:
+    if not allow_unavailable and (item.get("available") is False or str(item.get("available") or "true").strip().lower() in {"0", "false", "n", "no"}):
         raise HTTPException(status_code=400, detail=f"Pepperstone MT5 point mapping for {symbol} is unavailable; check the Trader export and Market Watch quote.")
     mt5_symbol = str(item.get("mt5_symbol") or "").strip()
     if not mt5_symbol:
@@ -30056,13 +30058,73 @@ def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
         "source_path": source_path,
         "source": "Pepperstone Trader spread export",
         "distance_metadata": dict(item),
-        "exported_account_mode": (payload.get("account") or {}).get("mode"),
-        "exported_account_currency": (payload.get("account") or {}).get("currency"),
+        "exported_account_mode": (payload.get("account") if isinstance(payload.get("account"), dict) else {}).get("mode"),
+        "exported_account_currency": (payload.get("account") if isinstance(payload.get("account"), dict) else {}).get("currency"),
     }
 
 
+def _pepperstone_snapshot_condition(snapshot, account):
+    """Classify one coherent symbol snapshot without inventing quote freshness."""
+    item = snapshot.get("distance_metadata", {})
+    mode = snapshot.get("exported_account_mode")
+    age = None
+    raw_stamp = item.get("quote_timestamp")
+    if raw_stamp:
+        try:
+            stamp = _pepperstone_parse_snapshot_time(raw_stamp, "quote")
+            age = (datetime.now(timezone.utc)-datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds()
+        except HTTPException:
+            return "malformed_quote_timestamp", "Malformed MT5 symbol quote timestamp; re-export Trader metadata.", None
+    if mode is None:
+        return "missing_account_mode", "Legacy MT5 export is missing Demo/Live account mode; reload the updated Trader export.", age
+    if mode != account:
+        return "wrong_account_mode", "MT5 export mode " + str(mode) + " does not match selected " + account + ".", age
+    missing = []
+    for field in ("stops_level", "freeze_level"):
+        if type(item.get(field)) is not int or item[field] < 0: missing.append(field)
+    try:
+        trade = Decimal(str(item.get("trade_tick_size")))
+        if not trade.is_finite() or trade <= 0: missing.append("trade_tick_size")
+    except Exception: missing.append("trade_tick_size")
+    if missing:
+        return "missing_fields", "Missing or invalid MT5 fields: " + ", ".join(missing) + "; reload updated Trader metadata.", age
+    if not raw_stamp:
+        return "missing_quote_timestamp", "MT5 quote_timestamp is missing; producer time cannot establish symbol quote age.", None
+    if age is None or age < -2 or age > 60:
+        return "stale_quote", "MT5 symbol quote is stale or future-dated; waiting for a current tick/export.", age
+    try:
+        bid, ask = Decimal(str(item.get("bid"))), Decimal(str(item.get("ask")))
+        if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask < bid: raise ValueError()
+    except Exception:
+        return "missing_quote", "MT5 Bid/Ask is missing or invalid; waiting for a valid symbol tick.", age
+    if item.get("available") is False:
+        return "missing_quote", "MT5 symbol quote is unavailable; static distance guidance is retained.", age
+    return "ready", "", age
+
+
+def _pepperstone_guidance_snapshot(symbol, account):
+    """Only the explicit file, or the two documented defaults; never scan terminals."""
+    paths = [_pepperstone_spread_export_path()]
+    if not str(os.getenv("PEPPERSTONE_SPREAD_EXPORT_PATH") or "").strip():
+        paths.append(PEPPERSTONE_TERMINAL_SPREAD_EXPORT_PATH)
+    candidates, diagnostics = [], []
+    for priority, path in enumerate(dict.fromkeys(paths)):
+        try:
+            snapshot = _load_pepperstone_symbol_point(symbol, source_path=path, allow_unavailable=True)
+            code, reason, age = _pepperstone_snapshot_condition(snapshot, account)
+            diagnostics.append(dict(source=str(path), code=code, reason=reason, quote_age_seconds=None if age is None else round(age, 3)))
+            # A valid matching quote always beats legacy/wrong-mode/newer producer timestamps.
+            matching = snapshot.get("exported_account_mode") == account
+            stamp = datetime.fromisoformat(snapshot["generated_at"].replace("Z", "+00:00")).timestamp()
+            freshness = datetime.fromisoformat(snapshot["distance_metadata"]["quote_timestamp"].replace("Z", "+00:00")).timestamp() if age is not None else stamp
+            candidates.append(((code == "ready", matching, freshness, -priority), snapshot))
+        except HTTPException as exc:
+            diagnostics.append(dict(source=str(path), code="file_unusable", reason=str(exc.detail), quote_age_seconds=None))
+    return (max(candidates, key=lambda item:item[0])[1] if candidates else None), diagnostics
+
+
 def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", order_type="market",
-                              entry_price=None, risk_mode="fixed_aud", risk_value="10", account_type="razor", snapshot=None):
+                              entry_price=None, risk_mode="fixed_aud", risk_value="10", account_type="razor", snapshot=None, snapshot_diagnostics=None):
     """Exact whole-TV-tick bounds for a single exported MT5 account; advisory only."""
     from fractions import Fraction
     from math import lcm
@@ -30071,34 +30133,45 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         if not value.is_finite(): raise ValueError("Nonfinite metadata")
         return Fraction(value)
     def ceil(value): return -(-value.numerator // value.denominator)
+    floor = _pepperstone_risk_buffer_preflight(stop_points=1, risk_target=Decimal("1"))["minimum_compatible_stop_points"]
     result = dict(state="pending", minimum_ticks=None, maximum_ticks=None, step_ticks=None, first_valid_tick=None,
-                  source="Pepperstone Trader spread export", reason="Current matching MT5 distance metadata pending; Trader remains authoritative.",
+                  source="Pepperstone Trader spread export", reason="MT5 export is missing.", automatic_buffer_floor_points=floor,
                   account_mode=account, pricing_choice=account_type, account_variant="Not independently known", quote_age_seconds=None,
-                  valid_for_seconds=0, limit_entry_state="pending", maximum_source=None)
+                  valid_for_seconds=0, limit_entry_state="pending", maximum_source=None, broker_minimum_state="pending")
     try:
-        snap = snapshot if snapshot is not None else _load_pepperstone_symbol_point(symbol)
-        item = snap.get("distance_metadata", {})
-        result["mt5_symbol"] = snap["mt5_symbol"]
-        if snap.get("exported_account_mode") != account:
-            result["reason"] = "MT5 export account mode is missing or does not match the selected Demo/Live mode."
+        if snapshot is None and snapshot_diagnostics is None:
+            snapshot, snapshot_diagnostics = _pepperstone_guidance_snapshot(symbol, account)
+        result["source_diagnostics"] = snapshot_diagnostics or []
+        if snapshot is None:
+            result["reason"] = " | ".join(d["source"] + ": " + d["reason"] for d in snapshot_diagnostics or []) or result["reason"]
             return result
-        point, chart, trade = number(snap["point"]), number(chart_tick_size), number(item.get("trade_tick_size"))
-        if min(point, chart, trade) <= 0: raise ValueError("Positive grids required")
-        levels = [item.get("stops_level"), item.get("freeze_level")]
-        if any(type(v) is not int or v < 0 for v in levels): raise ValueError("Successful stops/freeze reads required (zero is valid)")
-        stamp = _pepperstone_parse_snapshot_time(item.get("quote_timestamp"), "quote")
-        age = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds()
-        result["quote_age_seconds"] = round(age, 3)
-        if age < -2 or age > 60:
-            result["reason"] = "MT5 symbol quote is stale or its age is unproven; quote-dependent checks pending."
-            return result
+        snap, item = snapshot, snapshot.get("distance_metadata", {})
+        result.update(mt5_symbol=snap["mt5_symbol"], source=snap["source_path"], producer_timestamp=snap["generated_at"])
+        code, reason, age = _pepperstone_snapshot_condition(snap, account)
+        result.update(reason=reason, condition=code, quote_age_seconds=None if age is None else round(age,3))
+        point, chart = number(snap["point"]), number(chart_tick_size)
+        if min(point, chart) <= 0: raise ValueError("Positive point/chart step required")
+        # Keep provable static bounds even without any current quote.
+        if snap.get("exported_account_mode") == account:
+            step = (chart/point).denominator
+            try:
+                trade = number(item.get("trade_tick_size"))
+                if trade > 0: step = lcm(step, (chart/trade).denominator)
+            except (ValueError, TypeError, ArithmeticError): pass
+            result.update(step_ticks=step, minimum_ticks=ceil(Fraction(ceil(Fraction(floor)*point/chart),step))*step)
+            result["first_valid_tick"] = result["minimum_ticks"]
+            result["static_minimum_ticks"] = result["minimum_ticks"]
+        if code != "ready": return result
+        trade = number(item["trade_tick_size"])
+        levels = [item["stops_level"], item["freeze_level"]]
+        stamp = _pepperstone_parse_snapshot_time(item["quote_timestamp"], "quote")
         bid, ask = number(item.get("bid")), number(item.get("ask"))
         if bid <= 0 or ask < bid: raise ValueError("Valid Bid/Ask required")
         if side not in {"buy", "sell"} or order_type not in {"market", "limit"}: raise ValueError("Invalid order context")
         entry = number(entry_price) if order_type == "limit" else ask if side == "buy" else bid
         step = lcm((chart / point).denominator, (chart / trade).denominator)
         result.update(step_ticks=step, valid_for_seconds=max(0, 60-age), quote_timestamp=stamp,
-                      source="Pepperstone Trader exported " + account + " account (variant unknown)", limit_entry_state="not_applicable")
+                      source=snap["source_path"], exported_account_mode=snap["exported_account_mode"], limit_entry_state="not_applicable")
         required = max(levels) * point
         broker_floor = required if order_type == "limit" else ask - bid + required
         minimum = max(1, ceil(broker_floor / chart))
@@ -30122,7 +30195,7 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         result.update(minimum_ticks=ceil(Fraction(minimum, step))*step, maximum_ticks=maximum//step*step,
                       first_valid_tick=ceil(Fraction(minimum, step))*step, maximum_source="; ".join(sources),
                       reason="MT5 spread + stops/freeze and strict side/grid checks; LTT automatic slippage-buffer floor is separate.",
-                      broker_minimum_ticks=ceil(broker_floor/chart), state="ready")
+                      broker_minimum_ticks=ceil(broker_floor/chart), broker_minimum_state="ready", state="ready")
         if entry <= 0 or (entry / point).denominator != 1 or (entry / trade).denominator != 1:
             result.update(state="blocked", reason="Entry price is not on both MT5 point and trade tick grids.")
         if order_type == "limit":
@@ -30133,7 +30206,8 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         if result["maximum_ticks"] < result["minimum_ticks"]:
             result.update(state="blocked", reason="No stop fits the proven minimum and upper bounds for this context.")
         return result
-    except (HTTPException, ValueError, TypeError, ArithmeticError, KeyError):
+    except (HTTPException, ValueError, TypeError, ArithmeticError, KeyError) as exc:
+        result["reason"] = "Invalid MT5 distance metadata or calculator context: " + (str(exc.detail) if isinstance(exc,HTTPException) else str(exc))
         return result
 
 
@@ -31505,16 +31579,13 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
                     "chart_tick_profile_id": chart_profile,
                 }
             )
+            point_snapshot, snapshot_diagnostics = _pepperstone_guidance_snapshot(resolved_symbol, account_norm)
             instrument_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
                 symbol=resolved_symbol, account=account_norm, chart_tick_size=chart_step, side=side, order_type=order_type,
-                entry_price=entry_price, risk_mode=risk_mode, risk_value=risk_value, account_type=pepperstone_account_type)
-            try:
-                point_snapshot = _load_pepperstone_symbol_point(resolved_symbol)
-            except HTTPException as exc:
-                instrument_payload["pepperstone_mt5_point_status"] = {
-                    "available": False,
-                    "reason": str(exc.detail),
-                }
+                entry_price=entry_price, risk_mode=risk_mode, risk_value=risk_value, account_type=pepperstone_account_type,
+                snapshot=point_snapshot, snapshot_diagnostics=snapshot_diagnostics)
+            if point_snapshot is None:
+                instrument_payload["pepperstone_mt5_point_status"] = {"available":False,"reason":instrument_payload["pepperstone_stop_guidance"]["reason"]}
             else:
                 instrument_payload.update(
                     {
@@ -31758,6 +31829,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
     pending_dependencies: Set[str] = set()
     resolved_symbol_for_debug = ""
     submitted_debug: Dict[str, object] = {}
+    pepperstone_snapshot_diagnostics = None
     pepperstone_point_snapshot: Optional[Dict[str, object]] = None
     pepperstone_chart_tick_size: Optional[Decimal] = None
     pepperstone_chart_tick_source = ""
@@ -32434,7 +32506,9 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 )
                 distance_tick_size = pepperstone_chart_tick_size
                 try:
-                    pepperstone_point_snapshot = _load_pepperstone_symbol_point(symbol)
+                    pepperstone_point_snapshot, pepperstone_snapshot_diagnostics = _pepperstone_guidance_snapshot(symbol, account)
+                    if pepperstone_point_snapshot is None:
+                        raise HTTPException(status_code=400,detail="No usable Pepperstone point snapshot.")
                 except HTTPException as exc:
                     pepperstone_export_status = {
                         "ready": True,
@@ -32686,7 +32760,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 response_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
                     symbol=symbol, account=account, chart_tick_size=pepperstone_chart_tick_size, side=side,
                     order_type=order_type, entry_price=payload.get("entry_price"), risk_mode=risk_mode,
-                    risk_value=risk_val, account_type=account_type, snapshot=pepperstone_point_snapshot)
+                    risk_value=risk_val, account_type=account_type, snapshot=pepperstone_point_snapshot, snapshot_diagnostics=pepperstone_snapshot_diagnostics)
                 response_payload.update({
                     "pepperstone_account_type": account_type,
                     "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),

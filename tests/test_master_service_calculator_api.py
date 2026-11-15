@@ -2484,6 +2484,72 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert master_service._pepperstone_risk_buffer_preflight(stop_points=30,risk_target=Decimal("10"))["minimum_compatible_stop_points"]==30
     assert calls["account_summary"]==0
 
+    # Default selection uses only the two documented paths; explicit configuration is exclusive.
+    primary, fallback = tmp_path/"checkout-export.json", tmp_path/"terminal-export.json"
+    monkeypatch.setattr(master_service,"DEFAULT_PEPPERSTONE_SPREAD_EXPORT_PATH",primary)
+    monkeypatch.setattr(master_service,"PEPPERSTONE_TERMINAL_SPREAD_EXPORT_PATH",fallback)
+    monkeypatch.delenv("PEPPERSTONE_SPREAD_EXPORT_PATH",raising=False)
+    current=datetime.now(timezone.utc)
+    base=dict(item,symbol="USDJPY.a",mt5_symbol="USDJPY.a",quote_timestamp=current.isoformat())
+    def write_snapshot(path, *, mode="demo", stamp=None, fields=None):
+        data=dict(version=1,broker="pepperstone",generated_at=current.isoformat(),account=dict(currency="AUD",login="never-display"),symbols=[dict(base,**(fields or {}))])
+        if mode is not None:data["account"]["mode"]=mode
+        if stamp is not None:data["symbols"][0]["quote_timestamp"]=stamp
+        path.write_text(json.dumps(data),encoding="utf-8")
+    write_snapshot(fallback)
+    g=master_service._pepperstone_stop_guidance(**common)
+    assert g["state"]=="ready" and g["minimum_ticks"]==30 and g["source"]==str(fallback)
+    assert g["mt5_symbol"]=="USDJPY.a" and g["automatic_buffer_floor_points"]==30
+    write_snapshot(primary,mode=None)  # New producer time cannot make legacy evidence usable.
+    assert master_service._pepperstone_stop_guidance(**common)["source"]==str(fallback)
+    write_snapshot(primary,mode="live")
+    assert master_service._pepperstone_stop_guidance(**common)["source"]==str(fallback)
+    write_snapshot(primary,stamp=(current-timedelta(seconds=20)).isoformat())
+    assert master_service._pepperstone_stop_guidance(**common)["source"]==str(fallback)
+    write_snapshot(primary,fields={"stops_level":40})
+    write_snapshot(fallback,stamp=(current-timedelta(seconds=20)).isoformat())
+    bounds=master_service._pepperstone_stop_guidance(**common)
+    assert bounds["minimum_ticks"]==50 and bounds["static_minimum_ticks"]==30
+    write_snapshot(fallback)
+    write_snapshot(primary)  # Exact quote-time tie has deterministic repository precedence.
+    assert master_service._pepperstone_stop_guidance(**common)["source"]==str(primary)
+    reads=[];original_reader=master_service._load_pepperstone_symbol_point
+    with monkeypatch.context() as patch:
+        def reader(*a,**kw):reads.append(kw.get("source_path"));return original_reader(*a,**kw)
+        patch.setattr(master_service,"_load_pepperstone_symbol_point",reader)
+        info=json.loads(asyncio.run(master_service.calculator_instrument("fx","demo","USDJPY","pepperstone")).body)
+        assert len(reads)==2 and info["pepperstone_stop_guidance"]["source"]==str(primary)
+        reads.clear()
+        ready=json.loads(asyncio.run(master_service.calculator_quote(_pepperstone_quote_payload(symbol="USDJPY",stop_loss_ticks="5",pepperstone_account_type="standard"))).body)
+        assert len(reads)==2 and ready["pepperstone_stop_guidance"]["minimum_ticks"]==30
+        assert ready["pepperstone_distance_conversion"]["mt5_symbol"]=="USDJPY.a"
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH",str(primary))
+    write_snapshot(primary,mode="live")
+    g=master_service._pepperstone_stop_guidance(**common)
+    assert g["state"]=="pending" and g["automatic_buffer_floor_points"]==30 and "does not match" in g["reason"]
+    assert len(g["source_diagnostics"])==1 and g["minimum_ticks"] is None
+    write_snapshot(primary,fields={"quote_timestamp":None})
+    g=master_service._pepperstone_stop_guidance(**common)
+    assert g["state"]=="pending" and "quote_timestamp is missing" in g["reason"] and g["minimum_ticks"]==30
+    write_snapshot(primary,fields={"stops_level":None})
+    assert "stops_level" in master_service._pepperstone_stop_guidance(**common)["reason"]
+    write_snapshot(primary,fields={"bid":None})
+    assert "Bid/Ask" in master_service._pepperstone_stop_guidance(**common)["reason"]
+    write_snapshot(primary,stamp=(current-timedelta(seconds=120)).isoformat(),fields={"trade_tick_size":"0.002"})
+    g=master_service._pepperstone_stop_guidance(**common)
+    assert g["state"]=="pending" and "stale" in g["reason"] and g["quote_age_seconds"]>=120
+    assert g["minimum_ticks"]==30 and g["step_ticks"]==2 and g["broker_minimum_state"]=="pending"
+    write_snapshot(primary)
+    assert master_service._pepperstone_stop_guidance(**common)["state"]=="ready"
+    primary.write_text("{")
+    assert "malformed" in master_service._pepperstone_stop_guidance(**common)["reason"]
+    write_snapshot(primary,fields={"symbol":"GBPUSD","mt5_symbol":"GBPUSD.a"})
+    assert "mapping" in master_service._pepperstone_stop_guidance(**common)["reason"]
+    primary.unlink()
+    g=master_service._pepperstone_stop_guidance(**common)
+    assert g["automatic_buffer_floor_points"]==30 and "missing" in g["reason"] and str(primary) in g["reason"]
+    assert "never-display" not in json.dumps(g)
+
 
 def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_quote_before_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     export_path = tmp_path / "not-created.json"

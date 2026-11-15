@@ -1488,7 +1488,7 @@
     root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.round_number=btn.dataset.v||''; setRoundNumberButtons(); invalidateQuote();}));
   }
 
-  let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0;
+  let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0, stopRefreshTimer=null, guidanceController=null;
   const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
   function renderStopGuidance() {
     const el=$('calc-stop-guidance');if(!el)return;
@@ -1496,47 +1496,60 @@
     const g=stopGuidance;
     if(!g || stopGuidanceKey!==stopContext()){el.textContent='Stop distance: resolving current context; MT5 checks pending.';return;}
     const elapsed=(Date.now()-stopGuidanceReceived)/1000;
-    if(g.state==='pending' || elapsed>=g.valid_for_seconds){el.textContent='Stop distance pending: '+g.reason;return;}
-    let text=`Minimum ${g.minimum_ticks} TradingView ticks; maximum ${g.maximum_ticks} (${g.maximum_source}); step ${g.step_ticks}. ${g.source}; quote age ${Math.max(0,Math.round((g.quote_age_seconds||0)+elapsed))}s. ${g.reason}`;
+    const partial=g.state==='pending' || elapsed>=g.valid_for_seconds;
+    const minimum=partial?(g.static_minimum_ticks??g.minimum_ticks):g.minimum_ticks;
+    let text=partial?`LTT automatic buffer floor: ${g.automatic_buffer_floor_points} MT5 points. `:`Minimum ${g.minimum_ticks} TradingView ticks; maximum ${g.maximum_ticks} (${g.maximum_source}); step ${g.step_ticks}. `;
+    if(partial && minimum!==null)text+=`Static lower bound ${minimum} TradingView ticks; known step ${g.step_ticks}. `;
+    if(partial)text+='Broker quote-dependent minimum pending. ';
+    text+=`${g.source}; ${g.quote_age_seconds===null?'symbol quote age unavailable':`quote age ${Math.max(0,Math.round(g.quote_age_seconds+elapsed))}s`}. ${g.reason}`;
+    if(g.state!=='pending' && partial)text+=' Quote freshness expired; waiting for metadata refresh.';
     const raw=String($('calc-sl-ticks').value).trim();
-    // Bounds and lattice are exact whole integers from the server, never binary-price arithmetic.
-    if(/^\d+$/.test(raw)){
-      const n=BigInt(raw),lo=BigInt(g.minimum_ticks),hi=BigInt(g.maximum_ticks),step=BigInt(g.step_ticks);
-      if(n<lo)text+=` Too tight; next valid value ${lo} ticks.`;
-      else if(n>hi)text+=` Too wide; next valid value ${hi} ticks.`;
-      else if(n%step!==0n)text+=` Off-grid; next valid value ${n+(step-n%step)<=hi?n+(step-n%step):n-n%step} ticks.`;
-      else text+=' Stop input is within these distance bounds; Trader final checks remain authoritative.';
-    }else text+=' Enter a positive whole number of TradingView ticks; next valid value '+g.minimum_ticks+'.';
+    // Bounds/lattice remain server integers, including partial static bounds.
+    if(minimum!==null && /^\d+$/.test(raw)){
+      const n=BigInt(raw),lo=BigInt(minimum),hi=partial||g.maximum_ticks===null?null:BigInt(g.maximum_ticks),step=BigInt(g.step_ticks);
+      if(n<lo)text+=` Too tight; next valid lower-bound value ${lo} ticks.`;
+      else if(hi!==null && n>hi)text+=` Too wide; next valid value ${hi} ticks.`;
+      else if(n%step!==0n)text+=` Off-grid; next valid value ${hi===null || n+(step-n%step)<=hi?n+(step-n%step):n-n%step} ticks.`;
+      else text+=partial?' Static floor/grid satisfied; broker quote checks pending.':' Stop input is within these distance bounds; Trader final checks remain authoritative.';
+    }else if(!/^\d+$/.test(raw))text+=' Enter a positive whole number of TradingView ticks.';
     el.textContent=text;
   }
-  function receiveStopGuidance(g,key) {if(key!==stopContext())return;stopGuidance=g||null;stopGuidanceKey=key;stopGuidanceReceived=Date.now();renderStopGuidance();}
+  function receiveStopGuidance(g,key) {if(key!==stopContext())return;stopGuidance=g||null;stopGuidanceKey=key;stopGuidanceReceived=Date.now();renderStopGuidance();scheduleStopGuidanceRefresh();}
+  function scheduleStopGuidanceRefresh(){
+    if(stopRefreshTimer!==null)clearTimeout(stopRefreshTimer);stopRefreshTimer=null;
+    if(!isPepperstoneFx() || !currentSymbolInput() || !state.resolvedSymbol)return;
+    const wait=stopGuidance?.state==='pending'?10000:Math.max(5000,Math.min(30000,((stopGuidance?.valid_for_seconds||15)-5)*1000));
+    stopRefreshTimer=setTimeout(()=>{stopRefreshTimer=null;if(document.hidden || !isPepperstoneFx() || resolveController || guidanceController){scheduleStopGuidanceRefresh();return;}resolveSymbolAndLoad({guidanceOnly:true});},wait);
+  }
   function refreshStopContext(){renderStopGuidance();if(isPepperstoneFx())resolveSymbolAndLoad();}
 
-  async function resolveSymbolAndLoad() {
+  async function resolveSymbolAndLoad({guidanceOnly=false}={}) {
     const symbol = currentSymbolInput();
     const guidanceKey=stopContext();
     renderStopGuidance();
-    invalidateQuote();
-    canonicalEl.textContent = '';
+    if(!guidanceOnly){invalidateQuote();canonicalEl.textContent='';if(guidanceController)guidanceController.abort();}
     if (!symbol) {
-      loadJournalSummary('');
-      loadInstrumentSpecs('');
+      if(!guidanceOnly){loadJournalSummary('');loadInstrumentSpecs('');}
       return;
     }
-    if (resolveController) resolveController.abort();
+    if(guidanceOnly && (!isPepperstoneFx() || document.hidden))return;
+    if(guidanceOnly){if(guidanceController)guidanceController.abort();}else if(resolveController)resolveController.abort();
     const controller = new AbortController();
-    resolveController = controller;
+    if(guidanceOnly)guidanceController=controller;else resolveController=controller;
+    const timeout=guidanceOnly?setTimeout(()=>controller.abort(),5000):null;
     try {
       const requestedBroker = state.asset === 'fx' ? state.broker : 'bybit';
       const guidanceParams=new URLSearchParams({side:state.side,order_type:state.order_type,entry_price:$('calc-limit')?.value||'',risk_mode:state.risk_mode,risk_value:$('calc-risk')?.value||'',pepperstone_account_type:state.pepperstone_account_type||'razor',chart_tick_size:$('calc-chart-tick-size-override-enabled')?.checked?$('calc-chart-tick-size')?.value||'':''});
-      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}&${guidanceParams}`, { signal: controller.signal });
-      const instrument = await resolveInFlight;
-      if (resolveController !== controller || guidanceKey!==stopContext() || !adoptEffectiveRoute(instrument, symbol)) return;
+      const lookup = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}&${guidanceParams}`, { signal: controller.signal });
+      if(!guidanceOnly)resolveInFlight=lookup;
+      const instrument = await lookup;
+      if ((guidanceOnly?guidanceController:resolveController) !== controller || guidanceKey!==stopContext())return;
+      if(guidanceOnly){if(instrument.broker!=='pepperstone'||chartSymbolKey(instrument.symbol)!==chartSymbolKey(state.resolvedSymbol))return;}
+      else if(!adoptEffectiveRoute(instrument,symbol))return;
       receiveStopGuidance(instrument.pepperstone_stop_guidance,stopContext());
-      loadJournalSummary(state.resolvedSymbol);
-      loadInstrumentSpecs(state.resolvedSymbol);
-      prewarmQuoteDependencies(state.resolvedSymbol);
+      if(!guidanceOnly){loadJournalSummary(state.resolvedSymbol);loadInstrumentSpecs(state.resolvedSymbol);prewarmQuoteDependencies(state.resolvedSymbol);}
     } catch (e) {
+      if(guidanceOnly){if(guidanceKey===stopContext())renderStopGuidance();return;}
       if (e.name === 'AbortError') {
         return;
       }
@@ -1546,10 +1559,9 @@
       loadJournalSummary('');
       loadInstrumentSpecs('');
     } finally {
-      if (resolveController === controller) {
-        resolveController = null;
-        resolveInFlight = null;
-      }
+      if(timeout!==null)clearTimeout(timeout);
+      if(guidanceOnly){if(guidanceController===controller)guidanceController=null;scheduleStopGuidanceRefresh();}
+      else if (resolveController === controller) {resolveController=null;resolveInFlight=null;}
     }
   }
 
