@@ -1477,38 +1477,32 @@
 
   let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0, stopRefreshTimer=null, guidanceController=null;
   const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
-  function stopBufferPreview(g,raw){
-    const p=g.buffer_policy;if(!p)return '';
-    const deviation=` Request deviation remains ${p.request_deviation_points} MT5 points.`;
-    if(!/^\d+$/.test(raw) || p.points_per_chart_tick_numerator===undefined)return ' Automatic cushion auto-fits; distance-cap preview pending matching point/grid metadata.'+deviation;
-    const distanceCap=BigInt(raw)*BigInt(p.points_per_chart_tick_numerator)*BigInt(p.distance_cap_numerator)/(BigInt(p.points_per_chart_tick_denominator)*BigInt(p.distance_cap_denominator));
-    const cap=BigInt(p.preferred_maximum_buffer_points),preview=distanceCap<cap?distanceCap:cap;
-    return ` Distance-only buffer preview: ${preview} MT5 points maximum${preview===0n?' (zero)':''}; Trader fits actual rounded-lot/commission headroom. No automatic-cushion stop floor.`+deviation;
-  }
   function renderStopGuidance() {
     const el=$('calc-stop-guidance');if(!el)return;
     el.style.display=isPepperstoneFx()?'':'none';if(!isPepperstoneFx())return;
-    const g=stopGuidance;
-    if(!g || stopGuidanceKey!==stopContext()){el.textContent='Stop distance: resolving current context; MT5 checks pending.';return;}
-    const elapsed=(Date.now()-stopGuidanceReceived)/1000;
-    const partial=g.state==='pending' || elapsed>=g.valid_for_seconds;
-    const minimum=partial?(g.static_minimum_ticks??g.minimum_ticks):g.minimum_ticks;
-    let text=partial?'Known price grid; no automatic-cushion stop floor. ':`Minimum ${g.minimum_ticks} TradingView ticks; maximum ${g.maximum_ticks} (${g.maximum_source}); step ${g.step_ticks}. `;
-    if(partial && minimum!==null)text+=`Static lower bound ${minimum} TradingView ticks; known step ${g.step_ticks}. `;
-    if(partial)text+='Broker quote-dependent minimum pending. ';
-    text+=`${g.source}; ${g.quote_age_seconds===null?'symbol quote age unavailable':`quote age ${Math.max(0,Math.round(g.quote_age_seconds+elapsed))}s`}. ${g.reason}`;
-    if(g.state!=='pending' && partial)text+=' Quote freshness expired; waiting for metadata refresh.';
+    const invalid=reason=>'Invalid \u2014 '+reason;
+    const pending='Pending \u2014 waiting for a current MT5 quote';
     const raw=String($('calc-sl-ticks').value).trim();
-    // Bounds/lattice remain server integers, including partial static bounds.
-    if(minimum!==null && /^\d+$/.test(raw)){
-      const n=BigInt(raw),lo=BigInt(minimum),hi=partial||g.maximum_ticks===null?null:BigInt(g.maximum_ticks),step=BigInt(g.step_ticks);
-      if(n<lo)text+=` Too tight; next valid lower-bound value ${lo} ticks.`;
-      else if(hi!==null && n>hi)text+=` Too wide; next valid value ${hi} ticks.`;
-      else if(n%step!==0n)text+=` Off-grid; next valid value ${hi===null || n+(step-n%step)<=hi?n+(step-n%step):n-n%step} ticks.`;
-      else text+=partial?' Static floor/grid satisfied; broker quote checks pending.':' Stop input is within these distance bounds; Trader final checks remain authoritative.';
-    }else if(!/^\d+$/.test(raw))text+=' Enter a positive whole number of TradingView ticks.';
-    text+=stopBufferPreview(g,raw);
-    el.textContent=text;
+    if(!/^\d+$/.test(raw) || BigInt(raw)===0n){el.textContent=invalid('enter a positive whole number of ticks');return;}
+    const g=stopGuidance;
+    if(!g || stopGuidanceKey!==stopContext()){el.textContent=pending;return;}
+    const elapsed=(Date.now()-stopGuidanceReceived)/1000;
+    const current=Number.isFinite(g.valid_for_seconds) && g.valid_for_seconds>0 && elapsed>=0 && elapsed<g.valid_for_seconds;
+    const partial=g.state==='pending' || !current;
+    const whole=value=>value!==null && value!==undefined && /^\d+$/.test(String(value))?BigInt(String(value)):null;
+    // An expired quote supplies no live bounds; only explicit static bounds survive.
+    const minimum=whole(partial?g.static_minimum_ticks:g.minimum_ticks);
+    const maximum=whole(partial?g.static_maximum_ticks:g.maximum_ticks);
+    const step=whole(g.step_ticks),n=BigInt(raw);
+    const staticEntryBlocked=g.state==='blocked' && /entry price.*grid/i.test(String(g.reason||''));
+    if(staticEntryBlocked){el.textContent=invalid('entry price is off-grid');return;}
+    if(g.state==='blocked' && current){
+      el.textContent=invalid(g.limit_entry_state==='invalid'?'limit entry is too close or on the wrong side':/no stop fits/i.test(String(g.reason||''))?'no stop fits the current bounds':'entry is blocked');return;
+    }
+    if(minimum!==null && n<minimum){el.textContent=invalid(`minimum ${minimum} ticks`);return;}
+    if(maximum!==null && n>maximum){el.textContent=invalid(`maximum ${maximum} ticks`);return;}
+    if(step!==null && step>0n && n%step!==0n){el.textContent=invalid(`use steps of ${step} ticks`);return;}
+    el.textContent=g.state==='ready' && current && minimum!==null && step!==null && step>0n?'Valid':pending;
   }
   function receiveStopGuidance(g,key) {if(key!==stopContext())return;stopGuidance=g||null;stopGuidanceKey=key;stopGuidanceReceived=Date.now();renderStopGuidance();scheduleStopGuidanceRefresh();}
   function scheduleStopGuidanceRefresh(){
