@@ -7,7 +7,6 @@
     broker: 'bybit',
     fx_broker: 'oanda',
     pepperstone_account_type: 'razor',
-    estimate_razor_from_standard: false,
     resolvedVenue: 'Bybit',
     side: 'buy',
     order_type: 'market',
@@ -49,20 +48,7 @@
   };
 
   const $ = (id) => document.getElementById(id);
-  const razorEstimateWrap=document.createElement('label');
-  razorEstimateWrap.style.display='none';
-  const razorEstimateInput=document.createElement('input');
-  razorEstimateInput.id='calc-estimate-razor-from-standard';razorEstimateInput.type='checkbox';
-  razorEstimateWrap.appendChild(razorEstimateInput);
-  const razorEstimateText=document.createElement('span');
-  razorEstimateText.textContent=' Estimate Razor from Standard MT5';
-  razorEstimateWrap.appendChild(razorEstimateText);
-  $('pepperstone-account-type-wrap')?.appendChild(razorEstimateWrap);
-  const razorEstimateEnabled=()=>isPepperstoneFx() && state.pepperstone_account_type==='razor' && state.estimate_razor_from_standard;
-  razorEstimateInput.addEventListener('change',()=>{
-    state.estimate_razor_from_standard=razorEstimateInput.checked;
-    invalidateQuote();refreshStopContext();
-  });
+  const razorEstimateEnabled=()=>isPepperstoneFx() && state.pepperstone_account_type==='razor';
   const escapeHtml = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -1308,7 +1294,6 @@
     }
     if ($('pepperstone-account-type-wrap')) $('pepperstone-account-type-wrap').style.display = isPepperstoneFx() ? '' : 'none';
     syncToggleState('pepperstone-account-type-toggle', 'pepperstone_account_type');
-    razorEstimateWrap.style.display=isPepperstoneFx() && state.pepperstone_account_type==='razor'?'':'none';
     syncToggleState('broker-toggle', 'broker');
     syncToggleState('webhook-toggle', 'webhook_mode');
     syncTargetUi();
@@ -1409,7 +1394,6 @@
         if (typeof onChange === 'function') onChange();
         syncAllToggleStates();
         syncExpiryControls();
-        razorEstimateWrap.style.display=isPepperstoneFx() && state.pepperstone_account_type==='razor'?'':'none';
         if(['pepperstone_account_type','side','order_type','risk_mode'].includes(key))refreshStopContext();else renderStopGuidance();
       });
     });
