@@ -2638,6 +2638,30 @@ def _master_journal_lock_status(path: Path) -> Dict[str, object]:
     return _check_master_journal_write_lock(path)
 
 
+class _JournalCoordinatorBusy(RuntimeError):
+    def __init__(self, payload: Dict[str, object]):
+        self.payload = dict(payload)
+        super().__init__('Journal coordinator is busy: ' + str(payload.get('active_caller') or 'another operation'))
+
+
+def _journal_workbook_reader_snapshot(path: Path) -> bytes:
+    """Reserve only the canonical byte read; parse a private snapshot afterwards.
+
+    A read-only openpyxl workbook can retain its archive for the entire parse.
+    It must never hold the canonical Windows handle while publication proceeds.
+    """
+    rejected = _reserve_master_journal_workbook_sync(
+        path, f"journal-reader-{uuid4().hex[:12]}", "journal_reader:snapshot",
+    )
+    if rejected is not None:
+        raise _JournalCoordinatorBusy(rejected)
+    try:
+        with Path(path).open("rb") as source:
+            return source.read()
+    finally:
+        _release_master_journal_workbook_sync()
+
+
 def _is_workbook_lock_exception(exc: BaseException) -> bool:
     winerror = getattr(exc, "winerror", None)
     if winerror in {32, 33}:
@@ -41763,7 +41787,12 @@ async def _legacy_trading_journal_sync_status() -> JSONResponse:
 
 async def _run_trading_journal_sync_job() -> None:
     def _scan_trade_log_streaming(workbook_path: Path) -> Tuple[Set[str], Optional[int], Optional[str]]:
-        wb = load_workbook(workbook_path, data_only=True, read_only=True)
+        source_handle = io.BytesIO(_journal_workbook_reader_snapshot(workbook_path))
+        try:
+            wb = load_workbook(source_handle, data_only=True, read_only=True)
+        except BaseException:
+            source_handle.close()
+            raise
         try:
             tl = _get_trade_log_sheet(wb, allow_legacy=False)
             header_map = _trade_log_header_map(tl)
@@ -41792,7 +41821,8 @@ async def _run_trading_journal_sync_job() -> None:
                         latest_bybit_demo_close_time = tsec
             return row_ids, latest_trade_time, _ts_to_iso(latest_bybit_demo_close_time) if latest_bybit_demo_close_time is not None else None
         finally:
-            wb.close()
+            try: wb.close()
+            finally: source_handle.close()
 
     def _latest_bybit_demo_trade_log_close_iso() -> Optional[str]:
         try:
@@ -42286,9 +42316,12 @@ def _existing_master_journal_trade_population(path: Path) -> Dict[str, object]:
     }
     if not path.exists():
         return population
+    source_handle = None
     try:
-        wb = load_workbook(path, data_only=True, read_only=True)
+        source_handle = io.BytesIO(_journal_workbook_reader_snapshot(path))
+        wb = load_workbook(source_handle, data_only=True, read_only=True)
     except Exception as exc:
+        if source_handle is not None: source_handle.close()
         population["inspection_error"] = f"Failed to open existing workbook: {exc}"
         return population
     try:
@@ -42332,7 +42365,8 @@ def _existing_master_journal_trade_population(path: Path) -> Dict[str, object]:
             f"Failed to inspect existing Trade Log population: {exc}"
         )
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
     return population
 
 
@@ -44535,6 +44569,12 @@ def _import_uploaded_trading_journal_file(
         rejected = _reserve_master_journal_workbook_sync(
             workbook_path_for_preflight, import_workbook_sync_id, "manual_import_transaction",
         )
+        if rejected is not None and str(rejected.get("active_caller") or "").startswith("journal_reader:"):
+            # One bounded handoff from an already-running short internal byte read.
+            # No access-probe retry and no wait for a writer/manual-save reservation.
+            rejected = _reserve_master_journal_workbook_sync(
+                workbook_path_for_preflight, import_workbook_sync_id, "manual_import_transaction", wait_seconds=2.0,
+            )
         if rejected is not None:
             return {**rejected, "uploaded_name": name, "file_type": suffix,
                     "rows_parsed": 0, "rows_upserted": 0,
@@ -46329,9 +46369,12 @@ def _verify_trade_log_row_ids_in_workbook(
     expected = [str(x).strip() for x in (expected_row_ids or []) if str(x).strip()]
     if not workbook_path.exists():
         return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Workbook does not exist."}
+    source_handle = None
     try:
-        wb = load_workbook(workbook_path, data_only=True, read_only=True)
+        source_handle = io.BytesIO(_journal_workbook_reader_snapshot(workbook_path))
+        wb = load_workbook(source_handle, data_only=True, read_only=True)
     except Exception as exc:
+        if source_handle is not None: source_handle.close()
         return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": f"Failed to open workbook: {exc}"}
     found: List[str] = []
     try:
@@ -46348,7 +46391,8 @@ def _verify_trade_log_row_ids_in_workbook(
             if rid:
                 found.append(rid)
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
     found_ids = set(found)
     missing = [rid for rid in expected if rid not in found_ids]
     result = {"ok": len(missing) == 0, "expected_row_ids": expected, "found_row_ids_count": len(found), "missing_row_ids": missing}
@@ -46371,7 +46415,12 @@ def _verify_bybit_imported_trade_log_values(
     mismatches: List[str] = []
     if not expected:
         return {"ok": False, "mismatches": ["no expected Bybit trade IDs"]}
-    wb = load_workbook(workbook_path, data_only=True, read_only=True)
+    source_handle = io.BytesIO(_journal_workbook_reader_snapshot(workbook_path))
+    try:
+        wb = load_workbook(source_handle, data_only=True, read_only=True)
+    except BaseException:
+        source_handle.close()
+        raise
     try:
         ws = _get_trade_log_sheet(wb, allow_legacy=False)
         headers, first_row = _stream_trade_log_header_map_and_start_row(ws)
@@ -46410,7 +46459,8 @@ def _verify_bybit_imported_trade_log_values(
             if seen[row_id] != 1:
                 mismatches.append(f"{row_id}: expected one Trade Log row, found {seen[row_id]}")
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
     return {"ok": not mismatches, "mismatches": mismatches}
 
 
@@ -46456,9 +46506,12 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
     }
     if not workbook_path.exists():
         return base
+    source_handle = None
     try:
-        wb = load_workbook(workbook_path, data_only=True, read_only=True)
+        source_handle = io.BytesIO(_journal_workbook_reader_snapshot(workbook_path))
+        wb = load_workbook(source_handle, data_only=True, read_only=True)
     except Exception as exc:
+        if source_handle is not None: source_handle.close()
         return {**base, "ok": False, "error": f"Failed to open workbook: {exc}", "workbook_exists": True}
     try:
         try:
@@ -46498,7 +46551,8 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
                 })
         return {**base, "months": sorted(set(months)), "row_ids": row_ids, "ignored_invalid_workbook_anchors": ignored, "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": True}
     finally:
-        wb.close()
+        try: wb.close()
+        finally: source_handle.close()
 
 
 

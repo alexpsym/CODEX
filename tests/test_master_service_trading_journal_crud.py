@@ -9207,7 +9207,7 @@ def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(te
     real_temp=ms.tempfile.NamedTemporaryFile
     def fixture_temp(*a,**k):k.setdefault('dir',str(temp_state_paths));return real_temp(*a,**k)
     monkeypatch.setattr(ms.tempfile,'NamedTemporaryFile',fixture_temp)
-    snapshot=sample_snapshot();prior={str(r['id']) for r in snapshot['items']}
+    snapshot=sample_snapshot();snapshot['items'].append(dict(snapshot['items'][0],id='ordinary-third',close_time='2026-03-01T00:00:00Z',open_time='2026-03-01T00:00:00Z'));snapshot['items'].sort(key=lambda r:r.get('close_time') or r.get('open_time') or '',reverse=True);prior={str(r['id']) for r in snapshot['items']}
     journal._counter_build(snapshot,path,publish_recommendation_assets=False)
     wb=load_workbook(path);ws=wb.create_sheet('Authored layout');ws['A1']='Keep authored content';ws['A1'].font=Font(name='Arial',size=17,bold=True);ws['A1'].comment=Comment('manual note','Alex');ws['A1'].hyperlink='https://example.invalid/';ws.column_dimensions['A'].width=31;ws.freeze_panes='B2';wb.save(path);wb.close();journal._saved_journal_seed(path)
     ms._set_trading_journal_rows(snapshot['items'])
@@ -9231,13 +9231,21 @@ def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(te
     def csv(symbol):return (header+f'\n{symbol},o1,Buy,Market,1,100,100,Trade,0,0,e1,17/05/2026 22:50,1000\n{symbol},o2,Sell,Market,1,110,110,Trade,0,0,e2,17/05/2026 22:51,1010\n').encode()
     payload=csv('LOCKCHECKUSDT');file=temp_state_paths/'expected.csv';file.write_bytes(payload);expected={str(r['id']) for r in ms._parse_bybit_trade_history_csv(file,account_mode='demo')};assert len(expected)==1
     probes=[];watch_opens=[];watch_errors=[];mode={'publishing':False,'fail':False,'watch_done':False}
+    source_opened=threading.Event();allow_source_read=threading.Event();parse_started=threading.Event();finish_parse=threading.Event();handoff_started=threading.Event();reader_errors=[];reader_result=[];pause_reader={'enabled':False};reader_worker=None
     real_open=Path.open
     def observed(p,*a,**k):
         if threading.current_thread().name=='fixture-watcher' and p.resolve()==path.resolve():watch_opens.append(str(p))
-        return real_open(p,*a,**k)
+        stream=real_open(p,*a,**k)
+        if pause_reader['enabled'] and threading.current_thread().name=='fixture-internal-reader' and p.resolve()==path.resolve():
+            source_opened.set()
+            if not allow_source_read.wait(5):
+                stream.close();raise RuntimeError('fixture byte-read release timed out')
+        return stream
     monkeypatch.setattr(Path,'open',observed)
     def watcher():
-        try:ms._manual_save_scan_once(100.0,path)
+        try:
+            ms._manual_save_scan_once(100.0,path)
+            assert not ms._read_monthly_aud_reval_months_from_workbook(path)['ok']
         except Exception as exc:watch_errors.append(exc)
     def probe(p):
         probes.append(str(p))
@@ -9249,6 +9257,10 @@ def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(te
                     finally:done.set()
                 worker=threading.Thread(target=attempt,name='fixture-watcher');worker.start();assert done.wait(5);worker.join(5);assert not worker.is_alive()
                 assert not watch_opens and not watch_errors
+            if not mode['fail']:
+                assert parse_started.is_set() and reader_worker.is_alive()
+                assert not real_probe(p)['locked'], 'private background parse must not retain canonical handle'
+                finish_parse.set()
             if mode['fail']:
                 h=exclusive_handle()
                 try:return real_probe(p)
@@ -9269,8 +9281,79 @@ def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(te
         try:return real_publish(*a,**k)
         finally:mode['publishing']=False
     monkeypatch.setattr(ms,'_publish_verified_journal',publish)
-    result=ms._import_uploaded_trading_journal_file('bybit_demo.csv',payload,account_mode='demo')
+    # Trace actual canonical OS streams through source/candidate/recommendation paths.
+    # Disable cyclic GC so a leaked openpyxl parser cannot pass by collection timing.
+    import io, builtins, weakref, traceback, gc
+    streams=[];actual_io_open=io.open;actual_builtin_open=builtins.open
+    def traced_open(opener):
+        def open_file(filename,*args,**kwargs):
+            stream=opener(filename,*args,**kwargs)
+            if isinstance(filename,(str,Path)) and Path(filename).resolve()==path.resolve():
+                streams.append((weakref.ref(stream), ''.join(traceback.format_stack(limit=9))))
+            return stream
+        return open_file
+    monkeypatch.setattr(io,'open',traced_open(actual_io_open))
+    monkeypatch.setattr(builtins,'open',traced_open(actual_builtin_open))
+    real_final_probe=ms._master_journal_lock_status
+    def trace_probe(p):
+        if mode['publishing']:
+            retained=[stack for ref,stack in streams if ref() is not None and not ref().closed]
+            print('CANONICAL_STREAM_TRACE final_probe retained=',len(retained),*retained,sep='\n')
+        return real_final_probe(p)
+    monkeypatch.setattr(ms,'_master_journal_lock_status',trace_probe)
+    actual_load=ms.load_workbook
+    def delayed_reader_load(source,*a,**k):
+        book=actual_load(source,*a,**k)
+        if threading.current_thread().name=='fixture-internal-reader':
+            try:
+                assert hasattr(source,'read') and not isinstance(source,(str,Path))
+                assert not real_probe(path)['locked'], 'canonical handle must close before long parse'
+                parse_started.set()
+                assert finish_parse.wait(180), 'publication did not release fixture parser'
+            except BaseException:
+                book.close();raise
+        return book
+    monkeypatch.setattr(ms,'load_workbook',delayed_reader_load)
+    actual_reserve=ms._reserve_master_journal_workbook_sync
+    def observed_reserve(*a,**k):
+        if k.get('wait_seconds')==2.0:handoff_started.set()
+        return actual_reserve(*a,**k)
+    monkeypatch.setattr(ms,'_reserve_master_journal_workbook_sync',observed_reserve)
+    # The former filename-based read-only loader demonstrably blocks this process's probe.
+    legacy=actual_load(path,data_only=True,read_only=True)
+    try:assert real_probe(path)['locked']
+    finally:legacy.close()
+    assert not real_probe(path)['locked']
+    def background_reader():
+        try:reader_result.append(ms._read_monthly_aud_reval_months_from_workbook(path))
+        except BaseException as exc:reader_errors.append(exc)
+    pause_reader['enabled']=True
+    reader_worker=threading.Thread(target=background_reader,name='fixture-internal-reader')
+    reader_worker.start();assert source_opened.wait(5)
+    assert real_probe(path)['locked'], 'actual owned byte-read handle must be incompatible'
+    results=[]
+    upload_worker=threading.Thread(target=lambda:results.append(ms._import_uploaded_trading_journal_file('bybit_demo.csv',payload,account_mode='demo')),name='fixture-upload')
+    collecting=gc.isenabled();gc.disable()
+    import faulthandler
+    faulthandler.dump_traceback_later(200)
+    try:
+        upload_worker.start();assert handoff_started.wait(1)
+        assert not probes, 'upload must hand off before its first access probe or write'
+        allow_source_read.set();assert parse_started.wait(5)
+        upload_worker.join(180);assert not upload_worker.is_alive()
+        result=results[0]
+    finally:
+        allow_source_read.set();finish_parse.set();reader_worker.join(5);upload_worker.join(5)
+        pause_reader['enabled']=False
+        faulthandler.cancel_dump_traceback_later()
+        if collecting:gc.enable()
+        # Release only streams created by this isolated trace after their last use.
+        for ref,stack in streams:
+            stream=ref()
+            if stream is not None and not stream.closed:stream.close()
     assert result['ok'],result
+    assert not reader_worker.is_alive() and not reader_errors and reader_result[0]['ok']
+    assert streams and all(ref() is None or ref().closed for ref,stack in streams)
     assert mode['watch_done'] and not watch_opens and not watch_errors
     rows=journal.read_master_journal_source(path)['items'];ids=[str(r['id']) for r in rows];assert prior.issubset(ids)
     for identity in expected:assert ids.count(identity)==1
@@ -9286,3 +9369,10 @@ def test_bybit_demo_import_defers_watcher_and_preserves_prepublication_source(te
     assert mode['watch_done'] and not rewrites and not watch_opens and not watch_errors
     assert path.read_bytes()==before and path.stat().st_mtime_ns==before_stat.st_mtime_ns
     assert not ms._master_journal_lock_status(path)['locked']
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ms,'load_workbook',lambda *a,**k:(_ for _ in ()).throw(ValueError('fixture parser failure')))
+        failed_read=ms._read_monthly_aud_reval_months_from_workbook(path)
+        assert not failed_read['ok'] and 'fixture parser failure' in failed_read['error']
+    assert not real_probe(path)['locked']
+    assert all(ref() is None or ref().closed for ref,stack in streams)
