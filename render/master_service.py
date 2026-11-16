@@ -30123,8 +30123,35 @@ def _pepperstone_guidance_snapshot(symbol, account):
     return (max(candidates, key=lambda item:item[0])[1] if candidates else None), diagnostics
 
 
+def _pepperstone_razor_estimate(snapshot, *, symbol, account, pip_location):
+    """Calculator-only estimate; opt-in confirms the export is from Standard."""
+    status = dict(available=False, label="Estimated Razor from Standard", reason="Current matching Standard MT5 quote unavailable.")
+    if snapshot is None:
+        return snapshot, status
+    code, reason, age = _pepperstone_snapshot_condition(snapshot, account)
+    status.update(source=snapshot["source_path"], quote_age_seconds=age, reason=reason)
+    if code != "ready":
+        return snapshot, status
+    currencies = {"AUD", "USD", "GBP", "EUR", "JPY", "NZD", "CAD", "CHF", "NOK", "SEK", "DKK", "SGD", "HKD", "CNH", "ZAR", "MXN", "TRY", "PLN", "HUF", "CZK", "THB"}
+    parts = symbol.split("_")
+    if len(parts) != 2 or not all(part in currencies for part in parts) or type(pip_location) is not int or pip_location not in {-2, -4}:
+        status["reason"] = "FX pip size is unknown; Razor estimate unavailable."
+        return snapshot, status
+    pip = Decimal("1").scaleb(pip_location)
+    item = snapshot["distance_metadata"]
+    bid = Decimal(str(item["bid"])) + pip / 2
+    ask = Decimal(str(item["ask"])) - pip / 2
+    if bid <= 0 or ask < bid:
+        status["reason"] = "Standard spread is below one pip; Razor estimate would cross."
+        return snapshot, status
+    adjusted = dict(snapshot, distance_metadata=dict(item, bid=_fmt_dec(bid), ask=_fmt_dec(ask)))
+    status.update(available=True, reason="Calculator estimate only; Trader validates live prices.",
+                  bid=_fmt_dec(bid), ask=_fmt_dec(ask), spread=_fmt_dec(ask-bid), pip_size=_fmt_dec(pip))
+    return adjusted, status
+
+
 def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", order_type="market",
-                              entry_price=None, risk_mode="fixed_aud", risk_value="10", account_type="razor", snapshot=None, snapshot_diagnostics=None):
+                              entry_price=None, risk_mode="fixed_aud", risk_value="10", account_type="razor", snapshot=None, snapshot_diagnostics=None, estimate_status=None):
     """Exact whole-TV-tick bounds for a single exported MT5 account; advisory only."""
     from fractions import Fraction
     from math import lcm
@@ -30165,6 +30192,11 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
             result["buffer_policy"].update(points_per_chart_tick_numerator=per_tick.numerator,points_per_chart_tick_denominator=per_tick.denominator)
             result["first_valid_tick"] = result["minimum_ticks"]
             result["static_minimum_ticks"] = result["minimum_ticks"]
+        if estimate_status is not None:
+            result["razor_estimate"] = estimate_status
+            if not estimate_status["available"]:
+                result.update(reason=estimate_status["reason"], condition="razor_estimate_unavailable")
+                return result
         if code != "ready": return result
         trade = number(item["trade_tick_size"])
         levels = [item["stops_level"], item["freeze_level"]]
@@ -31467,7 +31499,7 @@ def _calculator_effective_route(asset: object, broker: object, symbol: object) -
 
 
 @app.get("/api/calculator/instrument")
-async def calculator_instrument(asset: str, account: str, symbol: str, broker: str = "", side: str = "buy", order_type: str = "market", entry_price: str = "", risk_mode: str = "fixed_aud", risk_value: str = "10", chart_tick_size: str = "", pepperstone_account_type: str = "razor") -> JSONResponse:
+async def calculator_instrument(asset: str, account: str, symbol: str, broker: str = "", side: str = "buy", order_type: str = "market", entry_price: str = "", risk_mode: str = "fixed_aud", risk_value: str = "10", chart_tick_size: str = "", pepperstone_account_type: str = "razor", estimate_razor_from_standard: bool = False) -> JSONResponse:
     account_norm = str(account or "live").strip().lower()
     try:
         asset_norm, broker_norm, routed_symbol = _calculator_effective_route(asset, broker, symbol)
@@ -31561,10 +31593,15 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
                 }
             )
             point_snapshot, snapshot_diagnostics = _pepperstone_guidance_snapshot(resolved_symbol, account_norm)
+            estimate_status = None
+            if pepperstone_account_type == "razor" and estimate_razor_from_standard is True:
+                point_snapshot, estimate_status = _pepperstone_razor_estimate(
+                    point_snapshot, symbol=resolved_symbol, account=account_norm, pip_location=meta.get("pipLocation"))
+                instrument_payload["pepperstone_razor_estimate"] = estimate_status
             instrument_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
                 symbol=resolved_symbol, account=account_norm, chart_tick_size=chart_step, side=side, order_type=order_type,
                 entry_price=entry_price, risk_mode=risk_mode, risk_value=risk_value, account_type=pepperstone_account_type,
-                snapshot=point_snapshot, snapshot_diagnostics=snapshot_diagnostics)
+                snapshot=point_snapshot, snapshot_diagnostics=snapshot_diagnostics, estimate_status=estimate_status)
             if point_snapshot is None:
                 instrument_payload["pepperstone_mt5_point_status"] = {"available":False,"reason":instrument_payload["pepperstone_stop_guidance"]["reason"]}
             else:
@@ -32437,6 +32474,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             is_pepperstone = broker == "pepperstone"
             account_type = _pepperstone_account_type(payload) if is_pepperstone else None
             commission_rate = _pepperstone_commission_rate() if is_pepperstone and account_type == "razor" else Decimal("0")
+            estimate_enabled = is_pepperstone and account_type == "razor" and payload.get("estimate_razor_from_standard") is True
+            estimate_status = None
             if is_pepperstone and risk_mode == "percent":
                 raise HTTPException(
                     status_code=400,
@@ -32534,6 +32573,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
             if bid <= 0 or ask <= 0:
                 raise HTTPException(status_code=502, detail="OANDA bid/ask unavailable.")
+            if estimate_enabled:
+                pepperstone_point_snapshot, estimate_status = _pepperstone_razor_estimate(
+                    pepperstone_point_snapshot, symbol=symbol, account=account, pip_location=meta.get("pipLocation"))
+                if estimate_status["available"]:
+                    bid, ask = Decimal(estimate_status["bid"]), Decimal(estimate_status["ask"])
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="Bad limit price.")
@@ -32741,7 +32785,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 response_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
                     symbol=symbol, account=account, chart_tick_size=pepperstone_chart_tick_size, side=side,
                     order_type=order_type, entry_price=payload.get("entry_price"), risk_mode=risk_mode,
-                    risk_value=risk_val, account_type=account_type, snapshot=pepperstone_point_snapshot, snapshot_diagnostics=pepperstone_snapshot_diagnostics)
+                    risk_value=risk_val, account_type=account_type, snapshot=pepperstone_point_snapshot, snapshot_diagnostics=pepperstone_snapshot_diagnostics, estimate_status=estimate_status)
                 response_payload.update({
                     "pepperstone_account_type": account_type,
                     "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),
@@ -32752,6 +32796,15 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "estimated_fees_or_spread": _fmt_dec(commission_per_unit_aud * units),
                     "spread_estimate_note": "OANDA reference prices/spreads, not measured Pepperstone Razor/Standard spreads. Spread is already reflected in executable entry/exit prices; the reference spread value is informational and is not added again to risk, reward or extra fees. Actual Standard FX spreads include broker markup; final costs/lots depend on Trader and the actual account. Zero separate FX commission does not describe share CFDs.",
                 })
+                if estimate_status is not None:
+                    response_payload["pepperstone_razor_estimate"] = estimate_status
+                    if estimate_status["available"]:
+                        response_payload["market_data_source"] = "Estimated Razor from Standard; OANDA reference AUD conversion."
+                        response_payload["position_size_estimate_note"] = "Estimated Razor from Standard prices; OANDA reference conversion; Trader validates live MT5 lots, margin, commission and volume."
+                        response_payload["spread_estimate_note"] = "Estimated Razor from Standard: 0.5 pip removed per side. Calculator preview only; spread is not charged again in risk."
+                    else:
+                        response_payload["market_data_source"] = "OANDA reference calculation; Razor estimate unavailable."
+                        response_payload["position_size_estimate_note"] = "OANDA reference calculation only; Razor estimate unavailable. " + estimate_status["reason"]
                 distance_conversion: Dict[str, object] = {
                     "symbol": symbol,
                     "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),

@@ -2576,6 +2576,64 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert pending["buffer_policy"]["distance_cap_numerator"]==1 and pending["buffer_policy"]["distance_cap_denominator"]==3
 
 
+    # Opt-in confirms Standard as the source; the coherent adjusted quote is preview-only.
+    with monkeypatch.context() as patch:
+        async def estimate_meta(**kwargs):
+            jpy = kwargs["symbol"].endswith("_JPY")
+            return dict(displayPrecision=3 if jpy else 5, pipLocation=-2 if jpy else -4,
+                        tradeUnitsPrecision=0, minimumTradeSize="1", marginRate="0.05")
+        patch.setattr(master_service, "_fetch_oanda_instrument_meta", estimate_meta)
+        write_snapshot(primary, fields={"bid":"159.551", "ask":"159.562", "stops_level":0, "freeze_level":0})
+        request = _pepperstone_quote_payload(symbol="USDJPY", stop_loss_ticks="5", pepperstone_account_type="razor", estimate_razor_from_standard=True)
+        def calculate(**changes):
+            return json.loads(asyncio.run(master_service.calculator_quote(dict(request, **changes))).body)
+        info = json.loads(asyncio.run(master_service.calculator_instrument("fx", "demo", "USDJPY", "pepperstone", estimate_razor_from_standard=True)).body)
+        quote = calculate()
+        estimate = quote["pepperstone_razor_estimate"]
+        assert estimate["available"] and estimate["label"] == "Estimated Razor from Standard"
+        assert (estimate["bid"], estimate["ask"], estimate["spread"]) == ("159.556", "159.557", "0.001")
+        assert info["pepperstone_razor_estimate"] == estimate or info["pepperstone_razor_estimate"]["bid"] == estimate["bid"]
+        assert quote["entry_price"] == "159.557" and calculate(side="sell")["entry_price"] == "159.556"
+        assert quote["spread_quote"] == "0.001" and quote["stop_price"] == "159.552"
+        assert quote["pepperstone_stop_guidance"]["minimum_ticks"] == info["pepperstone_stop_guidance"]["minimum_ticks"] == 2
+        assert quote["commission_per_lot_per_side_aud"] == "4.2" and quote["estimated_total_loss_aud"] == "10"
+        assert "OANDA reference" in quote["market_data_source"]
+        limit = calculate(order_type="limit", entry_price="159.540")
+        assert Decimal(limit["entry_price"]) == Decimal("159.540") and Decimal(limit["stop_price"]) == Decimal("159.535")
+        assert limit["stop_loss_price_distance"] == "0.005" and limit["spread_quote"] == "0.001"
+        assert limit["pepperstone_stop_guidance"]["limit_entry_state"] == "valid"
+        values = _parse_set_file(asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(request, quote))).body.decode())
+        assert values["SL_PriceDistance"] == "0.005" and Decimal(values["CommissionPerLotPerSide"]) == Decimal("4.2")
+        for changes in ({"estimate_razor_from_standard":False}, {"pepperstone_account_type":"standard"}):
+            untouched = calculate(**changes)
+            assert "pepperstone_razor_estimate" not in untouched and untouched["entry_price"] == "1.3"
+        write_snapshot(primary, fields={"bid":"159.551", "ask":"159.561", "stops_level":0, "freeze_level":0})
+        zero = calculate()
+        assert zero["pepperstone_razor_estimate"]["available"] and zero["spread_quote"] == "0"
+        assert zero["pepperstone_stop_guidance"]["minimum_ticks"] == 1
+        for kwargs in [dict(fields={"bid":"159.551","ask":"159.560"}), dict(mode="live"),
+                       dict(stamp=(current-timedelta(seconds=120)).isoformat()), dict(fields={"bid":None})]:
+            write_snapshot(primary, **kwargs)
+            unavailable = calculate()
+            assert not unavailable["pepperstone_razor_estimate"]["available"]
+            assert unavailable["pepperstone_stop_guidance"]["state"] == "pending"
+            assert "OANDA reference calculation" in unavailable["market_data_source"]
+        primary.unlink()
+        assert not calculate()["pepperstone_razor_estimate"]["available"]
+        write_snapshot(primary, fields={"symbol":"GBPUSD", "mt5_symbol":"GBPUSD.a", "point":"0.00001", "trade_tick_size":"0.00001",
+                                        "bid":"1.30000", "ask":"1.30012", "stops_level":0, "freeze_level":0})
+        gbp = calculate(symbol="GBPUSD", stop_loss_ticks="5")
+        assert (gbp["pepperstone_razor_estimate"]["bid"],gbp["pepperstone_razor_estimate"]["ask"]) == ("1.30005","1.30007")
+        assert gbp["spread_quote"] == "0.00002" and gbp["entry_price"] == "1.30007"
+        async def unknown_pip(**kwargs):
+            data = await estimate_meta(**kwargs);data.pop("pipLocation");return data
+        patch.setattr(master_service, "_fetch_oanda_instrument_meta", unknown_pip)
+        unknown = calculate(symbol="GBPUSD")
+        assert not unknown["pepperstone_razor_estimate"]["available"] and "pip size" in unknown["pepperstone_razor_estimate"]["reason"]
+        assert unknown["pepperstone_stop_guidance"]["state"] == "pending"
+    assert calls["account_summary"] == 0
+
+
 def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_quote_before_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     export_path = tmp_path / "not-created.json"
     monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))

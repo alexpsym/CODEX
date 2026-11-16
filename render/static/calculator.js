@@ -7,6 +7,7 @@
     broker: 'bybit',
     fx_broker: 'oanda',
     pepperstone_account_type: 'razor',
+    estimate_razor_from_standard: false,
     resolvedVenue: 'Bybit',
     side: 'buy',
     order_type: 'market',
@@ -48,6 +49,20 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  const razorEstimateWrap=document.createElement('label');
+  razorEstimateWrap.style.display='none';
+  const razorEstimateInput=document.createElement('input');
+  razorEstimateInput.id='calc-estimate-razor-from-standard';razorEstimateInput.type='checkbox';
+  razorEstimateWrap.appendChild(razorEstimateInput);
+  const razorEstimateText=document.createElement('span');
+  razorEstimateText.textContent=' Estimate Razor from Standard MT5';
+  razorEstimateWrap.appendChild(razorEstimateText);
+  $('pepperstone-account-type-wrap')?.appendChild(razorEstimateWrap);
+  const razorEstimateEnabled=()=>isPepperstoneFx() && state.pepperstone_account_type==='razor' && state.estimate_razor_from_standard;
+  razorEstimateInput.addEventListener('change',()=>{
+    state.estimate_razor_from_standard=razorEstimateInput.checked;
+    invalidateQuote();refreshStopContext();
+  });
   const escapeHtml = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -636,6 +651,11 @@
     ];
     if (pepperstone) {
       rows.push(['Account type', q.pepperstone_account_type || 'razor']);
+      if(q.pepperstone_razor_estimate){
+        const estimate=q.pepperstone_razor_estimate;
+        rows.push(['Price preview',estimate.available?estimate.label:'OANDA reference calculation; Razor estimate unavailable']);
+        rows.push(['Razor estimate',estimate.available?`${estimate.bid} / ${estimate.ask}; spread ${estimate.spread}`:estimate.reason]);
+      }
       rows.push(['Estimated round-trip commission (AUD)', q.estimated_commission_aud]);
       rows.push(['Estimated reference spread (AUD)', q.estimated_spread_aud]);
       rows.push(['Spread estimate limitation', q.spread_estimate_note]);
@@ -1288,6 +1308,7 @@
     }
     if ($('pepperstone-account-type-wrap')) $('pepperstone-account-type-wrap').style.display = isPepperstoneFx() ? '' : 'none';
     syncToggleState('pepperstone-account-type-toggle', 'pepperstone_account_type');
+    razorEstimateWrap.style.display=isPepperstoneFx() && state.pepperstone_account_type==='razor'?'':'none';
     syncToggleState('broker-toggle', 'broker');
     syncToggleState('webhook-toggle', 'webhook_mode');
     syncTargetUi();
@@ -1388,6 +1409,7 @@
         if (typeof onChange === 'function') onChange();
         syncAllToggleStates();
         syncExpiryControls();
+        razorEstimateWrap.style.display=isPepperstoneFx() && state.pepperstone_account_type==='razor'?'':'none';
         if(['pepperstone_account_type','side','order_type','risk_mode'].includes(key))refreshStopContext();else renderStopGuidance();
       });
     });
@@ -1476,7 +1498,7 @@
   }
 
   let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0, stopRefreshTimer=null, guidanceController=null;
-  const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
+  const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,razorEstimateEnabled(),state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
   function renderStopGuidance() {
     const el=$('calc-stop-guidance');if(!el)return;
     el.style.display=isPepperstoneFx()?'':'none';if(!isPepperstoneFx())return;
@@ -1529,7 +1551,7 @@
     const timeout=guidanceOnly?setTimeout(()=>controller.abort(),5000):null;
     try {
       const requestedBroker = state.asset === 'fx' ? state.broker : 'bybit';
-      const guidanceParams=new URLSearchParams({side:state.side,order_type:state.order_type,entry_price:$('calc-limit')?.value||'',risk_mode:state.risk_mode,risk_value:$('calc-risk')?.value||'',pepperstone_account_type:state.pepperstone_account_type||'razor',chart_tick_size:$('calc-chart-tick-size-override-enabled')?.checked?$('calc-chart-tick-size')?.value||'':''});
+      const guidanceParams=new URLSearchParams({side:state.side,order_type:state.order_type,entry_price:$('calc-limit')?.value||'',risk_mode:state.risk_mode,risk_value:$('calc-risk')?.value||'',pepperstone_account_type:state.pepperstone_account_type||'razor',estimate_razor_from_standard:String(razorEstimateEnabled()),chart_tick_size:$('calc-chart-tick-size-override-enabled')?.checked?$('calc-chart-tick-size')?.value||'':''});
       const lookup = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}&${guidanceParams}`, { signal: controller.signal });
       if(!guidanceOnly)resolveInFlight=lookup;
       const instrument = await lookup;
@@ -1743,7 +1765,8 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
-      if (!isPepperstoneFx()) delete payload.pepperstone_account_type;
+      payload.estimate_razor_from_standard=razorEstimateEnabled();
+      if (!isPepperstoneFx()) {delete payload.pepperstone_account_type;delete payload.estimate_razor_from_standard;}
       delete payload.chartTickOverrides;
       delete payload.activeChartTickSymbol;
       if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
