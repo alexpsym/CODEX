@@ -333,6 +333,9 @@
     if(!preflight || preflight.state==='pending' || exportStatus.broker_check_state==='pending'){
       pepperstoneRiskPreflightEl.textContent='Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader.';return true;
     }
+    if(preflight.modeled_lot_buffer){
+      pepperstoneRiskPreflightEl.textContent=`Position-size estimate ready. .set file prepared. Modeled automatic cushion: ${preflight.planned_buffer_points} MT5 points${preflight.planned_buffer_points===0?' (zero)':''}; Trader rechecks live lots and risk. Request deviation remains ${preflight.request_deviation_points} MT5 points.`;return true;
+    }
     pepperstoneRiskPreflightEl.textContent=`Position-size estimate ready. .set file prepared. Distance-only buffer preview: ${preflight.planned_buffer_points} MT5 points maximum${preflight.planned_buffer_points===0?' (zero)':''}; Trader fits actual rounded-lot/commission risk headroom. Request deviation remains ${preflight.request_deviation_points} MT5 points.`;
     return true;
   }
@@ -612,7 +615,7 @@
       ['Resolved broker', q.broker], ['Resolved venue', q.resolved_venue || q.venue], ['Resolved symbol', q.symbol],
       ['Entry price', fmtPriceLike(q.entry_price, tickSize)], ['Stop price', fmtPriceLike(q.stop_price, tickSize)], ['Target price', fmtPriceLike(q.target_price, tickSize)],
       ['TP distance', fmtPriceLike(q.target_distance, tickSize)],
-      [pepperstone ? 'Estimated position size (OANDA pricing/conversion units)' : 'Qty / units', q.quantity],
+      [pepperstone ? (q.pepperstone_lot_estimate?.state==='ready'?'Estimated position size (MT5 lot model units)':'Estimated position size (OANDA pricing/conversion units)') : 'Qty / units', q.quantity],
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
       ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`],
@@ -641,6 +644,19 @@
         const estimate=q.pepperstone_razor_estimate;
         rows.push(['Price preview',estimate.available?estimate.label:'OANDA reference calculation; Razor estimate unavailable']);
         rows.push(['Razor estimate',estimate.available?`${estimate.bid} / ${estimate.ask}; spread ${estimate.spread}`:estimate.reason]);
+      }
+      if(q.pepperstone_lot_estimate){
+        const lot=q.pepperstone_lot_estimate;
+        rows.push(['Estimated MT5 lots',lot.state==='ready'?lot.lots:(lot.state==='no_fit'?'No fitting lot':'Advisory; MT5 lots pending')]);
+        rows.push(['MT5 lot sizing',lot.reason]);
+        if(lot.state==='ready'){
+          rows.push(['Modeled stop loss (AUD)',Number(lot.nominal_loss_aud).toFixed(2)]);
+          rows.push(['Modeled buffered loss (AUD)',Number(lot.buffered_loss_aud).toFixed(2)]);
+          rows.push(['Automatic cushion (MT5 points)',String(lot.buffer_points)]);
+          rows.push(['Exported risk min / target / max (AUD)',`${lot.risk_min_aud} / ${lot.risk_target_aud} / ${lot.risk_max_aud}`]);
+          rows.push(['Broker lot min / step / max',`${lot.volume_min} / ${lot.volume_step} / ${lot.volume_max}`]);
+        }
+        if(lot.source)rows.push(['Lot estimate source',`${lot.source}; ${lot.mt5_symbol}; ${lot.account_mode}; quote age ${lot.quote_age_seconds==null?'unknown':Number(lot.quote_age_seconds).toFixed(1)+'s'}`]);
       }
       rows.push(['Estimated round-trip commission (AUD)', q.estimated_commission_aud]);
       rows.push(['Estimated reference spread (AUD)', q.estimated_spread_aud]);

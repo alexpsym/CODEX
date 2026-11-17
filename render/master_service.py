@@ -30439,6 +30439,69 @@ def _pepperstone_risk_buffer_preflight(
     }
 
 
+def _pepperstone_risk_band(risk_target):
+    # Match the cents actually serialized by the preset; preserve the 90/100/120% policy.
+    return tuple(Decimal(_pepperstone_set_decimal(v, places="0.01"))
+                 for v in (risk_target * Decimal("0.90"), risk_target, risk_target * Decimal("1.20")))
+
+
+def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk_target):
+    """Trader's AUD tick-value model, with whole broker-step counts; no order I/O."""
+    from fractions import Fraction as F
+    result = dict(state="pending", reason="Current MT5 sizing metadata unavailable; Trader checks pending.")
+    if snapshot is None:
+        return result
+    code, reason, age = _pepperstone_snapshot_condition(snapshot, account)
+    result.update(source=snapshot.get("source"), source_path=snapshot.get("source_path"),
+                  mt5_symbol=snapshot.get("mt5_symbol"), quote_age_seconds=age,
+                  account_mode=snapshot.get("exported_account_mode"), currency=snapshot.get("exported_account_currency"))
+    if code != "ready":
+        return dict(result, reason=reason)
+    if str(snapshot.get("exported_account_currency") or "").upper() != "AUD":
+        return dict(result, reason="Matching AUD MT5 account currency required for lot sizing; Trader checks pending.")
+    try:
+        values = [Decimal(str(snapshot["distance_metadata"].get(k))) for k in
+                  ("minimum_lot", "volume_step", "maximum_lot", "trade_tick_size", "tick_value")]
+        if any(not v.is_finite() or v <= 0 for v in values) or values[0] > values[2]:
+            raise ValueError()
+        minimum, step, maximum, tick, tick_value = map(F, values)
+        point, distance = F(snapshot["point"]), F(stop_distance)
+        if point <= 0 or distance <= 0:
+            raise ValueError()
+    except (ValueError, TypeError, ArithmeticError):
+        return dict(result, reason="Missing or invalid MT5 volume min/step/max or tick value; Trader checks pending.")
+    risk_min, target, risk_max = map(F, _pepperstone_risk_band(risk_target))
+    if not (0 < risk_min <= target <= risk_max):
+        return dict(result, reason="Portable risk band cannot model this target; Trader checks pending.")
+    loss_per_lot = distance / tick * tick_value
+    floor = lambda x: x.numerator // x.denominator
+    ceil = lambda x: -((-x.numerator) // x.denominator)
+    first, last = max(1, ceil(minimum / step)), floor(maximum / step)
+    per_step = loss_per_lot * step
+    below = min(last, floor(target / per_step))
+    count = below if below >= first and per_step * below >= risk_min else max(first, ceil(risk_min / per_step))
+    decimal = lambda v: Decimal(v.numerator) / Decimal(v.denominator)
+    result.update(risk_min_aud=_fmt_dec(decimal(risk_min)), risk_target_aud=_fmt_dec(decimal(target)),
+                  risk_max_aud=_fmt_dec(decimal(risk_max)), volume_min=_fmt_dec(values[0]),
+                  volume_step=_fmt_dec(values[1]), volume_max=_fmt_dec(values[2]),
+                  loss_per_lot_aud=_fmt_dec(decimal(loss_per_lot)), tick_value_aud=_fmt_dec(values[4]),
+                  trade_tick_size=_fmt_dec(values[3]))
+    if count > last or count < first or not risk_min <= per_step * count <= risk_max:
+        return dict(result, state="no_fit", reason="No MT5 lot fits the exported AUD risk band.")
+    lots, nominal = step * count, per_step * count
+    assert minimum <= lots <= maximum and (lots / step).denominator == 1
+    policy = _pepperstone_risk_buffer_preflight(stop_points=max(1, floor(distance / point)), risk_target=risk_target)
+    distance_cap = floor(distance / point * (risk_max - risk_min) / risk_min)
+    point_cost = lots * point / tick * tick_value
+    buffer = max(0, min(policy["preferred_maximum_buffer_points"], distance_cap, floor((risk_max - nominal) / point_cost)))
+    buffered = nominal + buffer * point_cost
+    return dict(result, state="ready", reason="MT5 lot-grid estimate; Trader validates live execution.",
+                lots=_fmt_dec(decimal(lots)), lot_step_count=count, units=_fmt_dec(decimal(lots * 100000)),
+                nominal_loss_aud=_fmt_dec(decimal(nominal)), buffer_points=buffer,
+                conservative_buffer_cap_points=distance_cap, buffered_loss_aud=_fmt_dec(decimal(buffered)),
+                net_r_base_aud=_fmt_dec(decimal(max(target, buffered))))
+
+
 def _pepperstone_set_risk_target(payload: Dict[str, object]) -> Decimal:
     risk_mode = str(payload.get("risk_mode") or "").strip().lower()
     if risk_mode == "fixed_aud":
@@ -30600,8 +30663,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     risk_target = _pepperstone_set_risk_target(payload)
     if risk_target <= 0:
         raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
-    risk_min = risk_target * Decimal("0.90")
-    risk_max = risk_target * Decimal("1.20")
+    risk_min, risk_target, risk_max = _pepperstone_risk_band(risk_target)
     values = {
         "Strategy": "2" if order_type == "limit" else "3",
         "OrdersEnabled": _pepperstone_trader_set_bool(True),
@@ -32636,6 +32698,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     pepperstone_point_snapshot, symbol=symbol, account=account, pip_location=meta.get("pipLocation"))
                 if estimate_status["available"]:
                     bid, ask = Decimal(estimate_status["bid"]), Decimal(estimate_status["ask"])
+            standard_fixed = is_pepperstone and account_type == "standard" and risk_mode == "fixed_aud"
+            standard_quote_current = standard_fixed and pepperstone_point_snapshot is not None and _pepperstone_snapshot_condition(pepperstone_point_snapshot, account)[0] == "ready"
+            if standard_quote_current:
+                bid = Decimal(str(pepperstone_point_snapshot["distance_metadata"]["bid"]))
+                ask = Decimal(str(pepperstone_point_snapshot["distance_metadata"]["ask"]))
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="Bad limit price.")
@@ -32697,8 +32764,15 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             effective_rr_net = None
             fee_buffer_r = None
 
+            standard_lot = _pepperstone_standard_lot_estimate(pepperstone_point_snapshot,
+                account=account, stop_distance=abs(entry-sl), risk_target=risk_val) if standard_fixed else None
+            if standard_lot and standard_lot["state"] in ("ready", "no_fit"):
+                loss_per_unit_home = Decimal(standard_lot["loss_per_lot_aud"]) / Decimal(100000)
+                gain_factor = loss_factor = loss_per_unit_home / abs(entry-sl)
             units_raw = risk_amount_home / loss_per_unit_home
             units = units_raw if is_pepperstone else _floor_to_precision(units_raw, units_precision)
+            if standard_lot and standard_lot["state"] in ("ready", "no_fit"):
+                units = Decimal(standard_lot.get("units", "0"))
             if not is_pepperstone:
                 try:
                     sized = oanda_risk.size_fixed_risk_units(
@@ -32737,11 +32811,24 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 target_distance = (tp_ticks or Decimal("0")) * distance_tick_size
                 if target_mode == "rr" and rr_requested is not None:
                     target_distance = (rr_requested * loss_per_unit_home + commission_per_unit_aud) / gain_factor
+                    if standard_lot and standard_lot["state"] == "ready":
+                        # AutoTP floors Net R against max(target, buffered risk), after lot selection.
+                        from fractions import Fraction as _F
+                        required = rr_requested * Decimal(standard_lot["net_r_base_aud"])
+                        point = Decimal(str(pepperstone_point_snapshot["point"]))
+                        trade_tick = Decimal(standard_lot["trade_tick_size"])
+                        target_distance = max(required / (gain_factor * units),
+                            Decimal(str(pepperstone_point_snapshot["distance_metadata"]["stops_level"])) * point)
+                        grid = point * (_F(trade_tick) / _F(point)).numerator
+                        ticks = _F(target_distance) / _F(grid)
+                        target_distance = Decimal(-((-ticks.numerator)//ticks.denominator)) * grid
                     requested_rr_net = rr_requested
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
                 reward_home = ((abs(tp - entry) - (Decimal("0") if is_pepperstone else spread_quote)) * gain_factor - commission_per_unit_aud) * units
                 if is_pepperstone:
-                    effective_rr_net = reward_home / (loss_per_unit_home * units)
+                    effective_rr_net = reward_home / (loss_per_unit_home * units) if units > 0 else Decimal("0")
+                    if standard_lot and standard_lot["state"] == "ready" and target_mode == "rr":
+                        effective_rr_net = reward_home / Decimal(standard_lot["net_r_base_aud"])
                     fee_buffer_r = commission_per_unit_aud / loss_per_unit_home
                 else:
                     reward_home = max(Decimal("0"), reward_home)
@@ -32915,6 +33002,26 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "code": "PEPPERSTONE_MT5_POINT_METADATA_UNAVAILABLE",
                     "reason": "Broker point and risk-buffer checks are pending in Trader.",
                 }
+            if standard_lot is not None:
+                response_payload["pepperstone_lot_estimate"] = standard_lot
+                if standard_quote_current:
+                    response_payload["market_data_source"] = "Matching Pepperstone Trader MT5 quote; OANDA reference conversion; lot sizing status below."
+                if standard_lot["state"] != "ready":
+                    response_payload["position_size_estimate_note"] = standard_lot["reason"] + " Quantity is advisory unless a valid MT5 lot is shown."
+                status = response_payload["pepperstone_mt5_export_status"]
+                if standard_lot["state"] == "no_fit":
+                    status.update(ready=False, file_ready=False, broker_check_state="incompatible",
+                                  code="PEPPERSTONE_NO_BAND_VALID_LOT", reason=standard_lot["reason"])
+                elif standard_lot["state"] == "pending" and status.get("broker_check_state") != "incompatible":
+                    status.update(broker_check_state="pending", sizing_reason=standard_lot["reason"])
+                elif standard_lot["state"] == "ready":
+                    response_payload["position_size_estimate_note"] = "Pepperstone Trader AUD tick-value/lot-grid estimate; live lots, costs and margin are checked in Trader."
+                    response_payload["market_data_source"] = "Matching Pepperstone Trader MT5 quote and AUD tick-value model; OANDA reference conversion retained."
+                    response_payload["spread_estimate_note"] = "MT5 executable Bid/Ask spread is informational and is not added again to risk or reward. Standard currency FX has zero separate commission."
+                    preflight = response_payload.get("pepperstone_risk_buffer_preflight", {})
+                    preflight.update(planned_buffer_points=standard_lot["buffer_points"], modeled_lot_buffer=True,
+                        conservative_max_buffer_points=standard_lot["conservative_buffer_cap_points"],
+                        nominal_loss_aud=standard_lot["nominal_loss_aud"], buffered_loss_aud=standard_lot["buffered_loss_aud"])
             calculation_context_id = (
                 str(payload.get("calculation_context_id") or "").strip()
                 or f"calcctx_{broker}_{account}_{uuid4().hex}"

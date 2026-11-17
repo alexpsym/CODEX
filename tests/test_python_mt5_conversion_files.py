@@ -99,10 +99,19 @@ def test_mql5_trader_exports_one_pepperstone_spread_json_file():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
     spread_export = trader.split("// ---------- Pepperstone spread export helpers ----------", 1)[1]
     assert "EnablePepperstoneSpreadExport = true" in trader
-    assert "PepperstoneSpreadExportIntervalSeconds = 300" in trader
+    assert "PepperstoneSpreadExportIntervalSeconds = 30" in trader
     assert 'PepperstoneSpreadExportSymbols = ""' in trader
     assert "pepperstone_spreads_latest.json" in trader
     assert "MaybeExportPepperstoneSpreads();" in trader
+    for field, constant in [("minimum_lot", "SYMBOL_VOLUME_MIN"), ("volume_step", "SYMBOL_VOLUME_STEP"),
+                            ("maximum_lot", "SYMBOL_VOLUME_MAX"), ("tick_value", "SYMBOL_TRADE_TICK_VALUE")]:
+        assert field in spread_export and f"SymbolInfoDouble(mt5Symbol,{constant})" in spread_export
+    assert 'AccountInfoString(ACCOUNT_CURRENCY)' in spread_export
+    assert 'quoteTick.time' in spread_export and 'ACCOUNT_TRADE_MODE' in spread_export
+    assert '#property version   "2.50"' in trader and 'EA_VERSION = "2.50"' in trader
+    assert 'MathFloor(vol / step)' in trader and 'riskTotal < riskMin' in trader
+    assert 'EnforceOneTradeAtATime' in trader and 'ValidateVolumeForBroker' in trader
+    assert "TERMINAL_CONNECTED)!=0 && interval>30) interval=30" in spread_export
     assert "BuildPepperstoneSpreadJson" in trader
     assert "TimeToString" not in spread_export
     assert "FileOpen(requestedPath, FILE_WRITE | FILE_TXT | FILE_ANSI)" in trader

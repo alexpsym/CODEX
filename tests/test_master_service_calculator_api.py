@@ -4650,7 +4650,7 @@ def test_pepperstone_account_export_integrity(monkeypatch, tmp_path, pepperstone
 def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatch, tmp_path, pepperstone_account_fixture):
     # Cash ledger from signed entry/exit prices and two separate commission charges.
     # Benchmarks: 1 lot loses AUD15 at 10 ticks; Razor adds AUD7 per lot.
-    monkeypatch.setattr(asyncio, "run", asyncio.runners.run)
+    # Keep the existing Windows-safe fixture loop; real asyncio tasks/locks remain active.
     _mock_pepperstone_quote_dependencies(monkeypatch)
     monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", pepperstone_account_fixture)
     monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50")
@@ -4716,6 +4716,76 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
                     assert preset["IncludeCommissionInRisk"] == "true" and preset["AutoTP_NetRR_Enabled"] == "false"
                     assert D(preset["SL_PriceDistance"]) == 10 * tick
                     assert D(preset["TP_PriceDistance"]) == tick
+    # Fresh matching AUD Trader snapshots: real Calculate -> trusted portable preset.
+    from datetime import datetime, timezone, timedelta
+    stamp = datetime.now(timezone.utc).isoformat()
+    export_path = tmp_path / "sizing-export.json"
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    item = dict(symbol="USDJPY", mt5_symbol="USDJPY", point="0.001", trade_tick_size="0.001",
+                stops_level=0, freeze_level=0, bid="159.551", ask="159.552", available=True,
+                timestamp=stamp, quote_timestamp=stamp, minimum_lot="0.01", volume_step="0.01",
+                maximum_lot="100", tick_value="1.5")
+    def write_snapshot(**changes):
+        export_path.write_text(json.dumps(dict(version=1, broker="pepperstone", generated_at=stamp,
+            account=dict(mode=changes.pop("mode", "demo"), currency=changes.pop("currency", "AUD")),
+            symbols=[dict(item, **changes)])), encoding="utf-8")
+    request = _pepperstone_quote_payload(symbol="USDJPY", side="buy", account="demo",
+        pepperstone_account_type="standard", stop_loss_ticks="10", chart_tick_size="0.001",
+        target_mode="rr", risk_reward="2", risk_mode="fixed_aud", risk_value="10")
+    for changes, lots, nominal in [({}, ".66", "9.90"),
+            ({"minimum_lot":".1","volume_step":".1","tick_value":"3.5"}, ".3", "10.5"),
+            ({"minimum_lot":".1","volume_step":".1","tick_value":"12"}, ".1", "12"),
+            ({"minimum_lot":".1","volume_step":".1","tick_value":"9"}, ".1", "9"),
+            ({"minimum_lot":".2","volume_step":".2"}, ".6", "9"),
+            ({"minimum_lot":".001","volume_step":".001"}, ".666", "9.99"),
+            ({"minimum_lot":".7"}, ".7", "10.5")]:
+        write_snapshot(**changes)
+        q = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        model = q["pepperstone_lot_estimate"]
+        assert model["state"] == "ready" and D(model["lots"]) == D(lots)
+        assert D(q["quantity"]) == D(lots)*100000 and D(model["nominal_loss_aud"]) == D(nominal)
+        assert D(q["entry_price"]) == D("159.552") and D(q["stop_loss_price_distance"]) == D(".010")
+        assert D(q["estimated_total_loss_aud"]) == D(nominal) and D(q["estimated_commission_aud"]) == 0
+        assert D(model["lots"]) % D(model["volume_step"]) == 0
+        assert D(model["volume_min"]) <= D(model["lots"]) <= D(model["volume_max"])
+        assert D(9) <= D(nominal) <= D(model["buffered_loss_aud"]) <= D(12)
+        assert D(q["estimated_reward_aud"]) >= D(2)*max(D(10), D(model["buffered_loss_aud"]))
+        r_base = max(D(10), D(model["buffered_loss_aud"]))
+        assert abs(D(q["effective_rr_net"])-D(q["estimated_reward_aud"])/r_base) <= D(".01")
+        assert D(q["spread_quote"]) == D(".001")
+        assert model["buffer_points"] <= int(D(model["conservative_buffer_cap_points"]))
+        text, _ = master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
+        preset = _parse_set_file(text)
+        assert tuple(D(preset[k]) for k in ("RiskAUD_Min","RiskAUD_Target","RiskAUD_Max")) == (D(9),D(10),D(12))
+        assert preset["AutoFitRiskSlippageBuffer"] == "true" and preset["SlippagePoints"] == "10"
+        assert D(preset["CommissionPerLotPerSide"]) == 0 and D(preset["SL_PriceDistance"]) == D(".010")
+        assert preset["AutoTP_NetRR_Enabled"] == "true" and D(preset["NetRR_Target"]) == 2
+    write_snapshot()
+    for limit_side,limit_entry in [("buy","159.540"),("sell","159.570")]:
+        manual_request = dict(request, side=limit_side, order_type="limit", entry_price=limit_entry,
+                              target_mode="ticks", take_profit_ticks="25", risk_reward="inactive")
+        q=json.loads(asyncio.run(master_service.calculator_quote(manual_request)).body)
+        assert D(q["entry_price"])==D(limit_entry) and D(q["stop_loss_price_distance"])==D(".010")
+        assert abs(D(q["target_price"])-D(limit_entry))==D(".025")
+        text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(manual_request,q))
+        preset=_parse_set_file(text);assert D(preset["StandardLimitEntryPrice"])==D(limit_entry)
+        assert preset["AutoTP_NetRR_Enabled"]=="false" and D(preset["TP_PriceDistance"])==D(".025")
+    for changes in [{"minimum_lot":".1","volume_step":".1","tick_value":"15"}, {"maximum_lot":".5"}, {"minimum_lot":"1"}]:
+        write_snapshot(**changes);q=json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        assert q["pepperstone_lot_estimate"]["state"]=="no_fit" and D(q["quantity"])==0
+        assert q["pepperstone_mt5_export_status"]["file_ready"] is False
+        with pytest.raises(master_service.HTTPException) as error:
+            master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
+        assert error.value.status_code==422
+    for changes in [{"volume_step":None}, {"tick_value":"0"}, {"mode":"live"}, {"currency":"USD"},
+                    {"quote_timestamp":(datetime.now(timezone.utc)-timedelta(seconds=120)).isoformat()}]:
+        write_snapshot(**changes);q=json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        assert q["pepperstone_lot_estimate"]["state"]=="pending" and D(q["quantity"])>0
+        assert q["pepperstone_mt5_export_status"]["file_ready"] is True
+        text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
+        assert D(_parse_set_file(text)["RiskAUD_Max"]) == D(12)
+    assert master_service._pepperstone_risk_band(D("10.01"))==(D("9.01"),D("10.01"),D("12.01"))
+
     contexts = master_service._load_trade_contexts()
     assert any(row.get("planned_quantity_estimate") and row.get("original_target_distance") for row in contexts)
 

@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.49"
+#property version   "2.50"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -175,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.49";
+string EA_VERSION = "2.50";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -3365,6 +3365,8 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
    entries+=",\"freeze_level\":"+(freezeOk ? IntegerToString(freeze) : "null");
    entries+=",\"trade_tick_size\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_TRADE_TICK_SIZE),10);
    entries+=",\"minimum_lot\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_VOLUME_MIN),8);
+   entries+=",\"volume_step\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_VOLUME_STEP),8);
+   entries+=",\"maximum_lot\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_VOLUME_MAX),8);
    entries+=",\"tick_value\":"+DoubleToString(SymbolInfoDouble(mt5Symbol,SYMBOL_TRADE_TICK_VALUE),10);
    entries+=",\"quote_timestamp\":"+quoteStamp+"}";
    written++;
