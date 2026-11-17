@@ -6873,7 +6873,27 @@ def test_resync_publication_bound_rollback_and_newer_save(tmp_path,monkeypatch):
     try:
         with monkeypatch.context() as patch:
             patch.setattr(ms.os,'replace',replace)
+            evidence = []
+            original_evidence = ms._journal_publication_lock_evidence
+            def capture_evidence(*args, **kwargs):
+                result = original_evidence(*args, **kwargs)
+                evidence.append(result)
+                return result
+            patch.setattr(ms, '_journal_publication_lock_evidence', capture_evidence)
+            patch.setattr(ms, '_journal_resource_query_with_deadline',
+                lambda target, end: dict(path=str(target), attribution='reported_resource_users',
+                    owners=[dict(pid=os.getpid(), process_start_filetime=ms._journal_publisher_identity()['process_start_filetime'])]))
             denied=ms._publish_verified_journal(path,record,sync_id='fixture-win5',resumed=False)
+            assert len(evidence) == 1 and evidence[0]['winerror'] == 5
+            assert evidence[0]['proven_readers'] == []
+            source, destination = evidence[0]['queries']
+            assert source['role'] == 'source_candidate' and source['operand']['path'] == str(candidate)
+            assert not source['operand']['replace_access']['locked']
+            assert destination['role'] == 'canonical_destination'
+            assert destination['operand']['attributes'] & 1
+            assert destination['operand']['replace_access']['blocker'] == 'read_only_attribute'
+            assert destination['owners'][0]['publisher_identity_match']
+            assert source['operand']['parent']['path'] == str(path.parent)
         assert errors==[5] and denied['lock_status']['winerror']==5 and denied['blocked_operation']=='replace_candidate'
         assert denied['publication_outcome']['outcome']=='not_published' and record['phase']=='verified'
         for missing in ['source_identity','candidate_identity','recovery']:

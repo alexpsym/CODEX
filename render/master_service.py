@@ -2714,7 +2714,7 @@ def _workbook_access_failure_status(exc: BaseException, path: Path, *, stage: st
 
 
 def _log_master_journal_access_block(lock_status: Dict[str, object], *, sync_id: Optional[str], stage: str, operation: str, canonical: Optional[Path] = None, candidate: Optional[Path] = None, deadline: Optional[float] = None) -> None:
-    if stage == 'final_replace' and lock_status.get('winerror') in (32, 33) and os.name == 'nt':
+    if stage == 'final_replace' and lock_status.get('winerror') in (5, 32, 33) and os.name == 'nt':
         try:
             evidence = _journal_publication_lock_evidence(lock_status, canonical or _master_journal_path(),
                 candidate, sync_id=sync_id, operation=operation, deadline=deadline)
@@ -48446,7 +48446,25 @@ def _journal_publication_lock_evidence(status: Dict[str, object], canonical: Pat
     targets=[('source_candidate',candidate),('canonical_destination',canonical)] if ambiguous else [('canonical_destination',canonical)]
     queries=[]
     for role,path in targets:
+        # Observe each rename operand in this worker before rollback can
+        # change it. Successful DELETE access is evidence, not proof that a
+        # later rename will succeed or that a resource user owns a bad handle.
+        operand = dict(path=str(path), role=role)
+        try:
+            info = path.stat()
+            operand.update(identity=[info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns],
+                           attributes=getattr(info, 'st_file_attributes', None))
+            if time.monotonic() < end:
+                operand['replace_access'] = _journal_replace_preflight(path)
+            else:
+                operand['replace_access'] = dict(reason='diagnostic_deadline')
+            parent = path.parent.stat()
+            operand['parent'] = dict(path=str(path.parent), identity=[parent.st_dev, parent.st_ino],
+                                     attributes=getattr(parent, 'st_file_attributes', None))
+        except OSError as exc:
+            operand['error'] = dict(type=type(exc).__name__, winerror=getattr(exc, 'winerror', None))
         query=_journal_resource_query_with_deadline(path,end)
+        query=dict(query, operand=operand)
         users=[]
         for user in query.get('owners',[]):
             user=dict(user);user.pop('same_pid',None)
