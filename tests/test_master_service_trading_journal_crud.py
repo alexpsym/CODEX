@@ -9148,11 +9148,13 @@ def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeyp
     real_temp=master_service.tempfile.NamedTemporaryFile
     def fixture_temp(*a,**k):k.setdefault('dir',str(temp_state_paths));return real_temp(*a,**k)
     monkeypatch.setattr(master_service.tempfile,'NamedTemporaryFile',fixture_temp)
-    snapshot=sample_snapshot();prior={str(r['id']) for r in snapshot['items']}
+    snapshot=sample_snapshot();snapshot['items'].append(dict(snapshot['items'][0],id='ordinary-third',close_time='2026-03-01T00:00:00Z',open_time='2026-03-01T00:00:00Z'));snapshot['items'].sort(key=lambda r:r.get('close_time') or r.get('open_time') or '',reverse=True);prior={str(r['id']) for r in snapshot['items']}
     journal._counter_build(snapshot,path,publish_recommendation_assets=False)
+    authored=load_workbook(path);ws=authored.create_sheet('Authored fixture');ws['A1']='Keep manual content';ws['A1'].hyperlink='https://example.invalid/manual';ws.column_dimensions['A'].width=37;ws.freeze_panes='B2';authored.save(path);authored.close()
     part,sim=_simulation_cache_fixture(path,existing=True)
     journal._saved_journal_seed(path)
     master_service._set_trading_journal_rows(snapshot['items'])
+    with zipfile.ZipFile(path) as z:authored_part=journal._worksheet_ooxml_part_name(z,'Authored fixture');authored_xml=z.read(authored_part)
     csv=temp_state_paths/'synthetic.csv'
     header=_bybit_csv_grouped_three_trades().splitlines()[0]
     fills=[f'BTCUSDT,o{i},{side},Market,1,{price},{price},Trade,0,0,e{i},17/05/2026 22:{50+i:02d},1000' for i,(side,price) in enumerate([('Buy',100),('Sell',110),('Buy',120),('Sell',130)])]
@@ -9173,13 +9175,63 @@ def test_bybit_demo_import_preserves_cached_simulation(temp_state_paths, monkeyp
     def denied(*a,**k):raise AssertionError('external transport forbidden')
     import requests
     monkeypatch.setattr(requests.sessions.Session,'request',denied)
-    result=master_service._import_uploaded_trading_journal_file('bybit_demo.csv',csv.read_bytes(),account_mode='demo')
+    ms=master_service
+    import os, ctypes
+    from ctypes import wintypes as w
+    assert os.name=='nt','Requires actual Windows publication errors'
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True);kernel.GetFileAttributesW.argtypes=[w.LPCWSTR];kernel.GetFileAttributesW.restype=w.DWORD
+    kernel.SetFileAttributesW.argtypes=[w.LPCWSTR,w.DWORD];kernel.SetFileAttributesW.restype=w.BOOL
+    kernel.CreateFileW.argtypes=[w.LPCWSTR,w.DWORD,w.DWORD,w.LPVOID,w.DWORD,w.DWORD,w.HANDLE];kernel.CreateFileW.restype=w.HANDLE;kernel.CloseHandle.argtypes=[w.HANDLE]
+    original=path.read_bytes();original_mtime=path.stat().st_mtime_ns;attrs=kernel.GetFileAttributesW(str(path))
+    # Genuine incompatible handle still rejects before parser/upsert/writer.
+    h=kernel.CreateFileW(str(path),0x80000000,0,None,3,0x80,None);assert h not in (None,ctypes.c_void_p(-1).value)
+    try:
+        sharing=ms._import_uploaded_trading_journal_file('bybit_demo.csv',csv.read_bytes(),account_mode='demo')
+        assert sharing['lock_status']['winerror'] in (32,33) and sharing['code']=='WORKBOOK_IN_USE'
+    finally:assert kernel.CloseHandle(h)
+    assert not calls and path.read_bytes()==original and path.stat().st_mtime_ns==original_mtime
+    assert kernel.SetFileAttributesW(str(path),attrs|1)
+    try:
+        blocked=ms._import_uploaded_trading_journal_file('bybit_demo.csv',csv.read_bytes(),account_mode='demo')
+        assert blocked['code']=='WORKBOOK_ACCESS_DENIED' and blocked['blocked_stage']=='preflight'
+        assert blocked['blocked_operation']=='replace_preflight' and blocked['lock_status']['winerror']==5
+        assert path.name in blocked['message'] and blocked['rows_upserted']==0
+    finally:assert kernel.SetFileAttributesW(str(path),attrs)
+    assert not calls and path.read_bytes()==original and path.stat().st_mtime_ns==original_mtime
+    real_replace=ms.os.replace;late_errors=[];late={'enabled':True}
+    def late_readonly(source,destination):
+        if late['enabled'] and Path(source)==path.with_suffix('.update-candidate.tmp.xlsx') and Path(destination)==path:
+            assert not ms._check_master_journal_write_lock(path)['locked'],'ordinary write-open succeeded'
+            assert kernel.SetFileAttributesW(str(path),attrs|1)
+            try:return real_replace(source,destination)
+            except OSError as exc:late_errors.append(exc.winerror);raise
+        return real_replace(source,destination)
+    monkeypatch.setattr(ms.os,'replace',late_readonly)
+    try:failed=ms._import_uploaded_trading_journal_file('bybit_demo.csv',csv.read_bytes(),account_mode='demo')
+    finally:assert kernel.SetFileAttributesW(str(path),attrs)
+    assert late_errors==[5] and failed['code']=='WORKBOOK_ACCESS_DENIED',failed
+    assert failed['blocked_stage']=='final_replace' and failed['blocked_operation']=='replace_candidate'
+    assert failed['lock_status']['winerror']==5 and 'replace' in failed['message'].lower() and path.name in failed['message']
+    assert path.read_bytes()==original and path.stat().st_mtime_ns==original_mtime
+    assert expected.isdisjoint({str(r['id']) for r in ms._get_trading_journal_rows()})
+    pending=ms._read_pending_publication(path);assert pending['phase']=='import_rolled_back' and pending['import_state_restored']
+    assert ms._journal_replacement_outcome(path,pending)['outcome']=='not_published'
+    assert ms._reserve_master_journal_workbook_sync(path,'fixture-resume','resync') is None
+    try:
+        resumed=ms._publish_verified_journal(path,pending,sync_id='fixture-resume',resumed=True)
+        assert not resumed['ok'] and resumed['status_code']==409
+    finally:ms._release_master_journal_workbook_sync()
+    assert path.read_bytes()==original and path.stat().st_mtime_ns==original_mtime and late_errors==[5]
+    late['enabled']=False
+    result=ms._import_uploaded_trading_journal_file('bybit_demo.csv',csv.read_bytes(),account_mode='demo')
     assert result['ok'],result
-    assert calls,'real data-only writer must execute'
+    assert len(calls)==2,'one denied publication and one normal import use the real writer'
     source=journal.read_master_journal_source(path);ids=[str(r['id']) for r in source['items']]
     assert prior.issubset(ids)
     for identity in expected:assert ids.count(identity)==1
-    with zipfile.ZipFile(path) as z:assert z.read(part)==sim
+    with zipfile.ZipFile(path) as z:
+        assert z.read(part)==sim
+        assert z.read(authored_part)==authored_xml
     saved_xrp=next(r for r in source['items'] if r['id']==xrp['id'])
     assert saved_xrp['commission']==-1.07356627
     assert saved_xrp['commission'] != xrp['commission']

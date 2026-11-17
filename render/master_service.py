@@ -2670,6 +2670,37 @@ def _is_workbook_lock_exception(exc: BaseException) -> bool:
     return "sharing violation" in text or "being used by another process" in text
 
 
+def _journal_replace_preflight(path: Path, candidate: Optional[Path] = None) -> Dict[str, object]:
+    """Non-mutating capability checks; write access does not prove replace access.
+
+    Parent DELETE_CHILD is not required when each operand grants DELETE. Never
+    infer a blocker from the directory read-only attribute or that right alone.
+    """
+    if os.name != 'nt': return dict(locked=False, path=str(path))
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetFileAttributesW.argtypes=[ctypes.c_wchar_p];kernel.GetFileAttributesW.restype=ctypes.c_uint32
+    kernel.CreateFileW.argtypes=[ctypes.c_wchar_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_void_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_void_p]
+    kernel.CreateFileW.restype=ctypes.c_void_p;kernel.CloseHandle.argtypes=[ctypes.c_void_p];kernel.CloseHandle.restype=ctypes.c_int
+    targets=[(path,'destination'),(candidate,'candidate')] if candidate is not None else [(path,'destination')]
+    for target,role in targets:
+        if target is None or not target.exists(): continue
+        attributes=kernel.GetFileAttributesW(str(target))
+        if attributes == 0xffffffff:
+            error=ctypes.get_last_error()
+        elif attributes & 1:
+            return dict(locked=True,code='WORKBOOK_ACCESS_DENIED',reason='access_denied',winerror=5,path=str(target),
+                        stage='preflight',operation='replace_preflight',blocker='read_only_attribute',role=role)
+        else:
+            handle=kernel.CreateFileW(str(target),0x10000,7,None,3,0x80,None)
+            error=ctypes.get_last_error() if handle in (None,ctypes.c_void_p(-1).value) else 0
+            if not error and not kernel.CloseHandle(handle):error=ctypes.get_last_error()
+        if error:
+            return dict(locked=True,code='WORKBOOK_IN_USE' if error in (32,33) else 'WORKBOOK_ACCESS_DENIED' if error==5 else 'WORKBOOK_ACCESS_PROBE_FAILED',
+                        reason='sharing_violation' if error in (32,33) else 'access_denied' if error==5 else 'probe_failure',winerror=error,
+                        path=str(target),stage='preflight',operation='replace_preflight',blocker='delete_access',role=role)
+    return dict(locked=False,path=str(path))
+
+
 def _workbook_access_failure_status(exc: BaseException, path: Path, *, stage: str = "", operation: str = "") -> Optional[Dict[str, object]]:
     winerror = getattr(exc, "winerror", None)
     details = dict(path=str(getattr(exc, 'filename2', None) or getattr(exc, 'filename', None) or path),
@@ -2707,11 +2738,14 @@ def _excel_workbook_open_payload(*, message_prefix: str = "", status_code: int =
     reason = str(lock_status.get("reason") or "workbook_in_use")
     resource = str(lock_status.get('path') or '')
     workbook = str((extra or {}).get('master_journal_path') or _master_journal_path())
-    subject = 'Trading Journal.xlsx' if not resource or os.path.normcase(resource) == os.path.normcase(workbook) else 'An output file needed by the journal'
+    subject = Path(resource).name if resource else 'Trading Journal.xlsx'
     if reason == "access_denied":
         code = "WORKBOOK_ACCESS_DENIED"
         error = "workbook_access_denied"
-        message = f"{subject} could not be opened for update because access was denied. Review access before trying again."
+        operation = str((extra or {}).get('blocked_operation') or lock_status.get('operation') or '')
+        message = (f"Could not replace {subject}: access denied (Windows 5)." if operation=='replace_candidate'
+                   else f"Cannot publish {subject}: read-only file." if lock_status.get('blocker')=='read_only_attribute'
+                   else f"Cannot publish {subject}: access denied (Windows 5).")
     elif reason == "probe_failure":
         code = "WORKBOOK_ACCESS_PROBE_FAILED"
         error = "workbook_access_probe_failed"
@@ -43419,7 +43453,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         if validation_warnings: prepared_payload['master_journal_warnings'] = list(validation_warnings)
         record = dict(schema=1, canonical=str(path), candidate=str(tmp), candidate_sha256=_publication_file_hash(tmp),
             source_sha256=original_workbook_hash, source=_resync_source_fingerprint(path), phase='verified',
-            request_id=sync_id, created_at=_utc_now_iso(), validation=_json_safe(recommendation_preflight),
+            request_id=sync_id, origin_caller=sync_caller, created_at=_utc_now_iso(), validation=_json_safe(recommendation_preflight),
             snapshot=_json_safe(
                 dict(items=snapshot.get('items') or [],balances=snapshot.get('balances') or [],
                      publication_validation='saved_package_projection_v1')
@@ -44580,6 +44614,15 @@ def _import_uploaded_trading_journal_file(
                     "rows_parsed": 0, "rows_upserted": 0,
                     "errors": ["workbook_sync_in_progress"], "warnings": []}
         master_workbook_reserved = True
+        replace_status = _journal_replace_preflight(workbook_path_for_preflight, workbook_path_for_preflight.with_suffix('.update-candidate.tmp.xlsx'))
+        if replace_status.get('locked'):
+            return _excel_workbook_open_payload(extra=dict(uploaded_name=name,file_type=suffix,rows_parsed=0,rows_upserted=0,
+                warnings=[],lock_status=replace_status,blocked_stage='preflight',blocked_operation='replace_preflight'))
+        pending = _read_pending_publication(workbook_path_for_preflight)
+        if pending is not None and not _retire_stale_journal_publication(workbook_path_for_preflight,pending):
+            return dict(ok=False,status_code=409,code='PENDING_PUBLICATION_INVALID',rows_parsed=0,rows_upserted=0,
+                        message='Previous journal publication needs recovery; original and candidate preserved.',
+                        publication_outcome=_journal_replacement_outcome(workbook_path_for_preflight,pending))
         if workbook_path_for_preflight.exists():
             lock_status = _master_journal_lock_status(workbook_path_for_preflight)
             if lock_status.get("locked"):
@@ -46232,6 +46275,17 @@ def _import_uploaded_trading_journal_file(
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
             rollback_local_state_restored = not rollback_errors
+            try:
+                pending = _read_pending_publication(workbook_path)
+                if pending is not None and pending.get('origin_caller')=='manual_import' and pending.get('request_id')==(sync_result or {}).get('sync_id'):
+                    outcome=_journal_replacement_outcome(workbook_path,pending)
+                    pending['import_state_restored']=rollback_local_state_restored
+                    pending['replacement_outcome']=outcome
+                    pending['phase']='import_rolled_back' if rollback_local_state_restored and outcome.get('outcome')=='not_published' else 'recovery_conflict'
+                    _save_pending_publication(workbook_path,pending)
+            except Exception as recovery_error:
+                rollback_errors.append('Could not invalidate import candidate: '+str(recovery_error))
+                rollback_local_state_restored=False
             github_state_restored = bool(
                 not github_sync_started
                 or (
@@ -46255,7 +46309,7 @@ def _import_uploaded_trading_journal_file(
                 exception_access_status is not None
                 or (isinstance(sync_result, dict) and sync_result.get("code") in {"EXCEL_WORKBOOK_OPEN", "WORKBOOK_IN_USE", "WORKBOOK_ACCESS_DENIED", "WORKBOOK_ACCESS_PROBE_FAILED"})
             ):
-                access_status = exception_access_status or sync_access_status or {
+                access_status = sync_access_status or exception_access_status or {
                     "locked": True,
                     "reason": "workbook_in_use",
                 }
@@ -46269,6 +46323,10 @@ def _import_uploaded_trading_journal_file(
                     "import_timings": timings,
                     "master_journal_error": _master_journal_sync_error(sync_result) or msg,
                     "lock_status": access_status,
+                    "blocked_stage": (sync_result or {}).get('blocked_stage') or access_status.get('stage'),
+                    "blocked_operation": (sync_result or {}).get('blocked_operation') or access_status.get('operation'),
+                    "publication_phase": (sync_result or {}).get('publication_phase'),
+                    "publication_outcome": (sync_result or {}).get('publication_outcome'),
                     "diagnostics": (sync_result or {}).get("diagnostics") if isinstance(sync_result, dict) else None,
                     "rows_persisted": rollback_rows_persisted,
                     "balance_applied": bool(rollback_balance_verification.get("balance_applied")),
@@ -48557,13 +48615,70 @@ def _rollback_journal_publication(path: Path, record: Dict[str, object]) -> bool
     record['recovery_cleanup']=_finish_journal_publication_backups(path,record);_save_pending_publication(path,record)
     return True
 
+def _journal_replacement_outcome(path: Path, record: Dict[str, object]) -> Dict[str, object]:
+    """Conservative read-only reconciliation; never makes a candidate publishable."""
+    result=dict(outcome='unknown',reason='unproven_identity_or_hash')
+    try:
+        if record.get('schema')!=1 or record.get('canonical')!=str(path):return result
+        if not isinstance(record.get('source_identity'),list) or len(record['source_identity'])!=4:return result
+        if not isinstance(record.get('candidate_identity'),list) or len(record['candidate_identity'])!=2:return result
+        candidate=Path(record['candidate'])
+        if candidate not in {path.with_suffix('.tmp.xlsx'),path.with_suffix('.update-candidate.tmp.xlsx')}:return result
+        current=_publication_file_hash(path) if path.exists() else None
+        if current==record.get('candidate_sha256') and not candidate.exists():
+            stat=path.stat()
+            if record['candidate_identity']==[stat.st_dev,stat.st_ino]:return dict(outcome='published',reason='installed_candidate_identity_and_hash')
+            return result
+        if current!=record.get('source_sha256') or not candidate.exists():return dict(outcome='unknown',reason='newer_or_unowned_workbook')
+        stat=path.stat()
+        if record['source_identity']!=[stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns]:return result
+        stat=candidate.stat()
+        if record['candidate_identity']!=[stat.st_dev,stat.st_ino] or _publication_file_hash(candidate)!=record.get('candidate_sha256'):return result
+        recovery=record.get('recovery') or {}
+        if recovery.get('ready') is True:
+            if not isinstance(recovery.get('identity'),list) or len(recovery['identity'])!=2:return result
+            originals=recovery.get('originals')
+            if not isinstance(originals,list) or not originals:return result
+            if sum(i.get('path')==str(path) and i.get('sha256')==record.get('source_sha256') for i in originals)!=1:return result
+            root=_journal_recovery_root(path,record)
+            assets=path.parent/(path.stem+'.assets')/'recommendations'
+            for item in originals:
+                original=Path(item['path'])
+                if original!=path and (original.parent!=assets or original.suffix!='.html'):return result
+                if not re.fullmatch(r'[0-9]+\.backup',item['backup']):return result
+                backup=root/item['backup']
+                if _publication_file_hash(backup)!=item['sha256'] or _publication_file_hash(original)!=item['sha256']:return dict(outcome='unknown',reason='backup_or_sidecar_changed')
+                st=backup.stat()
+                if not item.get('backup_identity') or [st.st_dev,st.st_ino]!=item['backup_identity']:return result
+                actual=original.stat()
+                if [actual.st_dev,actual.st_ino,actual.st_size,actual.st_mtime_ns]!=[item['dev'],item['ino'],item['size'],item['mtime_ns']]:return result
+        elif not (record.get('phase') in ('verified','import_rolled_back') and (record.get('last_block') or {}).get('operation')=='exclusive_access_probe'):
+            return dict(outcome='unknown',reason='publication_backups_unproven')
+        return dict(outcome='not_published',reason='source_intact_candidate_present_and_pinned',backups_and_sidecars_verified=recovery.get('ready') is True)
+    except (OSError,KeyError,ValueError,RuntimeError,TypeError,AttributeError):return result
+
+
+
 def _retire_stale_journal_publication(path: Path, record: Dict[str, object]) -> bool:
     """Under the existing reservation, retire only pinned old transaction
     artifacts, never the current workbook or independently changed sidecars.
     """
     if not path.exists() or _publication_file_hash(path)==record['candidate_sha256']:return False
     problem=_pending_publication_problem(path,record)
-    if not ((record.get('phase')=='verified' and problem in ('source_workbook_changed','source_or_implementation_changed'))
+    if record.get('phase')=='recovery_conflict' and record.get('origin_caller')=='manual_import':return False
+    aborted=record.get('phase')=='import_rolled_back' and record.get('import_state_restored') is True
+    # Legacy replace_started is never resumed. A fresh explicit action may retire
+    # it only when all operands/backups are unchanged and added rows were rolled back.
+    legacy=False
+    if record.get('phase')=='replace_started' and (record.get('last_block') or {}).get('status',{}).get('winerror') in (5,32,33):
+        if _journal_replacement_outcome(path,record).get('outcome')=='not_published':
+            original_ids={str(r.get('id')) for r in read_master_journal_source(path).get('items',[]) if r.get('id')}
+            added={str(r.get('id')) for r in record.get('snapshot',{}).get('items',[]) if r.get('id')}-original_ids
+            durable={str(r.get('id')) for r in _get_trading_journal_rows() if r.get('id')}
+            legacy=bool(added) and not added.intersection(durable)
+    if aborted or legacy:
+        if _journal_replacement_outcome(path,record).get('outcome')!='not_published':return False
+    elif not ((record.get('phase')=='verified' and problem in ('source_workbook_changed','source_or_implementation_changed'))
             or record.get('phase')=='recovery_conflict'):return False
     candidate=Path(record['candidate'])
     if candidate not in {path.with_suffix('.tmp.xlsx'),path.with_suffix('.update-candidate.tmp.xlsx')}:return False
@@ -48610,6 +48725,7 @@ def _read_pending_publication(path: Path) -> Optional[Dict[str, object]]:
 def _pending_publication_problem(path: Path, record: Dict[str, object]) -> Optional[str]:
     if record.get('schema') != 1 or record.get('canonical') != str(path): return 'canonical_identity_changed'
     if record.get('phase') != 'verified': return 'prior_publication_outcome_requires_recovery'
+    if record.get('import_state_restored'): return 'import_transaction_rolled_back'
     if record.get('source') != _resync_source_fingerprint(path): return 'source_or_implementation_changed'
     if record.get('source_sha256') != (_publication_file_hash(path) if path.exists() else None): return 'source_workbook_changed'
     if record.get('source_identity'):
@@ -48627,8 +48743,9 @@ def _publish_verified_journal(path: Path, record: Dict[str, object], *, sync_id:
     """Called only while the established journal reservation is held."""
     from tools.master_journal_workbook import _publish_recommendation_chart_bundle
     problem = _pending_publication_problem(path, record)
+    if resumed and record.get('origin_caller')=='manual_import':problem='import_transaction_requires_upload'
     if problem:
-        return dict(ok=False, master_journal_ok=False, code='PENDING_PUBLICATION_INVALID', status_code=409, message='Prepared journal cannot be published: ' + problem + '. No rebuild was started.', pending_reason=problem, publication_only=resumed)
+        return dict(ok=False, master_journal_ok=False, code='PENDING_PUBLICATION_INVALID', status_code=409, message='Prepared journal cannot be published: ' + problem + '. No rebuild was started.', pending_reason=problem, publication_only=resumed, publication_outcome=_journal_replacement_outcome(path,record))
     if deadline is not None and time.monotonic() >= deadline: raise TimeoutError('Resync deadline before publication; verified candidate retained')
     candidate = Path(record['candidate'])
     status = _master_journal_lock_status(path)
@@ -48651,11 +48768,12 @@ def _publish_verified_journal(path: Path, record: Dict[str, object], *, sync_id:
             status = _workbook_access_failure_status(exc, path, stage='final_replace', operation='replace_candidate')
             if status is not None:
                 _log_master_journal_access_block(status, sync_id=sync_id, stage='final_replace', operation='replace_candidate', canonical=path, candidate=candidate, deadline=deadline)
-                if getattr(exc, 'winerror', None) in (32, 33) and candidate.exists() and _publication_file_hash(path) == record['source_sha256'] and _publication_file_hash(candidate) == record['candidate_sha256']:
+                record['replacement_outcome']=_journal_replacement_outcome(path,record)
+                if record['replacement_outcome'].get('outcome')=='not_published':
                     record['phase'] = 'verified'
                 record['last_block'] = dict(stage='final_replace', operation='replace_candidate', status=status, request_id=sync_id)
                 _save_pending_publication(path, record)
-                return _excel_workbook_open_payload(extra=dict(master_journal_ok=False, master_journal_path=str(path), lock_status=status, pending_publication=True, publication_phase=record['phase'], blocked_stage='final_replace', blocked_operation='replace_candidate'))
+                return _excel_workbook_open_payload(extra=dict(master_journal_ok=False, master_journal_path=str(path), lock_status=status, pending_publication=True, publication_phase=record['phase'], blocked_stage='final_replace', blocked_operation='replace_candidate',sync_id=sync_id,candidate_sha256=record['candidate_sha256'],publication_outcome=record.get('replacement_outcome')))
             raise
         record['phase'] = 'workbook_published'; _save_pending_publication(path, record)
         if _publication_file_hash(path) != record['candidate_sha256']: raise RuntimeError('Installed journal differs from verified candidate; preserve pending recovery')

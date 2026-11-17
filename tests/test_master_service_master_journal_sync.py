@@ -1,4 +1,5 @@
 import ast
+import os
 import importlib.util
 import asyncio
 import ctypes
@@ -6840,6 +6841,66 @@ def test_resync_publication_bound_rollback_and_newer_save(tmp_path,monkeypatch):
         else:
             book=load_workbook(path);assert book.active['A1'].value=='generated';book.close()
         assert not ms._fixture_external_attempts
+    monkeypatch.setattr(journal,'_publish_recommendation_chart_bundle',real_publish)
+    # Actual Windows rename denial after an ordinary write-open,then pinned recovery.
+    import ctypes
+    from ctypes import wintypes as w
+    assert os.name=='nt'
+    ms,path=_publication_fixture_service(monkeypatch,tmp_path/'win5',delivery=True)
+    monkeypatch.setattr(ms,'_fast_verify_trading_journal_workbook',lambda *a,**k:{'ok':True})
+    monkeypatch.setattr(ms,'_manual_save_set_known_fingerprint',lambda *a,**k:True)
+    monkeypatch.setattr(ms,'_save_resync_success_metadata',lambda *a,**k:True)
+    monkeypatch.setattr(ms,'_journal_transaction_lock_path',lambda _p:path.parent/'transaction.lock')
+    book=Workbook();book.active['A1']='source';book.save(path);book.close();original=path.read_bytes();mtime=path.stat().st_mtime_ns
+    candidate=path.with_suffix('.update-candidate.tmp.xlsx');book=load_workbook(path);book.active['A1']='candidate';book.save(candidate);book.close()
+    record=dict(schema=1,canonical=str(path),candidate=str(candidate),candidate_bytes=candidate.stat().st_size,source_sha256=ms._publication_file_hash(path),candidate_sha256=ms._publication_file_hash(candidate),
+                source=ms._resync_source_fingerprint(path),source_identity=[path.stat().st_dev,path.stat().st_ino,path.stat().st_size,path.stat().st_mtime_ns],candidate_identity=[candidate.stat().st_dev,candidate.stat().st_ino],phase='verified',snapshot={},payload={'master_journal_ok':True},validation={'ok':True},bundle={'files':{},'links':[]})
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True);kernel.GetFileAttributesW.argtypes=[w.LPCWSTR];kernel.GetFileAttributesW.restype=w.DWORD;kernel.SetFileAttributesW.argtypes=[w.LPCWSTR,w.DWORD];kernel.SetFileAttributesW.restype=w.BOOL
+    attrs=kernel.GetFileAttributesW(str(path))
+    assert not ms._check_master_journal_write_lock(path)['locked']
+    assert kernel.SetFileAttributesW(str(path),attrs|1)
+    try:assert ms._journal_replace_preflight(path,candidate)['blocker']=='read_only_attribute'
+    finally:assert kernel.SetFileAttributesW(str(path),attrs)
+    assert ms._reserve_master_journal_workbook_sync(path,'fixture-win5','resync') is None
+    actual=ms.os.replace;errors=[]
+    def replace(source,destination):
+        if Path(source)==candidate and Path(destination)==path:
+            assert not ms._check_master_journal_write_lock(path)['locked']
+            assert kernel.SetFileAttributesW(str(path),attrs|1)
+            try:return actual(source,destination)
+            except OSError as exc:errors.append(exc.winerror);raise
+        return actual(source,destination)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(ms.os,'replace',replace)
+            denied=ms._publish_verified_journal(path,record,sync_id='fixture-win5',resumed=False)
+        assert errors==[5] and denied['lock_status']['winerror']==5 and denied['blocked_operation']=='replace_candidate'
+        assert denied['publication_outcome']['outcome']=='not_published' and record['phase']=='verified'
+        for missing in ['source_identity','candidate_identity','recovery']:
+            incomplete=dict(record);incomplete.pop(missing);incomplete['phase']='replace_started'
+            assert ms._journal_replacement_outcome(path,incomplete)['outcome']=='unknown'
+
+        assert path.read_bytes()==original and path.stat().st_mtime_ns==mtime and candidate.exists()
+        for malformed in [dict(record['recovery'],identity=None),dict(record['recovery'],originals=[]),dict(record['recovery'],originals=record['recovery']['originals'][1:])]:
+            assert ms._journal_replacement_outcome(path,dict(record,recovery=malformed,phase='replace_started'))['outcome']=='unknown'
+
+        record['phase']='replace_started';ms._save_pending_publication(path,record)
+        unresolved=ms._publish_verified_journal(path,record,sync_id='legacy-resume',resumed=True)
+        assert not unresolved['ok'] and unresolved['publication_outcome']['outcome']=='not_published'
+        # A changed sidecar/backup cannot be classified as clean non-publication.
+        backup=Path(record['recovery']['root'])/record['recovery']['originals'][0]['backup'];saved=backup.read_bytes();backup.write_bytes(saved+b'changed')
+        assert ms._journal_replacement_outcome(path,record)['outcome']=='unknown';backup.write_bytes(saved)
+        # Restore identity pin after controlled backup replacement/truncation kept inode.
+        assert ms._journal_replacement_outcome(path,record)['outcome']=='not_published'
+        assert kernel.SetFileAttributesW(str(path),attrs)
+        record['phase']='verified';record['origin_caller']='manual_import';record['import_state_restored']=True
+        assert not ms._publish_verified_journal(path,record,sync_id='aborted',resumed=True)['ok']
+        record.pop('origin_caller');record.pop('import_state_restored')
+        assert ms._publish_verified_journal(path,record,sync_id='resync-clear',resumed=True)['ok']
+        assert ms._journal_replacement_outcome(path,record)['outcome']=='published'
+    finally:
+        kernel.SetFileAttributesW(str(path),attrs);ms._release_master_journal_workbook_sync()
+    assert not ms._fixture_external_attempts
 
 
 def test_excel_recovery_actual_resync_and_open_preserve_package(tmp_path,monkeypatch):
