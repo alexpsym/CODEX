@@ -30417,8 +30417,7 @@ def _pepperstone_risk_buffer_preflight(
     from fractions import Fraction
     if stop_points <= 0 or risk_target <= 0:
         raise ValueError("Pepperstone risk preflight requires positive stop points and risk target.")
-    risk_min = risk_target * Decimal("0.90")
-    risk_max = risk_target * Decimal("1.20")
+    risk_min, _, risk_max = _pepperstone_risk_band(risk_target)
     preferred_maximum = _pepperstone_default_risk_slippage_buffer_points()
     ratio = Fraction(risk_max-risk_min) / Fraction(risk_min)
     conservative_maximum = (stop_points * ratio.numerator) // ratio.denominator
@@ -30440,9 +30439,10 @@ def _pepperstone_risk_buffer_preflight(
 
 
 def _pepperstone_risk_band(risk_target):
-    # Match the cents actually serialized by the preset; preserve the 90/100/120% policy.
-    return tuple(Decimal(_pepperstone_set_decimal(v, places="0.01"))
-                 for v in (risk_target * Decimal("0.90"), risk_target, risk_target * Decimal("1.20")))
+    # Preserve the entered precision: neither sizing nor the preset may lower the floor.
+    target = risk_target
+    maximum = Decimal(_pepperstone_set_decimal(risk_target * Decimal("1.20"), places="0.01"))
+    return target, target, maximum
 
 
 def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk_target):
@@ -30478,8 +30478,7 @@ def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk
     ceil = lambda x: -((-x.numerator) // x.denominator)
     first, last = max(1, ceil(minimum / step)), floor(maximum / step)
     per_step = loss_per_lot * step
-    below = min(last, floor(target / per_step))
-    count = below if below >= first and per_step * below >= risk_min else max(first, ceil(risk_min / per_step))
+    count = max(first, ceil(target / per_step))
     decimal = lambda v: Decimal(v.numerator) / Decimal(v.denominator)
     result.update(risk_min_aud=_fmt_dec(decimal(risk_min)), risk_target_aud=_fmt_dec(decimal(target)),
                   risk_max_aud=_fmt_dec(decimal(risk_max)), volume_min=_fmt_dec(values[0]),
@@ -30490,6 +30489,7 @@ def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk
         return dict(result, state="no_fit", reason="No MT5 lot fits the exported AUD risk band.")
     lots, nominal = step * count, per_step * count
     assert minimum <= lots <= maximum and (lots / step).denominator == 1
+    assert nominal >= target and (count == first or per_step * (count - 1) < target)
     policy = _pepperstone_risk_buffer_preflight(stop_points=max(1, floor(distance / point)), risk_target=risk_target)
     distance_cap = floor(distance / point * (risk_max - risk_min) / risk_min)
     point_cost = lots * point / tick * tick_value
@@ -30670,8 +30670,8 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "UseDesktopTraderControls": _pepperstone_trader_set_bool(True),
         "TrendlineObjectName": "",
         "TrendlineArmGeneration": "0",
-        "RiskAUD_Target": _pepperstone_set_decimal(risk_target, places="0.01"),
-        "RiskAUD_Min": _pepperstone_set_decimal(risk_min, places="0.01"),
+        "RiskAUD_Target": _pepperstone_set_decimal(risk_target),
+        "RiskAUD_Min": _pepperstone_set_decimal(risk_min),
         "RiskAUD_Max": _pepperstone_set_decimal(risk_max, places="0.01"),
         "IncludeCommissionInRisk": _pepperstone_trader_set_bool(True),
         "CommissionPerLotPerSide": "0.00" if account_type == "standard" else _pepperstone_set_decimal(commission_rate, places="0.01"),

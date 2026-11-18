@@ -653,7 +653,7 @@
           rows.push(['Modeled stop loss (AUD)',Number(lot.nominal_loss_aud).toFixed(2)]);
           rows.push(['Modeled buffered loss (AUD)',Number(lot.buffered_loss_aud).toFixed(2)]);
           rows.push(['Automatic cushion (MT5 points)',String(lot.buffer_points)]);
-          rows.push(['Exported risk min / target / max (AUD)',`${lot.risk_min_aud} / ${lot.risk_target_aud} / ${lot.risk_max_aud}`]);
+          rows.push(['Nominal loss floor / target / cap (AUD)',`${lot.risk_min_aud} / ${lot.risk_target_aud} / ${lot.risk_max_aud}`]);
           rows.push(['Broker lot min / step / max',`${lot.volume_min} / ${lot.volume_step} / ${lot.volume_max}`]);
         }
         if(lot.source)rows.push(['Lot estimate source',`${lot.source}; ${lot.mt5_symbol}; ${lot.account_mode}; quote age ${lot.quote_age_seconds==null?'unknown':Number(lot.quote_age_seconds).toFixed(1)+'s'}`]);

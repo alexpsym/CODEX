@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.50"
+#property version   "2.51"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -47,7 +47,7 @@ input int    TraderControlWindowRefreshMs   = 250;
 // -------------------- Inputs (risk model) --------------------
 input group "Risk (account currency)"
 input double RiskAUD_Target           = 10.0;
-input double RiskAUD_Min              = 9.0;
+input double RiskAUD_Min              = 10.0;
 input double RiskAUD_Max              = 12.0;
 input bool   IncludeCommissionInRisk  = true;
 input double CommissionPerLotPerSide  = 3.50;
@@ -175,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.50";
+string EA_VERSION = "2.51";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -535,13 +535,15 @@ bool CalcBufferedRiskForVolume(const double stopPoints, const int bufferPoints,
 bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD,
                            double &outRiskBufferedAUD, int &outBufferPoints, string &why)
 {
-   double riskMin = RiskAUD_Min;
-   double riskMax = MathMax(RiskAUD_Max, riskMin);
-   double riskTarget = MathMax(RiskAUD_Target, riskMin);
+   // Legacy presets may say min 9 / target 10: target is still the nominal floor.
+   double riskMin = MathMax(RiskAUD_Min, RiskAUD_Target);
+   double riskMax = RiskAUD_Max;
+   double riskTarget = riskMin;
    why = "";
    outRiskBufferedAUD = 0.0;
    outBufferPoints = MathMax(0, RiskSlippageBufferPoints);
-   if(riskMin <= 0.0 || riskMax < riskMin)
+   if(!MathIsValidNumber(riskMin) || !MathIsValidNumber(riskMax) ||
+      !MathIsValidNumber(RiskAUD_Target) || RiskAUD_Target <= 0.0 || riskMin <= 0.0 || riskMax < riskMin)
    { why="RiskAUD_Min and RiskAUD_Max must define a positive risk band."; return false; }
 
    double stopPoints = MathAbs(entry - sl) / _Point;
@@ -557,41 +559,52 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    if(IncludeCommissionInRisk) riskPerLotSizing += commissionRTPerLot;
    if(riskPerLotSizing <= 0){ why="Total risk per lot invalid."; return false; }
 
-   double volRaw = riskTarget / riskPerLotSizing;
-   double vol = NormalizeVolume(volRaw);
-   if(vol <= 0){ why="Computed volume rounds to 0 (below broker min lot)."; return false; }
-
-   double riskSL = lossPerLotSL * vol;
-   double riskCommission = commissionRTPerLot * vol;
-   double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
-
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(step <= 0) step = 0.01;
-   int digits = (int)MathRound(-MathLog10(step));
-   if(digits < 0) digits = 2;
-
-   if(riskTotal > riskMax)
+   if(!MathIsValidNumber(step) || !MathIsValidNumber(vmin) || !MathIsValidNumber(vmax) ||
+      step <= 0.0 || vmin <= 0.0 || vmax < vmin)
+   { why="Invalid broker volume grid."; return false; }
+   // Whole step counts also support grids such as 0.25, unlike -log10(step).
+   int digits = 8;
+   double first = MathFloor(vmin / step);
+   if(NormalizeDouble(first * step, digits) < vmin) first += 1.0;
+   double last = MathCeil(vmax / step);
+   if(NormalizeDouble(last * step, digits) > vmax) last -= 1.0;
+   double count = MathMax(first, MathCeil(riskTarget / (riskPerLotSizing * step)));
+   double vol = NormalizeDouble(count * step, digits);
+   double riskSL = lossPerLotSL * vol;
+   double riskCommission = commissionRTPerLot * vol;
+   double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+   // Check unrounded modeled loss; division rounding must never admit a below-target lot.
+   if(riskTotal < riskMin)
    {
-      while(riskTotal > riskMax && vol - step >= vmin)
-      {
-         vol = NormalizeDouble(vol - step, digits);
-         riskSL = lossPerLotSL * vol;
-         riskCommission = commissionRTPerLot * vol;
-         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
-      }
+      count += 1.0;
+      vol = NormalizeDouble(count * step, digits);
+      riskSL = lossPerLotSL * vol;
+      riskCommission = commissionRTPerLot * vol;
+      riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
    }
-   else if(riskTotal < riskMin)
+   double previousVol = NormalizeDouble((count - 1.0) * step, digits);
+   double previousRisk = IncludeCommissionInRisk
+      ? (lossPerLotSL * previousVol + commissionRTPerLot * previousVol)
+      : (lossPerLotSL * previousVol);
+   if(count > first && previousVol >= vmin && previousRisk >= riskMin)
    {
-      while(riskTotal < riskMin && vol + step <= vmax)
-      {
-         vol = NormalizeDouble(vol + step, digits);
-         riskSL = lossPerLotSL * vol;
-         riskCommission = commissionRTPerLot * vol;
-         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
-      }
+      count -= 1.0;
+      vol = previousVol;
+      riskSL = lossPerLotSL * vol;
+      riskCommission = commissionRTPerLot * vol;
+      riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+      previousVol = NormalizeDouble((count - 1.0) * step, digits);
+      previousRisk = IncludeCommissionInRisk
+         ? (lossPerLotSL * previousVol + commissionRTPerLot * previousVol)
+         : (lossPerLotSL * previousVol);
    }
+   if(count < first || count > last || vol < vmin || vol > vmax ||
+      MathAbs(vol - count * step) > 1e-10 || riskTotal < riskMin || riskTotal > riskMax ||
+      (count > first && previousVol >= vmin && previousRisk >= riskMin))
+   { why="No broker lot fits the nominal target floor and RiskAUD_Max."; return false; }
 
    outVol = vol;
    outRiskRoundedAUD = riskTotal;
@@ -691,6 +704,8 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       }
    }
 
+   if(riskTotal < riskMin || riskTotal > riskMax || vol < vmin || vol > vmax)
+   { why="Final volume violates the nominal target floor or risk cap."; return false; }
    outBufferPoints = chosenBuffer;
 
    return true;

@@ -4732,12 +4732,15 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
     request = _pepperstone_quote_payload(symbol="USDJPY", side="buy", account="demo",
         pepperstone_account_type="standard", stop_loss_ticks="10", chart_tick_size="0.001",
         target_mode="rr", risk_reward="2", risk_mode="fixed_aud", risk_value="10")
-    for changes, lots, nominal in [({}, ".66", "9.90"),
+    for changes, lots, nominal in [({}, ".67", "10.05"),
             ({"minimum_lot":".1","volume_step":".1","tick_value":"3.5"}, ".3", "10.5"),
             ({"minimum_lot":".1","volume_step":".1","tick_value":"12"}, ".1", "12"),
-            ({"minimum_lot":".1","volume_step":".1","tick_value":"9"}, ".1", "9"),
-            ({"minimum_lot":".2","volume_step":".2"}, ".6", "9"),
-            ({"minimum_lot":".001","volume_step":".001"}, ".666", "9.99"),
+            ({"tick_value":"2"}, ".5", "10"),
+            ({"tick_value":"2.8"}, ".36", "10.08"),
+            ({"minimum_lot":".25","volume_step":".25"}, ".75", "11.25"),
+            ({"tick_value":"1.99999999999999999999"}, ".51", "10.199999999999999999949"),
+            ({"minimum_lot":".2","volume_step":".2"}, ".8", "12"),
+            ({"minimum_lot":".001","volume_step":".001"}, ".667", "10.005"),
             ({"minimum_lot":".7"}, ".7", "10.5")]:
         write_snapshot(**changes)
         q = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
@@ -4748,7 +4751,9 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
         assert D(q["estimated_total_loss_aud"]) == D(nominal) and D(q["estimated_commission_aud"]) == 0
         assert D(model["lots"]) % D(model["volume_step"]) == 0
         assert D(model["volume_min"]) <= D(model["lots"]) <= D(model["volume_max"])
-        assert D(9) <= D(nominal) <= D(model["buffered_loss_aud"]) <= D(12)
+        previous = D(model["lots"])-D(model["volume_step"])
+        assert previous < D(model["volume_min"]) or previous*D(model["loss_per_lot_aud"]) < D(10)
+        assert D(10) <= D(nominal) <= D(model["buffered_loss_aud"]) <= D(12)
         assert D(q["estimated_reward_aud"]) >= D(2)*max(D(10), D(model["buffered_loss_aud"]))
         r_base = max(D(10), D(model["buffered_loss_aud"]))
         assert abs(D(q["effective_rr_net"])-D(q["estimated_reward_aud"])/r_base) <= D(".01")
@@ -4756,7 +4761,7 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
         assert model["buffer_points"] <= int(D(model["conservative_buffer_cap_points"]))
         text, _ = master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
         preset = _parse_set_file(text)
-        assert tuple(D(preset[k]) for k in ("RiskAUD_Min","RiskAUD_Target","RiskAUD_Max")) == (D(9),D(10),D(12))
+        assert tuple(D(preset[k]) for k in ("RiskAUD_Min","RiskAUD_Target","RiskAUD_Max")) == (D(10),D(10),D(12))
         assert preset["AutoFitRiskSlippageBuffer"] == "true" and preset["SlippagePoints"] == "10"
         assert D(preset["CommissionPerLotPerSide"]) == 0 and D(preset["SL_PriceDistance"]) == D(".010")
         assert preset["AutoTP_NetRR_Enabled"] == "true" and D(preset["NetRR_Target"]) == 2
@@ -4770,7 +4775,9 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
         text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(manual_request,q))
         preset=_parse_set_file(text);assert D(preset["StandardLimitEntryPrice"])==D(limit_entry)
         assert preset["AutoTP_NetRR_Enabled"]=="false" and D(preset["TP_PriceDistance"])==D(".025")
-    for changes in [{"minimum_lot":".1","volume_step":".1","tick_value":"15"}, {"maximum_lot":".5"}, {"minimum_lot":"1"}]:
+    for changes in [{"minimum_lot":".1","volume_step":".1","tick_value":"15"},
+                    {"minimum_lot":".1","volume_step":".1","tick_value":"9"},
+                    {"maximum_lot":".66"}, {"maximum_lot":".5"}, {"minimum_lot":"1"}]:
         write_snapshot(**changes);q=json.loads(asyncio.run(master_service.calculator_quote(request)).body)
         assert q["pepperstone_lot_estimate"]["state"]=="no_fit" and D(q["quantity"])==0
         assert q["pepperstone_mt5_export_status"]["file_ready"] is False
@@ -4784,7 +4791,17 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
         assert q["pepperstone_mt5_export_status"]["file_ready"] is True
         text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
         assert D(_parse_set_file(text)["RiskAUD_Max"]) == D(12)
-    assert master_service._pepperstone_risk_band(D("10.01"))==(D("9.01"),D("10.01"),D("12.01"))
+    assert master_service._pepperstone_risk_band(D("10.01"))==(D("10.01"),D("10.01"),D("12.01"))
+    assert master_service._pepperstone_risk_band(D("10.001"))==(D("10.001"),D("10.001"),D("12"))
+    assert master_service._pepperstone_risk_buffer_preflight(stop_points=30,risk_target=D(10))["conservative_max_buffer_points"]==6
+    write_snapshot(minimum_lot=".001", volume_step=".001")
+    fractional_request=dict(request,risk_value="10.001")
+    fractional=json.loads(asyncio.run(master_service.calculator_quote(fractional_request)).body)
+    assert D(fractional["pepperstone_lot_estimate"]["nominal_loss_aud"])==D("10.005")
+    assert D(fractional["pepperstone_lot_estimate"]["lots"])==D(".667")
+    text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(fractional_request,fractional))
+    preset=_parse_set_file(text)
+    assert D(preset["RiskAUD_Min"])==D(preset["RiskAUD_Target"])==D("10.001")
 
     contexts = master_service._load_trade_contexts()
     assert any(row.get("planned_quantity_estimate") and row.get("original_target_distance") for row in contexts)

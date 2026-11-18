@@ -251,6 +251,40 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "riskRounded, riskBuffered" in trader
     assert "riskRoundedAUD, riskBufferedFinal" in backtest
 
+    # Arithmetic/source checks only; native orders are deliberately untested.
+    from fractions import Fraction as F
+    from math import ceil, floor
+    def select(per_lot, step, minimum=".01", maximum="100", old_min="9", target="10", cap="12"):
+        per_lot,step,minimum,maximum,old_min,target,cap=map(F,(per_lot,step,minimum,maximum,old_min,target,cap))
+        lower=max(old_min,target)
+        first=max(1,ceil(minimum/step));last=floor(maximum/step)
+        count=max(first,ceil(lower/(per_lot*step)))
+        lot=count*step;loss=lot*per_lot
+        if count>last or not lower<=loss<=cap:return None
+        assert count==first or (count-1)*step*per_lot<lower
+        return lot,loss
+    for per_lot,step,expected in [("15",".01",(".67","10.05")),("28",".01",(".36","10.08")),
+            ("20",".01",(".5","10")),("15",".25",(".75","11.25")),
+            ("19.99999999999999999999",".01",(".51","10.1999999999999999999949"))]:
+        assert select(per_lot,step)==tuple(map(F,expected))
+    assert select("15",".01",minimum=".7")==tuple(map(F,(".7","10.5")))
+    assert select("15",".01",maximum=".66") is None
+    assert select("90",".1") is None
+    assert select("15",".01",cap="9") is None  # upper cap never raised to the target
+    sizing=trader.split("bool ComputeVolumeFromRisk(",1)[1].split("bool InPosition()",1)[0]
+    assert 'RiskAUD_Min              = 10.0' in trader
+    assert 'MathMax(RiskAUD_Min, RiskAUD_Target)' in sizing
+    assert 'double riskMax = RiskAUD_Max;' in sizing
+    assert 'MathCeil(riskTarget / (riskPerLotSizing * step))' in sizing
+    assert 'previousRisk >= riskMin' in sizing and 'riskTotal < riskMin' in sizing
+    assert 'if(riskNext < riskMin) break;' in sizing
+    assert 'Final volume violates the nominal target floor or risk cap.' in sizing
+    assert 'riskPerLotSizing += commissionRTPerLot' in sizing
+    assert 'while(!portableAutoFit && riskWorst > riskMax' in sizing
+    assert 'CalcBufferedRiskForVolume' in sizing and 'candidateRisk <= riskMax' in sizing
+    assert 'MathLog10(step)' not in sizing
+    assert '#property version   "2.51"' in trader and 'EA_VERSION = "2.51"' in trader
+
 
 def test_trader_has_no_embedded_market_watch_spread_feed():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
