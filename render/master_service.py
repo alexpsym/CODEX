@@ -29955,6 +29955,7 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "TP_PriceDistance",
     "SL_DistancePoints",
     "AutoTP_NetRR_Enabled",
+    "AutoTP_SafetyPoints",
     "NetRR_Target",
     "TP_DistancePoints",
     "StandardLimitSide",
@@ -30499,7 +30500,7 @@ def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk
                 lots=_fmt_dec(decimal(lots)), lot_step_count=count, units=_fmt_dec(decimal(lots * 100000)),
                 nominal_loss_aud=_fmt_dec(decimal(nominal)), buffer_points=buffer,
                 conservative_buffer_cap_points=distance_cap, buffered_loss_aud=_fmt_dec(decimal(buffered)),
-                net_r_base_aud=_fmt_dec(decimal(max(target, buffered))))
+                net_r_base_aud=_fmt_dec(decimal(nominal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)))
 
 
 def _pepperstone_set_risk_target(payload: Dict[str, object]) -> Decimal:
@@ -30645,6 +30646,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
             raise HTTPException(status_code=400, detail="risk_reward must be greater than zero when target_mode=rr.") from exc
         if not rr.is_finite() or rr <= 0:
             raise HTTPException(status_code=400, detail="risk_reward must be greater than zero when target_mode=rr.")
+        target_price_distance = Decimal(str(quote_snapshot.get("target_price_distance") or "0"))
         if rr != Decimal(str(quote_snapshot.get("risk_reward"))):
             raise HTTPException(status_code=409, detail="Net R value no longer matches the calculated quote. Recalculate before downloading.")
     else:
@@ -30684,12 +30686,13 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "TP_PriceDistance": _pepperstone_set_decimal(target_price_distance),
         "SL_DistancePoints": "0",
         "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(target_mode == "rr"),
+        "AutoTP_SafetyPoints": "0",
         "TP_DistancePoints": "0",
         "MagicNumber": str(int(os.getenv("PEPPERSTONE_TRADER_MAGIC_NUMBER", "91001") or "91001")),
         "EnforceOneTradeAtATime": _pepperstone_trader_set_bool(True),
     }
     if target_mode == "rr":
-        values["NetRR_Target"] = _pepperstone_set_decimal(rr or Decimal("0"), places="0.01")
+        values["NetRR_Target"] = _pepperstone_set_decimal(rr or Decimal("0"))
     if order_type == "limit":
         values.update(
             {
@@ -32764,6 +32767,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             effective_rr_net = None
             fee_buffer_r = None
 
+            pepperstone_target_limitation = None
             standard_lot = _pepperstone_standard_lot_estimate(pepperstone_point_snapshot,
                 account=account, stop_distance=abs(entry-sl), risk_target=risk_val) if standard_fixed else None
             if standard_lot and standard_lot["state"] in ("ready", "no_fit"):
@@ -32810,25 +32814,35 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             else:
                 target_distance = (tp_ticks or Decimal("0")) * distance_tick_size
                 if target_mode == "rr" and rr_requested is not None:
-                    target_distance = (rr_requested * loss_per_unit_home + commission_per_unit_aud) / gain_factor
-                    if standard_lot and standard_lot["state"] == "ready":
-                        # AutoTP floors Net R against max(target, buffered risk), after lot selection.
-                        from fractions import Fraction as _F
-                        required = rr_requested * Decimal(standard_lot["net_r_base_aud"])
-                        point = Decimal(str(pepperstone_point_snapshot["point"]))
-                        trade_tick = Decimal(standard_lot["trade_tick_size"])
-                        target_distance = max(required / (gain_factor * units),
-                            Decimal(str(pepperstone_point_snapshot["distance_metadata"]["stops_level"])) * point)
-                        grid = point * (_F(trade_tick) / _F(point)).numerator
-                        ticks = _F(target_distance) / _F(grid)
-                        target_distance = Decimal(-((-ticks.numerator)//ticks.denominator)) * grid
+                    if is_pepperstone and units > 0:
+                        # Cash R uses the same AUD cents presented as nominal stop loss.
+                        nominal_cash = (loss_per_unit_home * units).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        required_cash = (nominal_cash * rr_requested).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        target_distance = (required_cash / units + commission_per_unit_aud) / gain_factor
+                    else:
+                        target_distance = (rr_requested * loss_per_unit_home + commission_per_unit_aud) / gain_factor
                     requested_rr_net = rr_requested
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+                if standard_lot and standard_lot["state"] == "ready" and target_mode == "rr":
+                    from fractions import Fraction as _F
+                    point = Decimal(str(pepperstone_point_snapshot["point"]))
+                    trade_tick = Decimal(standard_lot["trade_tick_size"])
+                    grid = point * (_F(trade_tick) / _F(point)).numerator
+                    # Nearest executable price, never a discretionary TP cushion.
+                    tp = (tp / grid).to_integral_value(rounding=ROUND_HALF_UP) * grid
+                    target_distance = abs(tp-entry)
+                    metadata = pepperstone_point_snapshot["distance_metadata"]
+                    minimum = max(Decimal(str(metadata["stops_level"])), Decimal(str(metadata["freeze_level"]))) * point
+                    if tp <= 0 or (tp <= entry if side == "buy" else tp >= entry) or target_distance < minimum:
+                        pepperstone_target_limitation = "Requested nominal Net R target violates the broker price/stop constraints."
                 reward_home = ((abs(tp - entry) - (Decimal("0") if is_pepperstone else spread_quote)) * gain_factor - commission_per_unit_aud) * units
                 if is_pepperstone:
-                    effective_rr_net = reward_home / (loss_per_unit_home * units) if units > 0 else Decimal("0")
-                    if standard_lot and standard_lot["state"] == "ready" and target_mode == "rr":
-                        effective_rr_net = reward_home / Decimal(standard_lot["net_r_base_aud"])
+                    if target_mode == "rr" and units > 0:
+                        if reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != required_cash:
+                            pepperstone_target_limitation = "Requested nominal Net R cash target is not representable on the MT5 price grid."
+                        effective_rr_net = reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) / nominal_cash if nominal_cash > 0 else Decimal("0")
+                    else:
+                        effective_rr_net = reward_home / (loss_per_unit_home * units) if units > 0 else Decimal("0")
                     fee_buffer_r = commission_per_unit_aud / loss_per_unit_home
                 else:
                     reward_home = max(Decimal("0"), reward_home)
@@ -32888,12 +32902,12 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "quantity": _fmt_dec(units),
                     "notional": _fmt_dec(units * entry),
                     "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_home)),
-                    "estimated_total_loss_aud": _fmt_dec(loss_per_unit_home * units),
-                    "estimated_reward_aud": _fmt_dec(reward_home),
+                    "estimated_total_loss_aud": _fmt_dec((loss_per_unit_home * units).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if is_pepperstone else loss_per_unit_home * units),
+                    "estimated_reward_aud": _fmt_dec(reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if is_pepperstone and target_mode == "rr" else reward_home),
                     "display_currency": account_home_ccy,
                     "estimated_fees_or_spread": _fmt_dec(max(Decimal("0"), spread_home)),
-                    "estimated_total_loss": _fmt_dec(loss_per_unit_home * units),
-                    "estimated_reward": _fmt_dec(reward_home),
+                    "estimated_total_loss": _fmt_dec((loss_per_unit_home * units).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if is_pepperstone else loss_per_unit_home * units),
+                    "estimated_reward": _fmt_dec(reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if is_pepperstone and target_mode == "rr" else reward_home),
                     "account_currency": account_home_ccy,
                     "risk_input_aud": _fmt_dec(risk_input_aud),
                     "risk_amount_home": _fmt_dec(risk_amount_home),
@@ -33022,6 +33036,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     preflight.update(planned_buffer_points=standard_lot["buffer_points"], modeled_lot_buffer=True,
                         conservative_max_buffer_points=standard_lot["conservative_buffer_cap_points"],
                         nominal_loss_aud=standard_lot["nominal_loss_aud"], buffered_loss_aud=standard_lot["buffered_loss_aud"])
+            if pepperstone_target_limitation:
+                response_payload["pepperstone_mt5_export_status"].update(ready=False, file_ready=False, broker_check_state="incompatible", code="PEPPERSTONE_NOMINAL_R_UNREPRESENTABLE", reason=pepperstone_target_limitation)
             calculation_context_id = (
                 str(payload.get("calculation_context_id") or "").strip()
                 or f"calcctx_{broker}_{account}_{uuid4().hex}"
@@ -33049,7 +33065,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "chart_tick_size_source": pepperstone_chart_tick_source,
                         "chart_tick_profile_id": pepperstone_chart_tick_profile,
                         "stop_price_distance": _fmt_dec(abs(entry - sl)),
-                        "target_price_distance": _fmt_dec(abs(tp - entry)) if target_mode == "ticks" else None,
+                        "target_price_distance": _fmt_dec(abs(tp - entry)),
                         "risk_buffer_preflight": response_payload.get("pepperstone_risk_buffer_preflight"),
                         "pepperstone_mt5_export_status": response_payload["pepperstone_mt5_export_status"],
                     }

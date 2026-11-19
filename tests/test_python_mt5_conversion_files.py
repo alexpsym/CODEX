@@ -235,12 +235,13 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "StandardMarketExecutionToken" not in desktop_market
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
     assert "EventSetTimer(1);" in trader
+    # Backtest retains its old policy; it is unchanged and out of scope.
+    assert "double rBase = MathMax(RiskAUD_Target, finalAllInRisk);" in backtest
+    assert "MathMax(riskRoundedAUD, riskBufferedAUD)" in backtest
+    assert "Final normalized TP cannot satisfy the minimum Net R target." in backtest
+    assert "adjustmentAttempts" in backtest
     for source in (trader, backtest):
-        assert "double rBase = MathMax(RiskAUD_Target, finalAllInRisk);" in source
-        assert "MathMax(riskRoundedAUD, riskBufferedAUD)" in source
         assert "OrderCalcProfit" in source
-        assert "Final normalized TP cannot satisfy the minimum Net R target." in source
-        assert "adjustmentAttempts" in source
         assert "riskWorst > riskMax" in source or "riskBuffered > riskMax" in source
         assert "RiskAUD_Max" in source
     assert "Worst-case buffered risk exceeds RiskAUD_Max." in trader
@@ -283,7 +284,54 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert 'while(!portableAutoFit && riskWorst > riskMax' in sizing
     assert 'CalcBufferedRiskForVolume' in sizing and 'candidateRisk <= riskMax' in sizing
     assert 'MathLog10(step)' not in sizing
-    assert '#property version   "2.51"' in trader and 'EA_VERSION = "2.51"' in trader
+    assert '#property version   "2.52"' in trader and 'EA_VERSION = "2.52"' in trader
+
+    auto=trader.split('bool ComputeAutoTP_NetRR(',1)[1].split('bool IsLimitPriceValid(',1)[0]
+    assert 'double nominalAllInRisk = riskRoundedAUD;' in auto
+    assert 'if(!IncludeCommissionInRisk) nominalAllInRisk += commissionRT;' in auto
+    assert 'MathMax(riskRoundedAUD, riskBufferedAUD)' not in auto and 'MathMax(RiskAUD_Target' not in auto
+    assert 'AutoTPAUDCents(nominalAllInRisk,rBaseCents,why)' in auto and 'rBaseCents*rrNumerator+rrDenominator/2' in auto
+    assert 'requiredNetProfit + commissionRT' in auto
+    assert 'if(AutoTP_SafetyPoints != 0)' in auto and 'pts += AutoTP_SafetyPoints' not in auto
+    assert 'netAtTPCents!=requiredNetCents' in auto
+    assert 'PriceLevelIsOnTradeGrid' in auto and 'BrokerMinimumDistancePoints' in auto
+    assert 'OrderCalcProfit' in auto and 'Final normalized TP cannot satisfy the nominal Net R cash target on broker grids.' in auto
+    from decimal import Decimal as D, ROUND_HALF_UP
+    money=lambda x:D(x).quantize(D('.01'),rounding=ROUND_HALF_UP)
+    def cash_target(nominal,buffered,commission,included,rr):
+        base=money(D(nominal)+(D(0) if included else D(commission)))
+        return base,money(base*D(rr)),money(base*D(rr))+D(commission)
+    assert cash_target('10.20','11.78','0',True,'2.5')==(D('10.20'),D('25.50'),D('25.50'))
+    assert cash_target('10.10','11.78','0',True,'2.5')[1]==D('25.25')
+    assert cash_target('10.204','12','0',True,'2.5')[1]==D('25.50')
+    assert cash_target('9.20','11','1',False,'2.5')==cash_target('10.20','12','1',True,'2.5')
+    assert cash_target('10.20','10.20','0',True,'2.5')==cash_target('10.20','12','0',True,'2.5')
+    assert D(30)*D('2.5')==75 # no88-tick cushion
+    assert 'AutoTPDecimalParts(NetRR_Target,rrNumerator,rrDenominator,why)' in auto and 'maxMoneyInteger-rrDenominator/2' in auto
+    def native_cent_product(cents,rr):
+        numerator,denominator=D(rr).as_integer_ratio()
+        return (cents*numerator+denominator//2)//denominator
+    assert native_cent_product(100,'1.005')==101 # binary100*1.005 is below100.5
+    assert native_cent_product(1020,'2.5')==2550
+    assert native_cent_product(1010,'2.5')==2525
+    money_helper=trader.split('bool AutoTPDecimalParts(',1)[1].split('bool ComputeAutoTP_NetRR(',1)[0]
+    assert 'precision<=17' in money_helper and 'StringToDouble(candidate)==value' in money_helper
+    assert 'numerator*100+denominator/2' in money_helper and 'MathRound' not in money_helper
+    assert 'maximum/10' in money_helper and 'maximum-denominator/2' in money_helper
+    # Python's shortest round-trip representation mirrors the native parser convention.
+    native_money=lambda value:money(str(float(value)))
+    assert native_money('10.075')==D('10.08')
+    assert native_money('10.07499999999999')==D('10.07')
+    assert native_money('0')==D('0') and native_money('1e-5')==D('0')
+    assert native_money('1e5')==D('100000.00')
+
+
+    assert 'double scale = 100000000.0;' in auto
+    assert 'NormalizeDouble(tradeTick, 8) != tradeTick' in auto and 'tradeTick*scale > 2147483647.0' in auto
+    from math import gcd
+    point_units,tick_units=100000,150000
+    assert D(point_units//gcd(point_units,tick_units)*tick_units)/D(100000000)==D('.003')
+
 
 
 def test_trader_has_no_embedded_market_watch_spread_feed():

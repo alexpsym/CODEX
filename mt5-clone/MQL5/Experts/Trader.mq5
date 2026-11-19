@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.51"
+#property version   "2.52"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -175,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.51";
+string EA_VERSION = "2.52";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -425,6 +425,62 @@ bool BuildTPManualFromDistance(double entry, bool isBuy, double &tpOut, string &
    return true;
 }
 
+// Canonical shortest round-trip decimal, then integer HALF_UP at money boundaries.
+// Native sizing/cap and executable prices retain their original full-precision doubles.
+bool AutoTPDecimalParts(const double value, long &numerator, long &denominator, string &why)
+{
+   const long maximum=9223372036854775807;
+   if(!MathIsValidNumber(value) || value<0.0)
+   { why="AutoTP decimal money must be finite and nonnegative."; return false; }
+   string text="";
+   for(int precision=1;precision<=17;precision++)
+   {
+      string candidate=StringFormat("%."+IntegerToString(precision)+"g",value);
+      if(StringToDouble(candidate)==value) { text=candidate; break; }
+   }
+   if(text=="") { why="AutoTP decimal representation unavailable."; return false; }
+   StringToLower(text);
+   int exponentAt=StringFind(text,"e"), exponent=0;
+   if(exponentAt>=0)
+   {
+      exponent=(int)StringToInteger(StringSubstr(text,exponentAt+1));
+      text=StringSubstr(text,0,exponentAt);
+   }
+   int decimalAt=StringFind(text,".");
+   int places=(decimalAt>=0 ? StringLen(text)-decimalAt-1 : 0)-exponent;
+   StringReplace(text,".","");
+   while(StringLen(text)>1 && StringSubstr(text,0,1)=="0") text=StringSubstr(text,1);
+   if(StringLen(text)>17) { why="AutoTP decimal numerator range unsupported."; return false; }
+   numerator=StringToInteger(text); denominator=1;
+   if(numerator<0) { why="AutoTP decimal numerator is invalid."; return false; }
+   if(numerator==0) return true;
+   while(places>0)
+   {
+      if(denominator>maximum/10) { why="AutoTP decimal precision unsupported."; return false; }
+      denominator*=10; places--;
+   }
+   while(places<0)
+   {
+      if(numerator>maximum/10) { why="AutoTP decimal range unsupported."; return false; }
+      numerator*=10; places++;
+   }
+   long a=numerator,b=denominator;
+   while(b!=0) { long remainder=a%b; a=b; b=remainder; }
+   numerator/=a; denominator/=a;
+   return true;
+}
+
+bool AutoTPAUDCents(const double value, long &cents, string &why)
+{
+   long numerator=0,denominator=1;
+   if(!AutoTPDecimalParts(value,numerator,denominator,why)) return false;
+   const long maximum=9223372036854775807;
+   if(numerator>(maximum-denominator/2)/100)
+   { why="AutoTP AUD-cent range unsupported."; return false; }
+   cents=(numerator*100+denominator/2)/denominator;
+   return true;
+}
+
 bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD, double riskBufferedAUD,
                          double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
 {
@@ -433,55 +489,64 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
 
    double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
 
-   double finalAllInRisk = MathMax(riskRoundedAUD, riskBufferedAUD);
-   if(!IncludeCommissionInRisk) finalAllInRisk += commissionRT;
-   double rBase = MathMax(RiskAUD_Target, finalAllInRisk);
-
-   double requiredNetProfit   = NetRR_Target * rBase;
+   // riskRoundedAUD is nominal loss for the final volume, not the buffered stress loss.
+   double nominalAllInRisk = riskRoundedAUD;
+   if(!IncludeCommissionInRisk) nominalAllInRisk += commissionRT;
+   long rBaseCents=0;
+   if(!AutoTPAUDCents(nominalAllInRisk,rBaseCents,why)) return false;
+   if(rBaseCents<=0) { why="Nominal AUD-cent risk is invalid for AutoTP."; return false; }
+   double rBase=(double)rBaseCents/100.0;
+   long rrNumerator=0,rrDenominator=1;
+   if(!AutoTPDecimalParts(NetRR_Target,rrNumerator,rrDenominator,why)) return false;
+   const long maxMoneyInteger=9223372036854775807;
+   if(rrNumerator<=0 || rBaseCents>(maxMoneyInteger-rrDenominator/2)/rrNumerator)
+   { why="Net R cash multiplication exceeds the supported exact integer range."; return false; }
+   long requiredNetCents=(rBaseCents*rrNumerator+rrDenominator/2)/rrDenominator;
+   double requiredNetProfit = (double)requiredNetCents / 100.0;
    double requiredGrossProfit = requiredNetProfit + commissionRT;
-
+   if(AutoTP_SafetyPoints != 0)
+   { why="Automatic TP padding is not supported for nominal Net R."; return false; }
    ENUM_ORDER_TYPE ot = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-
    double testPrice = isBuy ? (entry + _Point) : (entry - _Point);
    double p1 = 0.0;
    if(!OrderCalcProfit(ot, _Symbol, vol, entry, testPrice, p1))
    { why="OrderCalcProfit failed while estimating profit-per-point."; return false; }
-
    double profitPerPoint = MathAbs(p1);
-   if(profitPerPoint <= 0){ why="Profit-per-point is zero/invalid."; return false; }
-
-   int pts = (int)MathCeil(requiredGrossProfit / profitPerPoint);
-   if(pts < 1) pts = 1;
-   pts += AutoTP_SafetyPoints;
-
-   double tp = isBuy ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
-   tp = NormalizePrice(tp);
-
-   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   if(stopsLevel > 0 && MathAbs(entry - tp) < stopsLevel * _Point)
-   {
-      pts = stopsLevel + AutoTP_SafetyPoints;
-      tp  = isBuy ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
-      tp  = NormalizePrice(tp);
-   }
-
-   double grossAtTP = 0.0;
-   double netAtTP = 0.0;
-   int adjustmentAttempts = 0;
-   const int maxAdjustmentAttempts = 10000;
-   while(true)
-   {
-      if(!OrderCalcProfit(ot, _Symbol, vol, entry, tp, grossAtTP))
-      { why="OrderCalcProfit failed while validating final TP."; return false; }
-      netAtTP = grossAtTP - commissionRT;
-      if(netAtTP + 0.0000001 >= requiredNetProfit) break;
-      if(adjustmentAttempts++ >= maxAdjustmentAttempts)
-      { why="Final normalized TP cannot satisfy the minimum Net R target."; return false; }
-      pts++;
-      tp = isBuy ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
-      tp = NormalizePrice(tp);
-   }
-   effNetRR = (rBase > 0) ? (netAtTP / rBase) : 0.0;
+   if(!MathIsValidNumber(profitPerPoint) || profitPerPoint <= 0)
+   { why="Profit-per-point is zero/invalid."; return false; }
+   double rawDistance = requiredGrossProfit / profitPerPoint * _Point;
+   double tradeTick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   // Preserve fractional point/trade-tick ratios before normalizing final symbol digits.
+   double scale = 100000000.0;
+   if(!MathIsValidNumber(tradeTick) || tradeTick <= 0.0 || _Point <= 0.0 ||
+      NormalizeDouble(tradeTick, 8) != tradeTick || NormalizeDouble(_Point, 8) != _Point ||
+      tradeTick*scale > 2147483647.0 || _Point*scale > 2147483647.0)
+   { why="Broker price grid precision/range is unsupported for exact AutoTP."; return false; }
+   // Each factor fits signed32 bits, so their LCM product fits signed64 bits.
+   long pointUnits=(long)MathRound(_Point*scale), tickUnits=(long)MathRound(tradeTick*scale);
+   if(pointUnits <= 0 || tickUnits <= 0)
+   { why="Broker price grid unavailable for AutoTP."; return false; }
+   long a=pointUnits,b=tickUnits;
+   while(b!=0) { long remainder=a%b; a=b; b=remainder; }
+   double grid=(double)(pointUnits/a*tickUnits)/scale;
+   double rawTP=isBuy ? entry+rawDistance : entry-rawDistance;
+   double tp=NormalizePrice(MathRound(rawTP/grid)*grid);
+   double points=0.0;
+   long stopsLevel=0;
+   if(!PriceLevelIsOnTradeGrid(tp, why) || !BrokerMinimumDistancePoints(stopsLevel, why)) return false;
+   if((isBuy ? tp<=entry : tp>=entry) || !BrokerDistanceAtLeast(MathAbs(tp-entry), stopsLevel) ||
+      !DistanceUnitsAreWhole(MathAbs(tp-entry), _Point, points) || points>2147483647.0)
+   { why="Requested nominal Net R target violates broker price/stop constraints."; return false; }
+   int pts=(int)points;
+   double grossAtTP=0.0;
+   if(!OrderCalcProfit(ot, _Symbol, vol, entry, tp, grossAtTP))
+   { why="OrderCalcProfit failed while validating final TP."; return false; }
+   double netAtTP=grossAtTP-commissionRT;
+   long netAtTPCents=0;
+   if(!AutoTPAUDCents(netAtTP,netAtTPCents,why)) return false;
+   if(netAtTPCents!=requiredNetCents)
+   { why="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids."; return false; }
+   effNetRR=((double)requiredNetCents/100.0)/rBase;
 
    tpOut = tp;
    tpPointsOut = pts;

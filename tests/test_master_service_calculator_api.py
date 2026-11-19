@@ -4748,14 +4748,23 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
         assert model["state"] == "ready" and D(model["lots"]) == D(lots)
         assert D(q["quantity"]) == D(lots)*100000 and D(model["nominal_loss_aud"]) == D(nominal)
         assert D(q["entry_price"]) == D("159.552") and D(q["stop_loss_price_distance"]) == D(".010")
-        assert D(q["estimated_total_loss_aud"]) == D(nominal) and D(q["estimated_commission_aud"]) == 0
+        assert D(q["estimated_total_loss_aud"]) == D(nominal).quantize(D(".01"),rounding="ROUND_HALF_UP") and D(q["estimated_commission_aud"]) == 0
         assert D(model["lots"]) % D(model["volume_step"]) == 0
         assert D(model["volume_min"]) <= D(model["lots"]) <= D(model["volume_max"])
         previous = D(model["lots"])-D(model["volume_step"])
         assert previous < D(model["volume_min"]) or previous*D(model["loss_per_lot_aud"]) < D(10)
         assert D(10) <= D(nominal) <= D(model["buffered_loss_aud"]) <= D(12)
-        assert D(q["estimated_reward_aud"]) >= D(2)*max(D(10), D(model["buffered_loss_aud"]))
-        r_base = max(D(10), D(model["buffered_loss_aud"]))
+        r_base = D(q["estimated_total_loss_aud"])
+        actual_profit=abs(D(q["target_price"])-D(q["entry_price"]))/D(model["trade_tick_size"])*D(model["tick_value_aud"])*D(model["lots"])
+        assert actual_profit.quantize(D(".01"),rounding="ROUND_HALF_UP")==D(q["estimated_reward_aud"])
+        if D(nominal)==D("10.005"):
+            assert q["pepperstone_mt5_export_status"]["file_ready"] is False
+            assert "not representable" in q["pepperstone_mt5_export_status"]["reason"]
+            assert D(q["estimated_reward_aud"])!=r_base*2
+            with pytest.raises(master_service.HTTPException):
+                master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
+            continue
+        assert D(q["estimated_reward_aud"])==(r_base*2).quantize(D(".01"),rounding="ROUND_HALF_UP")
         assert abs(D(q["effective_rr_net"])-D(q["estimated_reward_aud"])/r_base) <= D(".01")
         assert D(q["spread_quote"]) == D(".001")
         assert model["buffer_points"] <= int(D(model["conservative_buffer_cap_points"]))
@@ -4795,7 +4804,7 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
     assert master_service._pepperstone_risk_band(D("10.001"))==(D("10.001"),D("10.001"),D("12"))
     assert master_service._pepperstone_risk_buffer_preflight(stop_points=30,risk_target=D(10))["conservative_max_buffer_points"]==6
     write_snapshot(minimum_lot=".001", volume_step=".001")
-    fractional_request=dict(request,risk_value="10.001")
+    fractional_request=dict(request,risk_value="10.001",target_mode="ticks",take_profit_ticks="25",risk_reward="inactive")
     fractional=json.loads(asyncio.run(master_service.calculator_quote(fractional_request)).body)
     assert D(fractional["pepperstone_lot_estimate"]["nominal_loss_aud"])==D("10.005")
     assert D(fractional["pepperstone_lot_estimate"]["lots"])==D(".667")
@@ -4803,8 +4812,50 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
     preset=_parse_set_file(text)
     assert D(preset["RiskAUD_Min"])==D(preset["RiskAUD_Target"])==D("10.001")
 
+    # Independently derive P&L from final executable price; cushion must not pad TP.
+    money=lambda value:D(value).quantize(D('.01'),rounding='ROUND_HALF_UP')
+    for side in ('buy','sell'):
+        for order in ('market','limit'):
+            results=[]
+            for preferred in ('0','50'):
+                monkeypatch.setenv('PEPPERSTONE_TRADER_RISK_SLIPPAGE_BUFFER_POINTS',preferred)
+                write_snapshot(bid='159.358',ask='159.359',tick_value='.34',minimum_lot='1',volume_step='1')
+                req=dict(request,side=side,order_type=order,stop_loss_ticks='30',risk_reward='2.5')
+                if order=='limit':req['entry_price']='159.350' if side=='buy' else '159.370'
+                result=json.loads(asyncio.run(master_service.calculator_quote(req)).body);model=result['pepperstone_lot_estimate']
+                assert D(result['estimated_total_loss_aud'])==D('10.20') and D(result['estimated_reward_aud'])==D('25.50')
+                assert D(model['nominal_loss_aud'])==D('10.20') and D(model['net_r_base_aud'])==D('10.20')
+                assert D(result['effective_rr_net'])==D('2.50')
+                actual=abs(D(result['target_price'])-D(result['entry_price']))/D(model['trade_tick_size'])*D(model['tick_value_aud'])*D(model['lots'])
+                assert actual==D('25.50')
+                assert abs(D(result['target_price'])-D(result['entry_price']))==D('.075')!=D('.088')
+                assert abs(D(result['stop_price'])-D(result['entry_price']))==D('.030')
+                if order=='limit':assert D(result['entry_price'])==D(req['entry_price'])
+                if preferred=='50':assert model['buffer_points']>0 and D(model['buffered_loss_aud'])>D(model['nominal_loss_aud'])
+                preset=_parse_set_file(master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(req,result))[0])
+                assert preset['AutoTP_NetRR_Enabled']=='true' and preset['AutoTP_SafetyPoints']=='0'
+                assert D(preset['NetRR_Target'])==D('2.5') and D(preset['TP_PriceDistance'])==D('.075') and D(preset['SL_PriceDistance'])==D('.030')
+                results.append((result['target_price'],result['estimated_reward_aud'],result['effective_rr_net']))
+            assert results[0]==results[1]
+    for point,tick_value,ready in [('0.000001','.0003401333333333333333333333333',True),('.001','.3401333333333333333333333333',False)]:
+        write_snapshot(point=point,trade_tick_size=point,bid='159.358',ask='159.359',tick_value=tick_value,minimum_lot='1',volume_step='1')
+        req=dict(request,stop_loss_ticks='30',risk_reward='2.5')
+        result=json.loads(asyncio.run(master_service.calculator_quote(req)).body);model=result['pepperstone_lot_estimate']
+        assert money(model['nominal_loss_aud'])==D('10.20') and money(D(model['nominal_loss_aud'])*D('2.5'))==D('25.51')
+        actual=abs(D(result['target_price'])-D(result['entry_price']))/D(point)*D(tick_value)*D(model['lots'])
+        assert money(actual)==D(result['estimated_reward_aud']) and D(result['target_price'])%D(point)==0
+        if ready:
+            assert D(result['estimated_reward_aud'])==D('25.50') and result['pepperstone_mt5_export_status']['file_ready'] is True
+            preset=_parse_set_file(master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(req,result))[0])
+            assert D(preset['TP_PriceDistance'])==abs(D(result['target_price'])-D(result['entry_price']))
+        else:
+            assert D(result['estimated_reward_aud'])!=D('25.50') and result['pepperstone_mt5_export_status']['file_ready'] is False
+            assert 'not representable' in result['pepperstone_mt5_export_status']['reason']
+            with pytest.raises(master_service.HTTPException):master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(req,result))
+
     contexts = master_service._load_trade_contexts()
     assert any(row.get("planned_quantity_estimate") and row.get("original_target_distance") for row in contexts)
+
 
 
 def test_arm_route_selected_revision_and_monitoring_view(tmp_path, monkeypatch):
