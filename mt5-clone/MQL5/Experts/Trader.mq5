@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.52"
+#property version   "2.53"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -175,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.52";
+string EA_VERSION = "2.53";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -486,6 +486,37 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
 {
    if(vol <= 0){ why="Invalid volume for AutoTP."; return false; }
    if(NetRR_Target <= 0){ why="NetRR_Target must be > 0."; return false; }
+
+   // Portable zero-commission Standard FX: price-valid SL distance x R is authoritative.
+   // OrderCalcProfit is a current account-currency estimate, never a price/cash equality gate.
+   long calculationMode=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_CALC_MODE);
+   bool standardFx=UsePriceDistanceInputs && CommissionPerLotPerSide==0.0 &&
+      (calculationMode==SYMBOL_CALC_MODE_FOREX || calculationMode==SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE);
+   if(standardFx)
+   {
+      if(!MathIsValidNumber(NetRR_Target) || AutoTP_SafetyPoints!=0)
+      { why="Invalid Standard FX Net R or nonzero TP cushion."; return false; }
+      double stopPoints=0.0,targetPoints=0.0;
+      if(!ValidatePriceDistance(SL_PriceDistance,stopPoints,why)) return false;
+      double distance=SL_PriceDistance*NetRR_Target;
+      if(!ValidatePriceDistance(distance,targetPoints,why)) return false;
+      double tp=NormalizePrice(isBuy ? entry+distance : entry-distance);
+      double tolerance=MathMax(_Point,SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE))*1e-7;
+      long minimum=0;
+      if(!PriceLevelIsOnTradeGrid(entry,why) || !PriceLevelIsOnTradeGrid(tp,why) ||
+         !BrokerMinimumDistancePoints(minimum,why)) return false;
+      if((isBuy ? tp<=entry : tp>=entry) || MathAbs(MathAbs(tp-entry)-distance)>tolerance ||
+         !BrokerDistanceAtLeast(MathAbs(tp-entry),minimum))
+      { why="Standard FX TP violates price direction, distance or broker stops/freeze rules."; return false; }
+      double grossEstimate=0.0;
+      bool valued=OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,_Symbol,vol,entry,tp,grossEstimate);
+      if(!MathIsValidNumber(grossEstimate)) valued=false;
+      effNetRR=(valued && MathIsValidNumber(grossEstimate) && riskRoundedAUD>0.0) ? grossEstimate/riskRoundedAUD : 0.0;
+      Print(EA_COMMENT,": Standard FX TP price=",DoubleToString(tp,_Digits),
+            " full-move account-currency estimate=",valued ? DoubleToString(grossEstimate,2) : "unavailable",
+            "; informational, no cash-equality veto or TP adjustment.");
+      tpOut=tp; tpPointsOut=(int)targetPoints; why=""; return true;
+   }
 
    double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
 

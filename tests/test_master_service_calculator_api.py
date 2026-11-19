@@ -4756,14 +4756,9 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
         assert D(10) <= D(nominal) <= D(model["buffered_loss_aud"]) <= D(12)
         r_base = D(q["estimated_total_loss_aud"])
         actual_profit=abs(D(q["target_price"])-D(q["entry_price"]))/D(model["trade_tick_size"])*D(model["tick_value_aud"])*D(model["lots"])
-        assert actual_profit.quantize(D(".01"),rounding="ROUND_HALF_UP")==D(q["estimated_reward_aud"])
-        if D(nominal)==D("10.005"):
-            assert q["pepperstone_mt5_export_status"]["file_ready"] is False
-            assert "not representable" in q["pepperstone_mt5_export_status"]["reason"]
-            assert D(q["estimated_reward_aud"])!=r_base*2
-            with pytest.raises(master_service.HTTPException):
-                master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,q))
-            continue
+        assert abs(actual_profit-D(model["target_valuation_aud"]))<D("1e-20")
+        assert q["pepperstone_mt5_export_status"]["file_ready"] is True
+        assert abs(D(q["target_price"])-D(q["entry_price"]))==D('.020')
         assert D(q["estimated_reward_aud"])==(r_base*2).quantize(D(".01"),rounding="ROUND_HALF_UP")
         assert abs(D(q["effective_rr_net"])-D(q["estimated_reward_aud"])/r_base) <= D(".01")
         assert D(q["spread_quote"]) == D(".001")
@@ -4837,24 +4832,22 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
                 assert D(preset['NetRR_Target'])==D('2.5') and D(preset['TP_PriceDistance'])==D('.075') and D(preset['SL_PriceDistance'])==D('.030')
                 results.append((result['target_price'],result['estimated_reward_aud'],result['effective_rr_net']))
             assert results[0]==results[1]
-    for point,tick_value,ready in [('0.000001','.0003401333333333333333333333333',True),('.001','.3401333333333333333333333333',False)]:
+    for point,tick_value in [('0.000001','.0003401333333333333333333333333'),('.001','.3401333333333333333333333333')]:
         write_snapshot(point=point,trade_tick_size=point,bid='159.358',ask='159.359',tick_value=tick_value,minimum_lot='1',volume_step='1')
         req=dict(request,stop_loss_ticks='30',risk_reward='2.5')
         result=json.loads(asyncio.run(master_service.calculator_quote(req)).body);model=result['pepperstone_lot_estimate']
         assert money(model['nominal_loss_aud'])==D('10.20') and money(D(model['nominal_loss_aud'])*D('2.5'))==D('25.51')
         actual=abs(D(result['target_price'])-D(result['entry_price']))/D(point)*D(tick_value)*D(model['lots'])
-        assert money(actual)==D(result['estimated_reward_aud']) and D(result['target_price'])%D(point)==0
-        if ready:
-            assert D(result['estimated_reward_aud'])==D('25.50') and result['pepperstone_mt5_export_status']['file_ready'] is True
-            preset=_parse_set_file(master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(req,result))[0])
-            assert D(preset['TP_PriceDistance'])==abs(D(result['target_price'])-D(result['entry_price']))
-        else:
-            assert D(result['estimated_reward_aud'])!=D('25.50') and result['pepperstone_mt5_export_status']['file_ready'] is False
-            assert 'not representable' in result['pepperstone_mt5_export_status']['reason']
-            with pytest.raises(master_service.HTTPException):master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(req,result))
+        assert abs(actual-D(model['target_valuation_aud']))<D('1e-20') and money(actual)==D('25.51')
+        assert D(result['target_price'])%D(point)==0
+        assert D(result['estimated_reward_aud'])==D('25.50') and result['pepperstone_mt5_export_status']['file_ready'] is True
+        assert abs(D(result['target_price'])-D(result['entry_price']))==D('.075')
+        preset=_parse_set_file(master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(req,result))[0])
+        assert D(preset['TP_PriceDistance'])==D('.075')
 
     contexts = master_service._load_trade_contexts()
     assert any(row.get("planned_quantity_estimate") and row.get("original_target_distance") for row in contexts)
+
 
 
 
@@ -5337,3 +5330,181 @@ def test_placeholder_metadata_canonical_submit_and_native_override(tmp_path,monk
             assert recovered['classification_overrides']['ema']=='20' and len(state['posts'])==2
         finally:await e.stop()
     _run_fixture_loop(run())
+
+
+def test_pepperstone_standard_limit_controls_preserve_ticket_prices(monkeypatch, tmp_path, pepperstone_account_fixture):
+    """Executed extracted MQL control flow in a C++ host; MT5 APIs/transport are doubles."""
+    import re
+    import subprocess
+    import os
+    from datetime import datetime, timezone
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setattr(master_service, '_upsert_calculator_trade_context', pepperstone_account_fixture)
+    stamp=datetime.now(timezone.utc).isoformat()
+    export=tmp_path/'ticket-export.json'
+    export.write_text(json.dumps(dict(version=1,broker='pepperstone',generated_at=stamp,
+        account=dict(mode='demo',currency='AUD'),symbols=[dict(symbol='USDJPY',mt5_symbol='USDJPY.a',point='.001',
+        trade_tick_size='.001',stops_level=0,freeze_level=0,bid='159.500',ask='159.501',available=True,
+        timestamp=stamp,quote_timestamp=stamp,minimum_lot='.01',volume_step='.01',maximum_lot='100',
+        tick_value='.937962962962962962962962963')])) )
+    monkeypatch.setenv('PEPPERSTONE_SPREAD_EXPORT_PATH',str(export))
+    request=_pepperstone_quote_payload(symbol='USDJPY',side='buy',account='demo',pepperstone_account_type='standard',
+        order_type='limit',entry_price='159.360',stop_loss_ticks='60',chart_tick_size='.001',target_mode='rr',risk_reward='2.5',risk_mode='fixed_aud',risk_value='10')
+    quote=json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+    assert Decimal(quote['quantity'])==18000 and Decimal(quote['estimated_total_loss_aud'])==Decimal('10.13')
+    assert Decimal(quote['estimated_reward_aud'])==Decimal('25.33')
+    assert (Decimal(quote['entry_price']),Decimal(quote['stop_price']),Decimal(quote['target_price']))==tuple(map(Decimal,('159.360','159.300','159.510')))
+    preset_text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,quote));preset=_parse_set_file(preset_text)
+    assert Decimal(preset['TP_PriceDistance'])==Decimal('.150') and preset['AutoTP_SafetyPoints']=='0'
+    assert preset['AutoTP_NetRR_Enabled']=='true' and Decimal(preset['NetRR_Target'])==Decimal('2.5')
+    (tmp_path/'ticket.set').write_text(preset_text)
+    source=(Path(__file__).resolve().parents[1]/'mt5-clone/MQL5/Experts/Trader.mq5').read_text(encoding='utf-8')
+    def extract(name):
+        match=re.search(r'\b(?:bool|void|double|string)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',source)
+        assert match,name
+        # Mask strings/comments for brace accounting, preserving source positions.
+        masked=re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',lambda m:' '*len(m.group()),source)
+        level=1;i=match.end()
+        while level:
+            level+=(masked[i]=='{')-(masked[i]=='}');i+=1
+        return source[match.start():i]
+    names=['NormalizePrice','NormalizeVolume','CalcRiskFor1Lot','CompactDistanceSymbol','DistanceSymbolMatchesChart',
+        'DistanceUnitsAreWhole','ValidatePriceDistance','PriceLevelIsOnTradeGrid','BrokerMinimumDistancePoints','BrokerDistanceAtLeast',
+        'BuildSLFromDistance','BuildTPManualFromDistance','AutoTPDecimalParts','AutoTPAUDCents','ComputeAutoTP_NetRR',
+        'IsLimitPriceValid','CalcBufferedRiskForVolume','ComputeVolumeFromRisk','ValidateVolumeForBroker',
+        'PlaceOrReplacePendingLimitAtEntry','ConsumeDesktopTraderCommand','SetDesktopResult','ExecuteDesktopPendingAtEntry',
+        'ExecuteDesktopLimit','HandleDesktopTraderCommand']
+    functions=[extract(name) for name in names]
+    def adapt(text):
+        for old,new in [('ulong','uint64_t'),('uint','uint32_t'),('ushort','uint16_t'),('datetime','int64_t'),('long','int64_t')]:
+            text=re.sub(r'\b'+old+r'\b',new,text)
+        return re.sub(r'\(string\)(\w+(?:\.\w+)*)',r'std::to_string(\1)',text)
+    header=r"""
+#include <string>
+#include <vector>
+#include <set>
+#include <cmath>
+#include <sstream>
+#include <iomanip>
+#include <cstdio>
+#include <cstdint>
+#include <algorithm>
+#include <iostream>
+#include <stdexcept>
+using string=std::string;
+using ENUM_ORDER_TYPE=int; using ENUM_ORDER_TYPE_TIME=int;
+const int ORDER_TYPE_BUY=0,ORDER_TYPE_SELL=1,ORDER_TIME_GTC=0,ORDER_TIME_SPECIFIED=1,STD_BUY_LIMIT=0,FILE_COMMON=1,INVALID_HANDLE=-1;
+const int SYMBOL_DIGITS=1,SYMBOL_TRADE_STOPS_LEVEL=2,SYMBOL_TRADE_FREEZE_LEVEL=3,SYMBOL_TRADE_TICK_SIZE=4,SYMBOL_TRADE_TICK_VALUE=5,
+ SYMBOL_VOLUME_MIN=6,SYMBOL_VOLUME_MAX=7,SYMBOL_VOLUME_STEP=8,SYMBOL_TRADE_CALC_MODE=9,SYMBOL_CALC_MODE_FOREX=0,SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE=1;
+string _Symbol="USDJPY.a",EA_COMMENT="offline",g_traderControlInstanceId="offline";int _Digits=3,TRADER_CONTROL_PROTOCOL_VERSION=1;
+double _Point=.001,volumeMax=100,minimumLot=.01,volumeStep=.01,tickValue=.93796296296296296;
+int64_t stopLevel=0,freezeLevel=0;bool readiness=true,busyPosition=false,persistence=true;
+int p1Calls=0,fullCalls=0;double pointValuation=.166,fullValuation=25.32;
+uint64_t g_ticket=0;int64_t g_armStartTime=0,g_expireAt=0;
+bool g_lastPendingFailureStructural=false,g_lastPendingAcceptanceMismatch=false,g_lastPendingBrokerAttempted=false;
+bool g_traderControlReady=true,g_portablePresetActionActivated=false;
+int PendingCancelAfterMinutes=0;
+struct MqlTick{double bid,ask;};
+struct DesktopTraderCommand{string commandId,action;};
+struct DesktopTraderResult{string commandId,action,outcome,reason;uint32_t retcode=0;uint64_t ticket=0;};
+DesktopTraderCommand incoming;DesktopTraderResult lastResult;std::set<string> markers;
+struct Request{double volume,entry,sl,tp;string symbol;};std::vector<Request> requests;
+struct FakeTrade{
+ bool BuyLimit(double volume,double entry,string symbol,double sl,double tp,int,int64_t,string){requests.push_back({volume,entry,sl,tp,symbol});return true;}
+ bool SellLimit(double,double,string,double,double,int,int64_t,string){throw std::runtime_error("unexpected sell");}
+ uint32_t ResultRetcode(){return 10009;}uint64_t ResultOrder(){return requests.empty()?0:100;}
+ string ResultRetcodeDescription(){return "offline accepted";}
+}trade;
+template<class A,class B> double MathMax(A a,B b){return std::max(double(a),double(b));}
+template<class A,class B> double MathMin(A a,B b){return std::min(double(a),double(b));}
+double MathAbs(double x){return std::abs(x);}double MathRound(double x){return std::round(x);}double MathFloor(double x){return std::floor(x);}
+double MathCeil(double x){return std::ceil(x);}double MathLog10(double x){return std::log10(x);}bool MathIsValidNumber(double x){return std::isfinite(x);}
+double NormalizeDouble(double x,int digits){double s=std::pow(10.,digits);return std::round(x*s)/s;}
+string IntegerToString(int64_t x){return std::to_string(x);}string DoubleToString(double x,int d){std::ostringstream s;s<<std::fixed<<std::setprecision(d)<<x;return s.str();}
+int StringLen(string s){return int(s.size());}string StringSubstr(string s,int p,int n=-1){return s.substr(p,n<0?string::npos:n);}
+int StringFind(string s,string v){auto p=s.find(v);return p==string::npos?-1:int(p);}
+int StringReplace(string &s,string from,string to){int n=0;size_t p=0;while((p=s.find(from,p))!=string::npos){s.replace(p,from.size(),to);p+=to.size();n++;}return n;}
+void StringToUpper(string&s){std::transform(s.begin(),s.end(),s.begin(),::toupper);}void StringToLower(string&s){std::transform(s.begin(),s.end(),s.begin(),::tolower);}
+void StringTrimLeft(string&s){s.erase(0,s.find_first_not_of(" \t\r\n"));}void StringTrimRight(string&s){s.erase(s.find_last_not_of(" \t\r\n")+1);}
+uint16_t StringGetCharacter(string s,int i){return (unsigned char)s.at(i);}double StringToDouble(string s){return std::stod(s);}int64_t StringToInteger(string s){return std::stoll(s);}
+template<class...A> string StringFormat(string fmt,A...args){char b[200];std::snprintf(b,sizeof b,fmt.c_str(),args...);return b;}
+template<class...A> void Print(A...args){}
+int64_t SymbolInfoInteger(string,int prop){if(prop==SYMBOL_DIGITS)return 3;if(prop==SYMBOL_TRADE_STOPS_LEVEL)return stopLevel;if(prop==SYMBOL_TRADE_FREEZE_LEVEL)return freezeLevel;return 0;}
+bool SymbolInfoInteger(string s,int prop,int64_t &out){out=SymbolInfoInteger(s,prop);return true;}
+double SymbolInfoDouble(string,int prop){if(prop==SYMBOL_TRADE_TICK_SIZE)return .001;if(prop==SYMBOL_TRADE_TICK_VALUE)return tickValue;
+ if(prop==SYMBOL_VOLUME_MIN)return minimumLot;if(prop==SYMBOL_VOLUME_MAX)return volumeMax;if(prop==SYMBOL_VOLUME_STEP)return volumeStep;
+ if(prop==102)return _Point;if(prop==100)return 159.501;if(prop==101)return 159.500;throw std::runtime_error("unknown property");}
+const int SYMBOL_ASK=100,SYMBOL_BID=101,SYMBOL_POINT=102;
+bool SymbolInfoTick(string,MqlTick&t){t={159.500,159.501};return true;}
+bool OrderCalcProfit(int,string,double volume,double entry,double target,double &out){
+ if(std::abs(std::abs(target-entry)-.001)<1e-8){p1Calls++;out=pointValuation;}
+ else {fullCalls++;if(std::abs(volume-.18)>1e-8||std::abs(entry-159.360)>1e-8||std::abs(target-159.510)>1e-8)throw std::runtime_error("wrong full valuation operands");out=fullValuation;}return true;}
+bool ValidateTradingReadiness(bool,string &why){why=readiness?"":"offline margin/readiness blocked";return readiness;}
+bool DesktopOneTradeBlock(string &why,uint64_t &ticket){why="offline position block";ticket=0;return busyPosition;}
+void ResetTrendlinePlacementMetadata(){}void CancelAllPendingByMagic(){}
+int64_t TimeCurrent(){return 1;}int64_t TimeGMT(){return 1;}int64_t ComputeExpireAt(){return 0;}
+const int TIME_DATE=1,TIME_SECONDS=2;string TimeToString(int64_t,int){return "offline";}
+bool IsTradePlacementAccepted(uint32_t code){return code==10009;}bool IsTransientPendingRetcode(uint32_t){return false;}
+bool IsDefinitePendingRejectionRetcode(uint32_t){return true;}
+bool IsPendingLimitTicketMatching(uint64_t ticket,bool,double entry,string){return ticket==100&&!requests.empty()&&std::abs(requests.back().entry-entry)<1e-8;}
+void FindMatchingPendingLimit(bool,double,string,uint64_t&t){t=requests.empty()?0:100;}
+bool AcquireDesktopCommandGate(int &gate,string&){gate=1;return true;}void FileClose(int){}
+string TraderControlConsumedFile(string id){return "offline/"+id;}bool FileIsExist(string path,int){return markers.count(path)>0;}
+bool WriteVerifiedCommonText(string path,string,string&why){if(!persistence){why="offline persistence failure";return false;}markers.insert(path);return true;}
+bool ReadDesktopTraderCommand(DesktopTraderCommand &out,string&){out=incoming;return true;}
+bool IsDesktopCommandIdValid(string id){return !id.empty();}bool IsDesktopActionAllowed(string action){return action=="limit";}
+bool WriteDesktopTraderResult(const DesktopTraderResult &r){lastResult=r;return true;}
+string ShortStableFingerprint(string s){return s;}
+void ExecuteDesktopMarket(string,DesktopTraderResult&){throw std::runtime_error("wrong action");}
+void ExecuteDesktopTrendline(DesktopTraderResult&){throw std::runtime_error("wrong action");}
+void ExecuteDesktopEmaBounce(DesktopTraderResult&){throw std::runtime_error("wrong action");}
+"""
+    numeric=['RiskAUD_Min','RiskAUD_Target','RiskAUD_Max','CommissionPerLotPerSide','RiskSlippageBufferPoints','SlippagePoints',
+        'NetRR_Target','AutoTP_SafetyPoints','SL_PriceDistance','TP_PriceDistance','SL_DistancePoints','TP_DistancePoints','StandardLimitSide','StandardLimitEntryPrice','MagicNumber']
+    booleans=['IncludeCommissionInRisk','AutoFitRiskSlippageBuffer','UsePriceDistanceInputs','AutoTP_NetRR_Enabled','OrdersEnabled','UseDesktopTraderControls']
+    config='\n'.join('double '+k+'='+preset.get(k,'0')+';' for k in numeric)+'\n'
+    config+='\n'.join('bool '+k+'='+preset[k]+';' for k in booleans)+'\nstring DistanceSymbol='+json.dumps(preset['DistanceSymbol'])+';\n'
+    definitions=[];prototypes=[]
+    for function in functions:
+        function=adapt(function);at=function.index('{');signature=function[:at].strip();prototypes.append(signature+';')
+        signature=re.sub(r'=\s*0\b','',signature);definitions.append(signature+'\n'+function[at:])
+    main=r"""
+void check(bool ok,const char*why){if(!ok)throw std::runtime_error(why);}
+const double fixtureEntry=StandardLimitEntryPrice,fixtureSL=SL_PriceDistance,fixtureR=NetRR_Target,fixtureCap=RiskAUD_Max;
+const string fixtureSymbol=DistanceSymbol;
+void reset(){requests.clear();g_ticket=0;p1Calls=fullCalls=0;readiness=persistence=true;busyPosition=false;stopLevel=freezeLevel=0;volumeMax=100;minimumLot=.01;StandardLimitEntryPrice=fixtureEntry;SL_PriceDistance=fixtureSL;NetRR_Target=fixtureR;DistanceSymbol=fixtureSymbol;RiskAUD_Max=fixtureCap;}
+void run(string id){incoming={id,"limit"};HandleDesktopTraderCommand();}
+int main(){try{
+ for(int scenario=0;scenario<2;scenario++){
+  reset();pointValuation=scenario==0?.166:.170;check(std::round(25.33/pointValuation)!=150,"bad fixture wrong-point estimate");
+  run("accept-"+std::to_string(scenario));check(lastResult.outcome=="accepted","limit blocked");check(requests.size()==1,"not exactly one request");
+  auto p=requests[0];check(p.symbol=="USDJPY.a"&&std::abs(p.volume-.18)<1e-8&&std::abs(p.entry-159.360)<1e-8&&std::abs(p.sl-159.300)<1e-8&&std::abs(p.tp-159.510)<1e-8,"wrong prepared ticket");
+  check(fullCalls==1&&p1Calls==0,"one-point chase or missing full valuation");
+  run("accept-"+std::to_string(scenario));check(requests.size()==1,"duplicate same command");
+  StandardLimitEntryPrice=159.600;g_ticket=0;run("wrong-side-"+std::to_string(scenario));check(lastResult.outcome=="blocked"&&requests.size()==1,"invalid entry sent");
+  StandardLimitEntryPrice=159.360;run("accept-"+std::to_string(scenario));check(lastResult.outcome=="blocked"&&requests.size()==1,"durable duplicate bypass");
+ }
+ for(int fault=0;fault<8;fault++){
+  reset();if(fault==0)DistanceSymbol="GBPUSD";if(fault==1)SL_PriceDistance=.0605;if(fault==2)NetRR_Target=2.505;if(fault==3)stopLevel=100;
+  if(fault==4)volumeMax=.17;if(fault==5)RiskAUD_Max=10.12;if(fault==6)readiness=false;if(fault==7)persistence=false;
+  run("fault-"+std::to_string(fault));check(lastResult.outcome=="blocked"&&requests.empty(),"protection bypass");
+ }
+ reset();busyPosition=true;run("position-busy");check(lastResult.outcome=="blocked"&&requests.empty(),"position block bypass");
+ std::cout<<"executed_extracted_production_controls: USDJPY.a buy_limit volume=0.18 entry=159.360 sl=159.300 tp=159.510 full_valuation=25.32 requested_estimate=25.33 p1_calls=0; duplicate/invalid/margin/readiness/persistence guards PASS\n";
+ return 0;}catch(const std::exception&e){std::cerr<<e.what()<<"\n";return 1;}}
+"""
+    cpp=tmp_path/'limit-host.cpp';exe=tmp_path/'limit-host.exe';obj=tmp_path/'limit-host.obj'
+    cpp.write_text(header+config+'\n'.join(prototypes)+'\n'+'\n'.join(definitions)+main)
+    exe.write_bytes(b'');obj.write_bytes(b'') # manifest precreation audit covers native outputs
+    vc=Path(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.43.34808')
+    sdk=Path(r'C:\Program Files (x86)\Windows Kits\10');version='10.0.22621.0'
+    cl=vc/'bin/Hostx64/x64/cl.exe';assert cl.is_file(),'Recorded offline host compiler unavailable'
+    env=dict(os.environ,PATH=str(cl.parent)+os.pathsep+os.environ.get('PATH',''))
+    args=[str(cl),'/nologo','/EHsc','/std:c++17','/W0','/MT','/I'+str(vc/'include'),'/I'+str(sdk/'Include'/version/'ucrt'),'/I'+str(sdk/'Include'/version/'um'),'/I'+str(sdk/'Include'/version/'shared'),str(cpp),'/Fo'+str(obj),'/Fe'+str(exe),'/link','/INCREMENTAL:NO','/MANIFEST:NO','/PDB:NONE','/LIBPATH:'+str(vc/'lib/x64'),'/LIBPATH:'+str(sdk/'Lib'/version/'ucrt/x64'),'/LIBPATH:'+str(sdk/'Lib'/version/'um/x64')]
+    built=subprocess.run(args,cwd=tmp_path,env=env,capture_output=True,text=True,timeout=60)
+    (tmp_path/'host-compile.log').write_text(built.stdout+built.stderr)
+    assert built.returncode==0,built.stdout+built.stderr
+    ran=subprocess.run([str(exe)],cwd=tmp_path,env=env,capture_output=True,text=True,timeout=30)
+    assert ran.returncode==0,ran.stdout+ran.stderr
+    assert 'entry=159.360 sl=159.300 tp=159.510' in ran.stdout
+    print(ran.stdout.strip())

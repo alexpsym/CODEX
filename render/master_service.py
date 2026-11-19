@@ -32828,17 +32828,23 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     point = Decimal(str(pepperstone_point_snapshot["point"]))
                     trade_tick = Decimal(standard_lot["trade_tick_size"])
                     grid = point * (_F(trade_tick) / _F(point)).numerator
-                    # Nearest executable price, never a discretionary TP cushion.
-                    tp = (tp / grid).to_integral_value(rounding=ROUND_HALF_UP) * grid
-                    target_distance = abs(tp-entry)
+                    # Standard zero-commission FX targets are price distances, not cash valuations.
+                    target_distance = abs(entry-sl) * rr_requested
+                    tp = entry + target_distance if side == "buy" else entry - target_distance
+                    if (_F(target_distance)/_F(grid)).denominator != 1 or (_F(tp)/_F(grid)).denominator != 1:
+                        pepperstone_target_limitation = "Requested Standard FX target is not on the broker price grid."
                     metadata = pepperstone_point_snapshot["distance_metadata"]
                     minimum = max(Decimal(str(metadata["stops_level"])), Decimal(str(metadata["freeze_level"]))) * point
                     if tp <= 0 or (tp <= entry if side == "buy" else tp >= entry) or target_distance < minimum:
                         pepperstone_target_limitation = "Requested nominal Net R target violates the broker price/stop constraints."
                 reward_home = ((abs(tp - entry) - (Decimal("0") if is_pepperstone else spread_quote)) * gain_factor - commission_per_unit_aud) * units
                 if is_pepperstone:
+                    if standard_lot and standard_lot["state"] == "ready" and target_mode == "rr":
+                        standard_lot["target_valuation_aud"] = _fmt_dec(reward_home)
+                        standard_lot["target_valuation_note"] = "Current account-currency estimate; it does not move or veto the price target."
+                        reward_home = required_cash
                     if target_mode == "rr" and units > 0:
-                        if reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != required_cash:
+                        if not (standard_lot and standard_lot["state"] == "ready") and reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != required_cash:
                             pepperstone_target_limitation = "Requested nominal Net R cash target is not representable on the MT5 price grid."
                         effective_rr_net = reward_home.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) / nominal_cash if nominal_cash > 0 else Decimal("0")
                     else:
