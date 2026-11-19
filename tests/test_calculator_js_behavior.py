@@ -1183,7 +1183,7 @@ def test_calculator_submits_without_pre_entry_classification():
 
 def _run_anchor_import_behavior(mode, timezone, saved_record=None):
     import os
-    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    node = r"C:\Program Files\nodejs\node.exe"
     harness = r'''
 const fs=require('fs'), vm=require('vm'), assert=require('assert');
 const source=fs.readFileSync(process.argv[1],'utf8');
@@ -1196,6 +1196,7 @@ class Button {
 class Element extends Button {
   constructor(id){super('');this.id=id;this.value='';this.style={};this.textContent='';this.checked=false;this.buttons=[];this.actions=[];this.children=[];}
   appendChild(node){this.children.push(node);return node;}
+  dispatchEvent(event){return this.listeners[event.type]?.(event);}
   set innerHTML(v){this.html=String(v);this.buttons=[...this.html.matchAll(/data-v="([^"]*)"/g)].map(m=>new Button(m[1]));this.actions=[...this.html.matchAll(/data-tl-action="([^"]*)" data-tl-id="([^"]*)"/g)].map(m=>new Button(m[2],m[1]));}
   get innerHTML(){return this.html||'';}
   querySelectorAll(s){return s==='button'?this.buttons:s==='[data-tl-action]'?this.actions:[];}
@@ -1245,6 +1246,11 @@ async function run(){
  const preview=text=>{el['trendline-import-text'].value=text;el['trendline-import-text'].listeners.input();};
  const fields=()=>['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price'].map(id=>el[id].value);
  const apply=()=>el['trendline-import-apply'].click();
+ const paste=text=>{
+  let prevented=0, reads=0;
+  el['trendline-import-text'].dispatchEvent({type:'paste',clipboardData:{getData:format=>{assert.equal(format,'text/plain');reads++;return text;}},preventDefault(){prevented++;}});
+  assert.equal(prevented,1);assert.equal(reads,1,'Read the paste event once; no asynchronous clipboard access');
+ };
  const edit=()=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction==='edit').click();
  const expectedLocal=ms=>{const d=new Date(ms),p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;};
  if(process.argv[2]==='deletion'){
@@ -1297,19 +1303,36 @@ async function run(){
   console.log('future coordinate extension roundtrip passed');return;
  }
  if(process.argv[2]==='roundtrip'){
-  const before=calls.length;const beforePreview=fields();preview('[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet));
-  assert.deepEqual(fields(),beforePreview);assert(el['trendline-import-preview'].textContent.includes('Preview successful'));assert(!el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC 2026-10-30T13:59:57.123Z'));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
+  const before=calls.length;
+  const writes={};for(const id of ['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price']){
+   let value=el[id].value;writes[id]=0;Object.defineProperty(el[id],'value',{get:()=>value,set:v=>{writes[id]++;value=v;}});
+  }
+  paste('Earlier plain log text\n[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet)+'\nLater plain log text');
+  assert(Object.values(writes).every(n=>n===1),'Exactly one assignment to each anchor on a successful paste');
+  assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('unsaved'));
+  assert(el['trendline-import-text'].value.includes('Later plain log text'));
+  const first=fields();packet.anchors=packet.anchors.map(a=>({...a,timestamp_ms:a.timestamp_ms,price:a.price+'0'}));
+  paste(JSON.stringify(packet));assert.notDeepEqual(fields(),first);assert(Object.values(writes).every(n=>n===2),'Second paste replaces the prior import without clearing first');
+  assert.equal(el['trendline-import-text'].value,JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC 2026-10-30T13:59:57.123Z'));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(Object.values(writes).every(n=>n===2));assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
   assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-anchor-2-time'].value,expectedLocal(packet.anchors[1].timestamp_ms));
   if(process.env.TZ==='Australia/Brisbane')assert(el['trendline-anchor-2-time'].value.startsWith('2026-10-31T00:00:01.987'));
   const preserved=()=>{assert.equal(el['calc-risk'].value,'2.5');assert.equal(el['calc-sl-ticks'].value,'50');assert.equal(el['calc-rr'].value,'3.25');assert.equal(el['calc-limit'].value,'99.25');assert.equal(el['trendline-trigger-mode'].value,'confirmed_cross');assert.equal(el['trendline-cross-direction'].value,'upward');assert.equal(el['trendline-price-basis'].value,'midpoint');assert.equal(el['trendline-tolerance-ticks'].value,'2');assert.equal(el['trendline-right-extension'].checked,false);};preserved();
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const initial=copy(plans[0]);await edit();preserved();assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
+  const editRequests=calls.length;packet.anchors=packet.anchors.map(a=>({...a,price:a.price+'1'}));
+  paste('[Info] LTT_ANCHORS_V1 '+JSON.stringify(packet));assert.equal(calls.length,editRequests);preserved();
+  assert.equal(el['trendline-save'].textContent,'Update draft');assert(el['trendline-import-preview'].textContent.includes('unsaved'));
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const patch=calls.find(c=>c.method==='PATCH').body;for(const k of ['risk_value','stop_loss_ticks','rr_target','limit_entry_price','trigger_mode','cross_direction','trigger_price_basis','tolerance_ticks','right_extension'])assert.deepEqual(patch[k],initial[k]);assert.equal(plans[0].plan_id,'anchor-draft');
   await freshContext(JSON.parse(process.argv[3]));
  }else{
-  preview(JSON.stringify(packet));apply();await el['trendline-save'].click();await edit();const original=fields();const before=calls.length;
-  const invalid=['', '{', JSON.stringify(packet)+JSON.stringify(packet), 'LTT_ANCHORS_V1 '+JSON.stringify(packet)+' LTT_ANCHORS_V1 '+JSON.stringify(packet), 'x'.repeat(8193)];
+  paste(JSON.stringify(packet));await el['trendline-save'].click();await edit();const original=fields();const before=calls.length;
+  const invalid=['', '{', JSON.stringify(packet)+JSON.stringify(packet), 'LTT_ANCHORS_V1 '+JSON.stringify(packet)+' LTT_ANCHORS_V1 '+JSON.stringify(packet), 'x'.repeat(8193), 'Before LTT_ANCHORS_V1 '+JSON.stringify(packet)+' trailing '+JSON.stringify(packet)];
   for(const mutate of [p=>delete p.schema,p=>p.schema='bad',p=>p.anchors.pop(),p=>p.anchors.push(p.anchors[0]),p=>p.anchors[1].timestamp_ms=p.anchors[0].timestamp_ms,p=>p.anchors.reverse(),p=>p.anchors[0].timestamp_ms=1.5,p=>p.anchors[0].timestamp_ms=8640000000000001,p=>p.anchors[0].timestamp_ms='123',p=>p.anchors[0].price='0',p=>p.anchors[0].price='NaN',p=>p.anchors[0].price=100,p=>p.symbol='BINANCE:BTCUSDT.P',p=>p.symbol='BYBIT:ETHUSDT.P',p=>p.timeframe='5']){const bad=copy(packet);mutate(bad);invalid.push(JSON.stringify(bad));}
-  for(const text of invalid){preview(text);assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('rejected'));apply();assert.deepEqual(fields(),original);assert.equal(calls.length,before);}
+  for(const text of invalid){paste(text);assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('rejected'));apply();assert.deepEqual(fields(),original);assert.equal(calls.length,before);}
+  const future=copy(packet);future.anchors[1].timestamp_ms=Date.now()+3600000+987;future.right_extension=true;
+  paste('LTT_ANCHORS_V1 '+JSON.stringify(future));assert.equal(el['trendline-right-extension'].checked,true);
+  assert(el['trendline-anchor-2-utc'].textContent.includes(new Date(future.anchors[1].timestamp_ms).toISOString()));
+  delete future.right_extension;paste(JSON.stringify(future));assert.equal(el['trendline-right-extension'].checked,true,'Absent extension preserves current setting');
+  future.right_extension=false;paste(JSON.stringify(future));assert.equal(el['trendline-right-extension'].checked,false);assert.equal(calls.length,before);
   // Manual edits and reset clear pending and applied provenance.
   preview(JSON.stringify(packet));el['trendline-anchor-1-price'].value='102';el['trendline-anchor-1-price'].listeners.input();assert(el['trendline-import-apply'].disabled);assert.equal(el['trendline-import-text'].value,'');assert(el['trendline-import-preview'].textContent.includes('Manual'));
   preview(JSON.stringify(packet));el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('context'));
@@ -1322,7 +1345,7 @@ async function run(){
 }
 
 async function freshContext(record){
- const el=Object.fromEntries(ids.map(id=>[id,new Element(id)])),calls=[];
+ const el=Object.fromEntries(ids.map(id=>[id,new Element(id)])),calls=[],dynamic=[];
  const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
  for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
  el['calc-symbol'].value='WRONGUSDT';el['calc-risk'].value='999';el['calc-sl-ticks'].value='888';el['calc-rr'].value='9';el['calc-limit'].value='777';
@@ -1343,7 +1366,7 @@ async function freshContext(record){
   }
   throw Error('Unexpected fresh context request '+url);
  };
- vm.runInNewContext(source,{document:{getElementById:id=>el[id]},fetch,confirm:()=>{throw Error('No confirmation');},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
+ vm.runInNewContext(source,{document:{getElementById:id=>el[id]||dynamic.find(node=>node.id===id),createElement:tag=>{const node=new Element('');dynamic.push(node);return node;}},fetch,confirm:()=>{throw Error('No confirmation');},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
  await flush();
  const saved=el['trendline-plan-list'].innerHTML;
  for(const text of ['Saved settings (server record)','EUR_USD','sell','15m','fixed_aud','17.25 AUD','91 / 3.5 R','downward','bid','UTC '+new Date(record.anchors[0].timestamp_ms).toISOString(),'Browser local','1.087654','Test mode: Yes','Saved &lt;swing&gt;','Not recorded'])assert(saved.includes(text),'Missing saved detail '+text);
@@ -1365,7 +1388,7 @@ async function freshContext(record){
 run().catch(e=>{console.error(e);process.exitCode=1;});
 
 '''
-    result = subprocess.run([node, '-e', harness, str(JS_PATH), mode, json.dumps(saved_record)], capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
+    result = subprocess.run([node, '-e', "eval(require('fs').readFileSync(0,'utf8'))", str(JS_PATH), mode, json.dumps(saved_record)], input=harness, capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
     if result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
 

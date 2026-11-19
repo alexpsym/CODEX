@@ -934,8 +934,19 @@
       let json=text;
       if(!text.startsWith('{')) {
         const marker='LTT_ANCHORS_V1'; const at=text.indexOf(marker);
-        if(at<0 || at!==text.lastIndexOf(marker) || /[{}]/.test(text.slice(0,at))) throw new Error('Paste one unambiguous LTT_ANCHORS_V1 message or raw JSON.');
-        json=text.slice(at+marker.length).trim();
+        if(at<0 || at!==text.lastIndexOf(marker)) throw new Error('Paste one unambiguous LTT_ANCHORS_V1 message or raw JSON.');
+        const tail=text.slice(at+marker.length).trimStart();
+        let depth=0, quoted=false, escaped=false, end=-1;
+        if(tail[0]!=='{') throw new Error('Export JSON must follow LTT_ANCHORS_V1.');
+        for(let i=0;i<tail.length;i++) {
+          const ch=tail[i];
+          if(quoted) { if(escaped) escaped=false; else if(ch==='\\') escaped=true; else if(ch==='"') quoted=false; }
+          else if(ch==='"') quoted=true;
+          else if(ch==='{') depth++;
+          else if(ch==='}' && --depth===0) { end=i+1; break; }
+        }
+        if(end<0 || /ltt-anchors\/v1/.test(text.slice(0,at)+tail.slice(end))) throw new Error('Paste one unambiguous LTT_ANCHORS_V1 message or raw JSON.');
+        json=tail.slice(0,end);
       }
       const packet=validateAnchorPacket(JSON.parse(json));
       anchorImport={packet,form:anchorFormIds.map(id=>$(id).value),extension:$('trendline-right-extension').checked};
@@ -956,8 +967,21 @@
       packet.anchors.forEach((a,i)=>{setAnchorTime(`trendline-anchor-${i+1}-time`,a.timestamp_ms);$(`trendline-anchor-${i+1}-price`).value=a.price;anchorEpoch(`trendline-anchor-${i+1}-time`,`trendline-anchor-${i+1}-utc`);});
       if(Object.prototype.hasOwnProperty.call(packet,'right_extension')) $('trendline-right-extension').checked=packet.right_extension;
       anchorImport=null;$('trendline-import-apply').disabled=true;
-      $('trendline-import-preview').textContent+='\nApplied successfully: both anchor times and prices are populated. Next: Save/Update draft explicitly.';
+      $('trendline-import-preview').textContent+='\nApplied successfully: both anchor times and prices are populated and unsaved. Next: Save/Update draft explicitly.';
     } catch(err) { clearAnchorImport('Import rejected: '+String(err.message||err)); }
+  }
+  function pasteAnchorImport(event) {
+    // Handle keyboard and context-menu paste synchronously: no clipboard permission or late callback.
+    if(!event.clipboardData) return;
+    event.preventDefault();
+    clearAnchorImportPreview();
+    if(state.trendlineMutationPending) {
+      $('trendline-import-preview').textContent='Import rejected: wait for the current draft request to finish, then paste again.';
+      return;
+    }
+    $('trendline-import-text').value=event.clipboardData.getData('text/plain');
+    previewAnchorImport();
+    applyAnchorImport();
   }
   function syncTrendlineTriggerControls() {
     const mode = $('trendline-trigger-mode'); const direction = $('trendline-cross-direction');
@@ -1238,6 +1262,7 @@
       if(id.endsWith('-time')) anchorEpoch(id,id.replace('-time','-utc'));
     }));
     $('trendline-import-text')?.addEventListener('input',previewAnchorImport);
+    $('trendline-import-text')?.addEventListener('paste',pasteAnchorImport);
     $('trendline-import-apply')?.addEventListener('click',applyAnchorImport);
     $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }
