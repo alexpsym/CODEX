@@ -4713,6 +4713,7 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
                     text, _ = master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request, manual))
                     preset = _parse_set_file(text)
                     assert D(preset["CommissionPerLotPerSide"]) == (D("3.50") if kind == "razor" else 0)
+                    assert preset["PresetAccountType"]==kind
                     assert preset["IncludeCommissionInRisk"] == "true" and preset["AutoTP_NetRR_Enabled"] == "false"
                     assert D(preset["SL_PriceDistance"]) == 10 * tick
                     assert D(preset["TP_PriceDistance"]) == tick
@@ -5356,28 +5357,36 @@ def test_pepperstone_standard_limit_controls_preserve_ticket_prices(monkeypatch,
     assert (Decimal(quote['entry_price']),Decimal(quote['stop_price']),Decimal(quote['target_price']))==tuple(map(Decimal,('159.360','159.300','159.510')))
     preset_text,_=master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request,quote));preset=_parse_set_file(preset_text)
     assert Decimal(preset['TP_PriceDistance'])==Decimal('.150') and preset['AutoTP_SafetyPoints']=='0'
+    assert preset['PresetAccountType']=='standard'
+    with pytest.raises(master_service.HTTPException) as forged:
+        master_service._build_pepperstone_trader_set(dict(_pepperstone_set_payload_from_quote(request,quote),PresetAccountType='razor'))
+    assert forged.value.status_code==400
     assert preset['AutoTP_NetRR_Enabled']=='true' and Decimal(preset['NetRR_Target'])==Decimal('2.5')
     (tmp_path/'ticket.set').write_text(preset_text)
     source=(Path(__file__).resolve().parents[1]/'mt5-clone/MQL5/Experts/Trader.mq5').read_text(encoding='utf-8')
-    def extract(name):
-        match=re.search(r'\b(?:bool|void|double|string)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',source)
+    def extract(name, text=source):
+        match=re.search(r'\b(?:bool|void|double|string)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',text)
         assert match,name
         # Mask strings/comments for brace accounting, preserving source positions.
-        masked=re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',lambda m:' '*len(m.group()),source)
+        masked=re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',lambda m:' '*len(m.group()),text)
         level=1;i=match.end()
         while level:
             level+=(masked[i]=='{')-(masked[i]=='}');i+=1
-        return source[match.start():i]
+        return text[match.start():i]
     names=['NormalizePrice','NormalizeVolume','CalcRiskFor1Lot','CompactDistanceSymbol','DistanceSymbolMatchesChart',
         'DistanceUnitsAreWhole','ValidatePriceDistance','PriceLevelIsOnTradeGrid','BrokerMinimumDistancePoints','BrokerDistanceAtLeast',
-        'BuildSLFromDistance','BuildTPManualFromDistance','AutoTPDecimalParts','AutoTPAUDCents','ComputeAutoTP_NetRR',
+        'BuildSLFromDistance','BuildTPManualFromDistance','IsPortableFXDistanceSymbol','ResolveStandardFXPreset','AutoTPDecimalParts','AutoTPAUDCents','ComputeAutoTP_NetRR',
         'IsLimitPriceValid','CalcBufferedRiskForVolume','ComputeVolumeFromRisk','ValidateVolumeForBroker',
         'PlaceOrReplacePendingLimitAtEntry','ConsumeDesktopTraderCommand','SetDesktopResult','ExecuteDesktopPendingAtEntry',
         'ExecuteDesktopLimit','HandleDesktopTraderCommand']
     functions=[extract(name) for name in names]
+    historical=subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show','5ffe30f0673d651bddc7164172af534afc4cf075:mt5-clone/MQL5/Experts/Trader.mq5'],cwd=Path(__file__).resolve().parents[1]).decode('utf-8-sig')
+    legacy=extract('ComputeAutoTP_NetRR',historical).replace('bool ComputeAutoTP_NetRR(', 'bool LegacyComputeAutoTP_NetRR(',1)
+    functions=[f.replace('bool ComputeAutoTP_NetRR(', 'bool CurrentComputeAutoTP_NetRR(',1) for f in functions]+[legacy]
     def adapt(text):
         for old,new in [('ulong','uint64_t'),('uint','uint32_t'),('ushort','uint16_t'),('datetime','int64_t'),('long','int64_t')]:
             text=re.sub(r'\b'+old+r'\b',new,text)
+        text=re.sub('why="([^"]*)"\\s*\\+\\s*\\(','why=string("\\1")+(',text)
         return re.sub(r'\(string\)(\w+(?:\.\w+)*)',r'std::to_string(\1)',text)
     header=r"""
 #include <string>
@@ -5395,10 +5404,11 @@ using string=std::string;
 using ENUM_ORDER_TYPE=int; using ENUM_ORDER_TYPE_TIME=int;
 const int ORDER_TYPE_BUY=0,ORDER_TYPE_SELL=1,ORDER_TIME_GTC=0,ORDER_TIME_SPECIFIED=1,STD_BUY_LIMIT=0,FILE_COMMON=1,INVALID_HANDLE=-1;
 const int SYMBOL_DIGITS=1,SYMBOL_TRADE_STOPS_LEVEL=2,SYMBOL_TRADE_FREEZE_LEVEL=3,SYMBOL_TRADE_TICK_SIZE=4,SYMBOL_TRADE_TICK_VALUE=5,
- SYMBOL_VOLUME_MIN=6,SYMBOL_VOLUME_MAX=7,SYMBOL_VOLUME_STEP=8,SYMBOL_TRADE_CALC_MODE=9,SYMBOL_CALC_MODE_FOREX=0,SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE=1;
+ SYMBOL_VOLUME_MIN=6,SYMBOL_VOLUME_MAX=7,SYMBOL_VOLUME_STEP=8,SYMBOL_TRADE_CALC_MODE=9,SYMBOL_CALC_MODE_FOREX=0,SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE=5,SYMBOL_CALC_MODE_CFD=3;
 string _Symbol="USDJPY.a",EA_COMMENT="offline",g_traderControlInstanceId="offline";int _Digits=3,TRADER_CONTROL_PROTOCOL_VERSION=1;
 double _Point=.001,volumeMax=100,minimumLot=.01,volumeStep=.01,tickValue=.93796296296296296;
 int64_t stopLevel=0,freezeLevel=0;bool readiness=true,busyPosition=false,persistence=true;
+bool replay253=false,razorControl=false;int64_t calculationMode=SYMBOL_CALC_MODE_CFD;
 int p1Calls=0,fullCalls=0;double pointValuation=.166,fullValuation=25.32;
 uint64_t g_ticket=0;int64_t g_armStartTime=0,g_expireAt=0;
 bool g_lastPendingFailureStructural=false,g_lastPendingAcceptanceMismatch=false,g_lastPendingBrokerAttempted=false;
@@ -5429,7 +5439,7 @@ void StringTrimLeft(string&s){s.erase(0,s.find_first_not_of(" \t\r\n"));}void St
 uint16_t StringGetCharacter(string s,int i){return (unsigned char)s.at(i);}double StringToDouble(string s){return std::stod(s);}int64_t StringToInteger(string s){return std::stoll(s);}
 template<class...A> string StringFormat(string fmt,A...args){char b[200];std::snprintf(b,sizeof b,fmt.c_str(),args...);return b;}
 template<class...A> void Print(A...args){}
-int64_t SymbolInfoInteger(string,int prop){if(prop==SYMBOL_DIGITS)return 3;if(prop==SYMBOL_TRADE_STOPS_LEVEL)return stopLevel;if(prop==SYMBOL_TRADE_FREEZE_LEVEL)return freezeLevel;return 0;}
+int64_t SymbolInfoInteger(string,int prop){if(prop==SYMBOL_DIGITS)return 3;if(prop==SYMBOL_TRADE_STOPS_LEVEL)return stopLevel;if(prop==SYMBOL_TRADE_FREEZE_LEVEL)return freezeLevel;if(prop==SYMBOL_TRADE_CALC_MODE)return calculationMode;throw std::runtime_error("unhandled integer symbol property");}
 bool SymbolInfoInteger(string s,int prop,int64_t &out){out=SymbolInfoInteger(s,prop);return true;}
 double SymbolInfoDouble(string,int prop){if(prop==SYMBOL_TRADE_TICK_SIZE)return .001;if(prop==SYMBOL_TRADE_TICK_VALUE)return tickValue;
  if(prop==SYMBOL_VOLUME_MIN)return minimumLot;if(prop==SYMBOL_VOLUME_MAX)return volumeMax;if(prop==SYMBOL_VOLUME_STEP)return volumeStep;
@@ -5438,7 +5448,7 @@ const int SYMBOL_ASK=100,SYMBOL_BID=101,SYMBOL_POINT=102;
 bool SymbolInfoTick(string,MqlTick&t){t={159.500,159.501};return true;}
 bool OrderCalcProfit(int,string,double volume,double entry,double target,double &out){
  if(std::abs(std::abs(target-entry)-.001)<1e-8){p1Calls++;out=pointValuation;}
- else {fullCalls++;if(std::abs(volume-.18)>1e-8||std::abs(entry-159.360)>1e-8||std::abs(target-159.510)>1e-8)throw std::runtime_error("wrong full valuation operands");out=fullValuation;}return true;}
+ else {fullCalls++;if(std::abs(volume-(razorControl?.16:.18))>1e-8||std::abs(entry-159.360)>1e-8||(!replay253&&!razorControl&&std::abs(target-159.510)>1e-8))throw std::runtime_error("wrong full valuation operands");out=fullValuation;}return true;}
 bool ValidateTradingReadiness(bool,string &why){why=readiness?"":"offline margin/readiness blocked";return readiness;}
 bool DesktopOneTradeBlock(string &why,uint64_t &ticket){why="offline position block";ticket=0;return busyPosition;}
 void ResetTrendlinePlacementMetadata(){}void CancelAllPendingByMagic(){}
@@ -5463,18 +5473,24 @@ void ExecuteDesktopEmaBounce(DesktopTraderResult&){throw std::runtime_error("wro
         'NetRR_Target','AutoTP_SafetyPoints','SL_PriceDistance','TP_PriceDistance','SL_DistancePoints','TP_DistancePoints','StandardLimitSide','StandardLimitEntryPrice','MagicNumber']
     booleans=['IncludeCommissionInRisk','AutoFitRiskSlippageBuffer','UsePriceDistanceInputs','AutoTP_NetRR_Enabled','OrdersEnabled','UseDesktopTraderControls']
     config='\n'.join('double '+k+'='+preset.get(k,'0')+';' for k in numeric)+'\n'
-    config+='\n'.join('bool '+k+'='+preset[k]+';' for k in booleans)+'\nstring DistanceSymbol='+json.dumps(preset['DistanceSymbol'])+';\n'
-    definitions=[];prototypes=[]
+    config+='\n'.join('bool '+k+'='+preset[k]+';' for k in booleans)+'\nstring DistanceSymbol='+json.dumps(preset['DistanceSymbol'])+';\nstring PresetAccountType='+json.dumps(preset['PresetAccountType'])+';\n'
+    definitions=[];prototypes=['bool ComputeAutoTP_NetRR(double,bool,double,double,double,double&,int&,double&,string&);']
     for function in functions:
         function=adapt(function);at=function.index('{');signature=function[:at].strip();prototypes.append(signature+';')
         signature=re.sub(r'=\s*0\b','',signature);definitions.append(signature+'\n'+function[at:])
     main=r"""
 void check(bool ok,const char*why){if(!ok)throw std::runtime_error(why);}
 const double fixtureEntry=StandardLimitEntryPrice,fixtureSL=SL_PriceDistance,fixtureR=NetRR_Target,fixtureCap=RiskAUD_Max;
-const string fixtureSymbol=DistanceSymbol;
-void reset(){requests.clear();g_ticket=0;p1Calls=fullCalls=0;readiness=persistence=true;busyPosition=false;stopLevel=freezeLevel=0;volumeMax=100;minimumLot=.01;StandardLimitEntryPrice=fixtureEntry;SL_PriceDistance=fixtureSL;NetRR_Target=fixtureR;DistanceSymbol=fixtureSymbol;RiskAUD_Max=fixtureCap;}
+const string fixtureSymbol=DistanceSymbol,fixturePricing=PresetAccountType;
+void reset(){replay253=razorControl=false;calculationMode=SYMBOL_CALC_MODE_CFD;PresetAccountType=fixturePricing;UsePriceDistanceInputs=true;CommissionPerLotPerSide=0;requests.clear();g_ticket=0;p1Calls=fullCalls=0;readiness=persistence=true;busyPosition=false;stopLevel=freezeLevel=0;volumeMax=100;minimumLot=.01;StandardLimitEntryPrice=fixtureEntry;SL_PriceDistance=fixtureSL;NetRR_Target=fixtureR;DistanceSymbol=fixtureSymbol;RiskAUD_Max=fixtureCap;}
 void run(string id){incoming={id,"limit"};HandleDesktopTraderCommand();}
 int main(){try{
+ bool unhandledFailed=false;try{SymbolInfoInteger(_Symbol,999999);}catch(const std::exception&){unhandledFailed=true;}check(unhandledFailed,"unhandled property defaulted");
+ reset();PresetAccountType="";replay253=true;run("old253-cfd");
+ check(lastResult.outcome=="blocked"&&requests.empty(),"old2.53 unexpectedly sent");
+ check(lastResult.reason=="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids.","old-case was not the actual Trader cash rejection");
+ check(p1Calls==1&&fullCalls==1,"old-case did not execute cash valuation check");
+ reset();PresetAccountType="";run("fixed-identical-legacy-cfd");check(lastResult.outcome=="accepted"&&requests.size()==1,"identical legacy CFD preset not fixed");
  for(int scenario=0;scenario<2;scenario++){
   reset();pointValuation=scenario==0?.166:.170;check(std::round(25.33/pointValuation)!=150,"bad fixture wrong-point estimate");
   run("accept-"+std::to_string(scenario));check(lastResult.outcome=="accepted","limit blocked");check(requests.size()==1,"not exactly one request");
@@ -5484,17 +5500,22 @@ int main(){try{
   StandardLimitEntryPrice=159.600;g_ticket=0;run("wrong-side-"+std::to_string(scenario));check(lastResult.outcome=="blocked"&&requests.size()==1,"invalid entry sent");
   StandardLimitEntryPrice=159.360;run("accept-"+std::to_string(scenario));check(lastResult.outcome=="blocked"&&requests.size()==1,"durable duplicate bypass");
  }
- for(int fault=0;fault<8;fault++){
+ for(int fault=0;fault<11;fault++){
   reset();if(fault==0)DistanceSymbol="GBPUSD";if(fault==1)SL_PriceDistance=.0605;if(fault==2)NetRR_Target=2.505;if(fault==3)stopLevel=100;
-  if(fault==4)volumeMax=.17;if(fault==5)RiskAUD_Max=10.12;if(fault==6)readiness=false;if(fault==7)persistence=false;
+  if(fault==4)volumeMax=.17;if(fault==5)RiskAUD_Max=10.12;if(fault==6)readiness=false;if(fault==7)persistence=false;if(fault==8)UsePriceDistanceInputs=false;if(fault==9)CommissionPerLotPerSide=3.5;if(fault==10)PresetAccountType="unknown";
   run("fault-"+std::to_string(fault));check(lastResult.outcome=="blocked"&&requests.empty(),"protection bypass");
+  if(fault==8||fault==9)check(lastResult.reason.find("Conflicting Standard FX preset")!=string::npos,"contradictory fields not reported");
  }
+ reset();PresetAccountType="razor";CommissionPerLotPerSide=3.5;razorControl=true;run("razor-control");
+ check(lastResult.outcome=="blocked"&&requests.empty()&&p1Calls==1&&fullCalls==1,"Razor commission path was bypassed");
+ check(lastResult.reason=="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids.","Razor outcome not from original cash path");
  reset();busyPosition=true;run("position-busy");check(lastResult.outcome=="blocked"&&requests.empty(),"position block bypass");
- std::cout<<"executed_extracted_production_controls: USDJPY.a buy_limit volume=0.18 entry=159.360 sl=159.300 tp=159.510 full_valuation=25.32 requested_estimate=25.33 p1_calls=0; duplicate/invalid/margin/readiness/persistence guards PASS\n";
+ std::cout<<"old253_cash_rejection_reproduced; fixed_legacy_and_identified_CFD; razor_control_retained; executed_extracted_production_controls: USDJPY.a buy_limit volume=0.18 entry=159.360 sl=159.300 tp=159.510 full_valuation=25.32 requested_estimate=25.33 p1_calls=0; duplicate/invalid/margin/readiness/persistence guards PASS\n";
  return 0;}catch(const std::exception&e){std::cerr<<e.what()<<"\n";return 1;}}
 """
     cpp=tmp_path/'limit-host.cpp';exe=tmp_path/'limit-host.exe';obj=tmp_path/'limit-host.obj'
-    cpp.write_text(header+config+'\n'.join(prototypes)+'\n'+'\n'.join(definitions)+main)
+    wrapper='bool ComputeAutoTP_NetRR(double entry,bool buy,double vol,double nominal,double buffered,double &tp,int &points,double &rr,string &why){return replay253?LegacyComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why):CurrentComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why);}\n'
+    cpp.write_text(header+config+'\n'.join(prototypes)+'\n'+'\n'.join(definitions)+wrapper+main)
     exe.write_bytes(b'');obj.write_bytes(b'') # manifest precreation audit covers native outputs
     vc=Path(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.43.34808')
     sdk=Path(r'C:\Program Files (x86)\Windows Kits\10');version='10.0.22621.0'

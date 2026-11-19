@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.53"
+#property version   "2.54"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -33,6 +33,7 @@ input group "Strategy"
 input StrategyMode Strategy = STRAT_TRENDLINE_LIMIT;
 input bool         OrdersEnabled = true; // master on/off switch (in Inputs)
 input bool         UsePriceDistanceInputs = false;
+input string       PresetAccountType = ""; // LTT export identity; blank retains legacy portable presets.
 input string       DistanceSymbol = "";
 input double       SL_PriceDistance = 0.0;
 input double       TP_PriceDistance = 0.0;
@@ -175,7 +176,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.53";
+string EA_VERSION = "2.54";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -481,6 +482,51 @@ bool AutoTPAUDCents(const double value, long &cents, string &why)
    return true;
 }
 
+bool IsPortableFXDistanceSymbol()
+{
+   string text=DistanceSymbol;
+   StringTrimLeft(text); StringTrimRight(text); StringToUpper(text);
+   int secondAt=3;
+   if(StringLen(text)>3 && (StringGetCharacter(text,3)=='_' || StringGetCharacter(text,3)=='/')) secondAt=4;
+   int end=secondAt+3;
+   if(StringLen(text)<end) return false;
+   string currencies="|AUD|USD|GBP|EUR|JPY|NZD|CAD|CHF|NOK|SEK|DKK|SGD|HKD|CNH|ZAR|MXN|TRY|PLN|HUF|CZK|THB|";
+   string base=StringSubstr(text,0,3),profit=StringSubstr(text,secondAt,3);
+   if(base==profit || StringFind(currencies,"|"+base+"|")<0 || StringFind(currencies,"|"+profit+"|")<0) return false;
+   if(StringLen(text)==end) return true;
+   ushort delimiter=StringGetCharacter(text,end);
+   if(delimiter!='.' && delimiter!='_' && delimiter!='-' && delimiter!='#') return false;
+   if(StringLen(text)==end+1) return false;
+   for(int i=end+1;i<StringLen(text);i++)
+   {
+      ushort ch=StringGetCharacter(text,i);
+      if(!((ch>='A' && ch<='Z') || (ch>='0' && ch<='9'))) return false;
+   }
+   return true;
+}
+
+bool ResolveStandardFXPreset(bool &standardFx,string &why)
+{
+   standardFx=false;
+   string pricing=PresetAccountType;
+   StringTrimLeft(pricing); StringTrimRight(pricing); StringToLower(pricing);
+   if(pricing!="" && pricing!="standard" && pricing!="razor")
+   { why="Conflicting preset: PresetAccountType must be standard, razor or legacy blank."; return false; }
+   if(pricing=="standard")
+   {
+      if(!UsePriceDistanceInputs || CommissionPerLotPerSide!=0.0 || !IsPortableFXDistanceSymbol())
+      {
+         why="Conflicting Standard FX preset: PresetAccountType=standard requires UsePriceDistanceInputs=true, CommissionPerLotPerSide=0 and an FX DistanceSymbol; loaded portable="+
+             (UsePriceDistanceInputs ? "true" : "false")+", commission="+DoubleToString(CommissionPerLotPerSide,8)+", DistanceSymbol="+DistanceSymbol;
+         return false;
+      }
+      standardFx=true; return true;
+   }
+   // Existing 2.52/2.53 exports have no marker: validated portable zero-fee FX inputs identify them.
+   standardFx=(pricing=="" && UsePriceDistanceInputs && CommissionPerLotPerSide==0.0 && IsPortableFXDistanceSymbol());
+   return true;
+}
+
 bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD, double riskBufferedAUD,
                          double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
 {
@@ -489,9 +535,15 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
 
    // Portable zero-commission Standard FX: price-valid SL distance x R is authoritative.
    // OrderCalcProfit is a current account-currency estimate, never a price/cash equality gate.
-   long calculationMode=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_CALC_MODE);
-   bool standardFx=UsePriceDistanceInputs && CommissionPerLotPerSide==0.0 &&
-      (calculationMode==SYMBOL_CALC_MODE_FOREX || calculationMode==SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE);
+   bool standardFx=false;
+   if(!ResolveStandardFXPreset(standardFx,why)) return false;
+   long calculationMode=0;
+   bool modeKnown=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_CALC_MODE,calculationMode);
+   Print(EA_COMMENT,": AutoTP selector PresetAccountType=",PresetAccountType,
+         " portable=",UsePriceDistanceInputs ? "true" : "false",
+         " commission=",DoubleToString(CommissionPerLotPerSide,8)," DistanceSymbol=",DistanceSymbol,
+         " calculation_mode=",modeKnown ? IntegerToString(calculationMode) : "unavailable",
+         " standard_price_target=",standardFx ? "true" : "false");
    if(standardFx)
    {
       if(!MathIsValidNumber(NetRR_Target) || AutoTP_SafetyPoints!=0)
@@ -2171,6 +2223,9 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    g_lastPendingFailureStructural = false;
    g_lastPendingAcceptanceMismatch = false;
    g_lastPendingBrokerAttempted = false;
+   bool standardFx=false;
+   if(!ResolveStandardFXPreset(standardFx,why))
+   { g_lastPendingFailureStructural=true; Print(EA_COMMENT,": ",why); return false; }
    if(rawEntry <= 0.0)
    {
       g_lastPendingFailureStructural = true;

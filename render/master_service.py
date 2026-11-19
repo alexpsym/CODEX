@@ -29950,6 +29950,7 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "SlippagePoints",
     "AutoFitRiskSlippageBuffer",
     "UsePriceDistanceInputs",
+    "PresetAccountType",
     "DistanceSymbol",
     "SL_PriceDistance",
     "TP_PriceDistance",
@@ -30568,7 +30569,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "mt5_symbol", "point_source_path", "stop_loss_mt5_points", "take_profit_mt5_points",
         "chart_tick_size", "chart_tick_size_source", "chart_tick_profile_id",
         "commission_per_lot_per_side_aud", "commission_currency", "CommissionPerLotPerSide",
-        "estimated_commission_aud", "estimated_spread_aud", "estimated_fees_or_spread_aud",
+        "PresetAccountType", "estimated_commission_aud", "estimated_spread_aud", "estimated_fees_or_spread_aud",
         "estimated_fees_or_spread", "commission_rate", "IncludeCommissionInRisk",
     ):
         if forged_field in payload:
@@ -30681,6 +30682,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "SlippagePoints": str(_pepperstone_default_slippage_points()),
         "AutoFitRiskSlippageBuffer": _pepperstone_trader_set_bool(True),
         "UsePriceDistanceInputs": _pepperstone_trader_set_bool(True),
+        "PresetAccountType": account_type,
         "DistanceSymbol": resolved_symbol,
         "SL_PriceDistance": _pepperstone_set_decimal(stop_price_distance),
         "TP_PriceDistance": _pepperstone_set_decimal(target_price_distance),

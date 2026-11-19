@@ -284,11 +284,14 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert 'while(!portableAutoFit && riskWorst > riskMax' in sizing
     assert 'CalcBufferedRiskForVolume' in sizing and 'candidateRisk <= riskMax' in sizing
     assert 'MathLog10(step)' not in sizing
-    assert '#property version   "2.53"' in trader and 'EA_VERSION = "2.53"' in trader
+    assert '#property version   "2.54"' in trader and 'EA_VERSION = "2.54"' in trader
 
     auto=trader.split('bool ComputeAutoTP_NetRR(',1)[1].split('bool IsLimitPriceValid(',1)[0]
     standard=auto.split('if(standardFx)',1)[1].split('double commissionRT =',1)[0]
-    assert 'SYMBOL_CALC_MODE_FOREX' in auto and 'CommissionPerLotPerSide==0.0' in auto
+    assert 'ResolveStandardFXPreset(standardFx,why)' in auto
+    selector=trader.split('bool ResolveStandardFXPreset(',1)[1].split('bool ComputeAutoTP_NetRR(',1)[0]
+    assert 'SYMBOL_TRADE_CALC_MODE' not in selector and 'CommissionPerLotPerSide==0.0' in selector
+    assert 'PresetAccountType' in selector and 'Conflicting Standard FX preset' in selector
     assert 'SL_PriceDistance*NetRR_Target' in standard and 'ValidatePriceDistance(distance,targetPoints,why)' in standard
     assert 'vol,entry,tp,grossEstimate' in standard and 'profitPerPoint' not in standard
     assert 'netAtTPCents' not in standard and 'tpOut=tp' in standard
