@@ -1181,7 +1181,7 @@ def test_calculator_submits_without_pre_entry_classification():
     assert data["invalidQuoteDisabled"] and data["webhookDisabled"]
 
 
-def _run_anchor_import_behavior(mode, timezone, saved_record=None):
+def _run_anchor_import_behavior(mode, timezone, saved_record=None, table_packets=None):
     import os
     node = r"C:\Program Files\nodejs\node.exe"
     harness = r'''
@@ -1241,7 +1241,7 @@ async function run(){
  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();
  el['order-toggle'].buttons.find(b=>b.dataset.v==='limit').click();el['calc-limit'].value='99.25';
  el['trendline-trigger-mode'].value='confirmed_cross';el['trendline-cross-direction'].value='upward';el['trendline-price-basis'].value='midpoint';el['trendline-tolerance-ticks'].value='2';el['trendline-right-extension'].checked=false;el['trendline-expiry'].value='1d';
- const packet={schema:'ltt-anchors/v1',symbol:'BYBIT:BTCUSDT.P',timeframe:'1',anchors:[{timestamp_ms:Date.parse('2026-10-30T13:59:57.123Z'),price:'100.00012345'},{timestamp_ms:Date.parse('2026-10-30T14:00:01.987Z'),price:'101.00098765'}]};
+ const packet=process.argv[4] ? JSON.parse(JSON.parse(process.argv[4])[0]) : {schema:'ltt-anchors/v1',symbol:'BYBIT:BTCUSDT.P',timeframe:'1',anchors:[{timestamp_ms:Date.parse('2026-10-30T13:59:57.123Z'),price:'100.00012345'},{timestamp_ms:Date.parse('2026-10-30T14:00:01.987Z'),price:'101.00098765'}]};
  const copy=x=>JSON.parse(JSON.stringify(x));
  const preview=text=>{el['trendline-import-text'].value=text;el['trendline-import-text'].listeners.input();};
  const fields=()=>['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price'].map(id=>el[id].value);
@@ -1307,15 +1307,15 @@ async function run(){
   const writes={};for(const id of ['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price']){
    let value=el[id].value;writes[id]=0;Object.defineProperty(el[id],'value',{get:()=>value,set:v=>{writes[id]++;value=v;}});
   }
-  paste('Earlier plain log text\n[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet)+'\nLater plain log text');
+  paste(process.argv[4] ? JSON.parse(process.argv[4])[0] : 'Earlier plain log text\n[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet)+'\nLater plain log text');
   assert(Object.values(writes).every(n=>n===1),'Exactly one assignment to each anchor on a successful paste');
   assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('unsaved'));
-  assert(el['trendline-import-text'].value.includes('Later plain log text'));
-  const first=fields();packet.anchors=packet.anchors.map(a=>({...a,timestamp_ms:a.timestamp_ms,price:a.price+'0'}));
-  paste(JSON.stringify(packet));assert.notDeepEqual(fields(),first);assert(Object.values(writes).every(n=>n===2),'Second paste replaces the prior import without clearing first');
-  assert.equal(el['trendline-import-text'].value,JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC 2026-10-30T13:59:57.123Z'));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(Object.values(writes).every(n=>n===2));assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
+  assert(process.argv[4] ? el['trendline-import-text'].value===JSON.parse(process.argv[4])[0] : el['trendline-import-text'].value.includes('Later plain log text'));
+  const first=fields();const nextPacket=process.argv[4] ? JSON.parse(JSON.parse(process.argv[4])[1]) : {...packet,anchors:packet.anchors.map(a=>({...a,timestamp_ms:a.timestamp_ms,price:a.price+'0'}))};Object.assign(packet,nextPacket);
+  paste(process.argv[4] ? JSON.parse(process.argv[4])[1] : JSON.stringify(packet));assert.notDeepEqual(fields(),first);assert(Object.values(writes).every(n=>n===2),'Second paste replaces the prior import without clearing first');
+  assert.equal(el['trendline-import-text'].value,process.argv[4] ? JSON.parse(process.argv[4])[1] : JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC '+new Date(packet.anchors[0].timestamp_ms).toISOString()));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(Object.values(writes).every(n=>n===2));assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
   assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-anchor-2-time'].value,expectedLocal(packet.anchors[1].timestamp_ms));
-  if(process.env.TZ==='Australia/Brisbane')assert(el['trendline-anchor-2-time'].value.startsWith('2026-10-31T00:00:01.987'));
+  if(process.env.TZ==='Australia/Brisbane')assert(el['trendline-anchor-2-time'].value.startsWith(process.argv[4] ? '2026-10-31T00:00:02.987' : '2026-10-31T00:00:01.987'));
   const preserved=()=>{assert.equal(el['calc-risk'].value,'2.5');assert.equal(el['calc-sl-ticks'].value,'50');assert.equal(el['calc-rr'].value,'3.25');assert.equal(el['calc-limit'].value,'99.25');assert.equal(el['trendline-trigger-mode'].value,'confirmed_cross');assert.equal(el['trendline-cross-direction'].value,'upward');assert.equal(el['trendline-price-basis'].value,'midpoint');assert.equal(el['trendline-tolerance-ticks'].value,'2');assert.equal(el['trendline-right-extension'].checked,false);};preserved();
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const initial=copy(plans[0]);await edit();preserved();assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
   const editRequests=calls.length;packet.anchors=packet.anchors.map(a=>({...a,price:a.price+'1'}));
@@ -1388,7 +1388,7 @@ async function freshContext(record){
 run().catch(e=>{console.error(e);process.exitCode=1;});
 
 '''
-    result = subprocess.run([node, '-e', "eval(require('fs').readFileSync(0,'utf8'))", str(JS_PATH), mode, json.dumps(saved_record)], input=harness, capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
+    result = subprocess.run([node, '-e', "eval(require('fs').readFileSync(0,'utf8'))", str(JS_PATH), mode, json.dumps(saved_record), json.dumps(table_packets) if table_packets else ''], input=harness, capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
     if result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
 
@@ -1403,6 +1403,41 @@ def test_tradingview_anchor_import_preserves_exact_draft_roundtrip(tmp_path):
     record = TrendlinePlanStore(path).get(created['plan_id'])
     for timezone in ('UTC', 'Australia/Brisbane'):
         _run_anchor_import_behavior('roundtrip', timezone, record)
+
+def test_tradingview_anchor_table_packet_roundtrip(tmp_path):
+    import re
+    import runpy
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from render.trendline_plans import TrendlinePlanStore
+    pine = (ROOT / 'pinescripts/ltt_anchor_export.pine').read_text(encoding='utf-8')
+    expression = next(line.strip()[len('string packet = '):] for line in pine.splitlines() if line.strip().startswith('string packet = '))
+    # Evaluate only the original bounded string-concatenation expression, not Pine/runtime behavior.
+    def packet_text(t1, p1, t2, p2):
+        values = {'syminfo.tickerid': 'BYBIT:BTCUSDT.P', 'timeframe.period': '1',
+                  'str.tostring(time1, "0")': str(t1), 'str.tostring(time2, "0")': str(t2),
+                  'str.tostring(price1, "0.################")': p1, 'str.tostring(price2, "0.################")': p2,
+                  '(extendRight ? "true" : "false")': 'false'}
+        parts = re.split(r' \+ (?=(?:[^\']*\'[^\']*\')*[^\']*$)', expression)
+        packet = ''.join(part[1:-1] if part.startswith("'") and part.endswith("'") else values[part] for part in parts)
+        return packet.replace(',"', ',\n"').replace('},{', '},\n{')
+    first = packet_text(1793368797123, '100.00012345', 1793368801987, '101.00098765')
+    moved = packet_text(1793368797123, '100.00012345', 1793368802987, '102.00098765001')
+    assert json.loads(first)['anchors'][1] == {'timestamp_ms': 1793368801987, 'price': '101.00098765'}
+    assert json.loads(moved)['anchors'][1] == {'timestamp_ms': 1793368802987, 'price': '102.00098765001'}
+    assert 'table.new(position.top_right, 1, 2,' in pine
+    assert "str.replace_all(packet, ',\"', ',\\n\"')" in pine
+    assert "str.replace_all(copyPacket, '},{', '},\\n{')" in pine
+    assert 'table.cell(selectionStatus, 0, 1, copyPacket,' in pine
+    assert pine.index('table.cell(selectionStatus, 0, 1, copyPacket,') < pine.index('if packet != emitted')
+    invalid_branch = pine.split('    else\n        // Never leave a previously valid packet available for copying.', 1)[1]
+    assert 'table.cell(selectionStatus, 0, 1, "", bgcolor = color.black)' in invalid_branch
+    assert 'log.info(' in pine and 'LTT_ANCHORS_V1 " + packet)' in pine
+    payload = runpy.run_path(str(ROOT / 'tests/test_trendline_plans.py'))['_saved_anchor_repair_payload']()
+    store = TrendlinePlanStore(tmp_path / 'table-draft.json')
+    record = store.create(payload, now_ms=1793368802000)
+    _run_anchor_import_behavior('roundtrip', 'Australia/Brisbane', record, [first, moved])
+
 
 def test_tradingview_anchor_import_rejects_invalid_and_stale_packets():
     _run_anchor_import_behavior('invalid', 'Australia/Brisbane')
