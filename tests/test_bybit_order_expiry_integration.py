@@ -252,14 +252,14 @@ function run(){
  el('calc-symbol').value='BTCUSDT';el('bybit-expiry-mode').value='none';el('bybit-expiry-unit').value='minutes';el('bybit-expiry-value').value='5';
  const context={console,Intl,Date,AbortController,URL,Blob,Promise,setImmediate,
   setInterval:f=>{intervals.push(f);return 1;},clearInterval(){},setTimeout:()=>1,clearTimeout(){},
-  document:{getElementById:el,createElement:()=>new E(),body:new E()},window:{__CALCULATOR_TESTING__:true,addEventListener(){}},
+  document:{getElementById:id=>id==='bybit-expiry-status'?null:el(id),createElement:()=>new E(),body:new E()},window:{__CALCULATOR_TESTING__:true,addEventListener(){}},
   fetch:async(url,opts={})=>{requests.push([url,opts]);let body=url.includes('order-expiry/status')?fixture.status:url.includes('/submit')?fixture.result:{app_profile:'local',webhook:{available:false},trendline_plans:{available:false}};return {ok:true,status:200,statusText:'OK',headers:{get:name=>String(name).toLowerCase()==='content-type'?'application/json':null},text:async()=>JSON.stringify(body),json:async()=>body};}};
  vm.createContext(context);vm.runInContext(source,context);
  return {elements,requests,intervals,h:context.window.__expiryTestHooks,el};
 }
 (async()=>{
- let ui=run();await ui.h.refreshExpiryStatus();await new Promise(r=>setImmediate(r));
- assert(ui.el('bybit-expiry-status').textContent.includes('Broker-confirmed cancellation'));
+ let ui=run();await new Promise(r=>setImmediate(r));
+ assert(!ui.requests.some(r=>r[0].includes('order-expiry/status')));
  assert.strictEqual(ui.h.expiryPayload(),null);
  Object.assign(ui.h.state,{asset:'crypto',broker:'bybit',order_type:'limit',webhook_mode:'no'});
  ui.h.syncExpiryControls();assert.strictEqual(ui.el('bybit-expiry-wrap').style.display,'');
@@ -275,9 +275,9 @@ function run(){
  await ui.el('calc-submit').handlers.click();
  const sent=ui.requests.find(r=>r[0].endsWith('/submit'));assert(sent,ui.el('calc-error').textContent);
  assert.strictEqual(JSON.parse(sent[1].body).order_expiry.unit,'minutes');
- assert(ui.el('calc-submit').disabled);
- ui=run();await ui.h.refreshExpiryStatus();assert.strictEqual(ui.h.expiryPayload(),null);
- assert(ui.el('bybit-expiry-status').textContent.includes('Broker-confirmed cancellation'));
+ assert(ui.el('calc-submit').disabled);assert(ui.el('calc-success').textContent.includes(fixture.result.result.order_expiry.status_label));assert(ui.el('calc-success').textContent.includes('Do not resubmit'));assert(!ui.el('calc-error').textContent);
+ ui=run();assert.strictEqual(ui.h.expiryPayload(),null);
+ assert(!ui.requests.some(r=>r[0].includes('order-expiry/status')));
  assert(ui.requests.every(r=>!r[0].includes('cancel')&&!r[0].includes('amend')));
  console.log('Calculator controls, actual submit payload and durable reload status passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
@@ -337,10 +337,9 @@ def test_expiry_repair_status_shows_overdue_error_and_worker_health(service):
     prefix=harness.split("(async()=>{")[0]
     script=prefix+r"""
     (async()=>{
-      const ui=run();await ui.h.refreshExpiryStatus();
-      const text=ui.el('bybit-expiry-status').textContent;
-      assert(text.includes('Overdue')&&text.includes('unavailable')&&text.includes('http_status=401')&&text.includes('ret_code=10003'),text);
-      assert(!text.includes('DO-NOT-EXPOSE')&&!text.includes('X-BAPI'));
+      const ui=run();
+      assert(!ui.requests.some(r=>r[0].includes('order-expiry/status')));
+      assert.strictEqual(ui.el('bybit-expiry-status').textContent,'');
       assert(ui.requests.every(r=>!r[0].includes('/submit')&&!r[0].includes('/cancel')));
       console.log('Truthful overdue/error and worker-health rendering passed');
     })().catch(e=>{console.error(e);process.exitCode=1;});

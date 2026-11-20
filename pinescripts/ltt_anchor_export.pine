@@ -1,5 +1,5 @@
 //@version=6
-indicator("LTT Anchor Export 2A.2 (personal)", overlay = true, behind_chart = false, max_lines_count = 1)
+indicator("LTT Anchor Export 2A.3 (personal)", overlay = true, behind_chart = false, max_lines_count = 1)
 // UPDATE: remove/re-add ONLY this helper instance for behind_chart=false to apply.
 // behind_chart=false places it in front of chart bars, not necessarily every
 // manual drawing. Use the helper's Visual Order > Bring to front if needed.
@@ -9,19 +9,18 @@ indicator("LTT Anchor Export 2A.2 (personal)", overlay = true, behind_chart = fa
 // Select two endpoints on the SAME intended channel boundary, first then second.
 // Drag the paired markers, edit exact prices in Settings > Inputs, or use the
 // script menu's Reset points to reselect. This cannot inspect drawing-tool lines.
-// One-time chart setup: indicator More > Move tables to bottom; leave its tab open.
-// Select/copy the JSON-only cell below the chart into LTT. Pine Logs remain a fallback.
+// Copy the latest LTT_ANCHORS_V1 entry from Pine Logs and paste it into LTT.
 // Contract: schema ltt-anchors/v1; timestamp_ms = exact selected UNIX ms;
 // price = positive decimal string; optional right_extension = boolean.
 // Explicit future coordinates are valid, not future market observations.
 // Changes require a NEW copy/paste/Save; saved LTT plans do not live-sync.
 // No alerts, webhooks, strategy or broker IO.
-float price1 = input.price(0, "Price 1", inline = "A1", group = "Anchor 1", confirm = true)
-int time1 = input.time(0, "Time 1", inline = "A1", group = "Anchor 1", confirm = true)
-float price2 = input.price(0, "Price 2", inline = "A2", group = "Anchor 2", confirm = true)
-int time2 = input.time(0, "Time 2", inline = "A2", group = "Anchor 2", confirm = true)
+float price1 = input.price(0, "Price 1", inline = "A1", group = "Anchor 1", confirm = true, display = display.none)
+int time1 = input.time(0, "Time 1", inline = "A1", group = "Anchor 1", confirm = true, display = display.none)
+float price2 = input.price(0, "Price 2", inline = "A2", group = "Anchor 2", confirm = true, display = display.none)
+int time2 = input.time(0, "Time 2", inline = "A2", group = "Anchor 2", confirm = true, display = display.none)
 
-bool extendRight = input.bool(true, "Extend right", tooltip = "Draw the same right-extending ray as LTT. Copy/paste/Save again after changes.")
+bool extendRight = input.bool(true, "Extend right", tooltip = "Draw the same right-extending ray as LTT. Copy/paste/Save again after changes.", display = display.none)
 
 bool supported = chart.is_standard and (timeframe.isseconds or timeframe.isminutes or timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly)
 string reason = ""
@@ -37,12 +36,8 @@ else if time1 > 8640000000000000 or time2 > 8640000000000000
     reason := "Coordinate time is outside the supported UTC date range."
 bool valid = reason == ""
 var line boundary = na
-var table selectionStatus = table.new(position.top_right, 1, 2, bgcolor = color.black, frame_color = color.white, frame_width = 1)
 varip string emitted = ""
-string coordinates = "A1 UTC " + str.format_time(time1, "yyyy-MM-dd HH:mm:ss", "UTC") + " @ " + str.tostring(price1, "0.################") + "\nA2 UTC " + str.format_time(time2, "yyyy-MM-dd HH:mm:ss", "UTC") + " @ " + str.tostring(price2, "0.################")
 if barstate.islast
-    string status = "LTT Anchor Export 2A.2 | " + syminfo.tickerid + " / " + timeframe.period + "\nExtension " + (extendRight ? "ON (right ray)" : "OFF (segment)") + "\n" + (valid ? "READY - copy the JSON cell below (More > Move tables to bottom).\n" : "NOT READY: " + reason + "\n") + coordinates
-    table.cell(selectionStatus, 0, 0, status, text_color = valid ? color.aqua : color.yellow, bgcolor = color.black, text_size = size.small)
     if valid
         if na(boundary)
             boundary := line.new(time1, price1, time2, price2, xloc = xloc.bar_time, extend = extendRight ? extend.right : extend.none, color = color.rgb(0, 255, 255), width = 4)
@@ -51,19 +46,13 @@ if barstate.islast
             line.set_xy2(boundary, time2, price2)
             line.set_extend(boundary, extendRight ? extend.right : extend.none)
         string packet = '{"schema":"ltt-anchors/v1","symbol":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","right_extension":' + (extendRight ? "true" : "false") + ',"anchors":[{"timestamp_ms":' + str.tostring(time1, "0") + ',"price":"' + str.tostring(price1, "0.################") + '"},{"timestamp_ms":' + str.tostring(time2, "0") + ',"price":"' + str.tostring(price2, "0.################") + '"}]}'
-        // JSON whitespace only: retain the exact packet values and Pine Logs fallback.
-        string copyPacket = str.replace_all(packet, ',"', ',\n"')
-        copyPacket := str.replace_all(copyPacket, '},{', '},\n{')
-        table.cell(selectionStatus, 0, 1, copyPacket, text_color = color.white, bgcolor = color.black, text_halign = text.align_left, text_size = size.normal, text_font_family = font.family_monospace)
         if packet != emitted
-            log.info("LTT Anchor Export 2A.2 | LTT_ANCHORS_V1 " + packet)
+            log.info("LTT Anchor Export 2A.3 | LTT_ANCHORS_V1 " + packet)
             emitted := packet
     else
-        // Never leave a previously valid packet available for copying.
-        table.cell(selectionStatus, 0, 1, "", bgcolor = color.black)
         if not na(boundary)
             line.delete(boundary)
             boundary := na
-        if status != emitted
-            log.warning(status)
-            emitted := status
+        if reason != emitted
+            log.warning(reason)
+            emitted := reason

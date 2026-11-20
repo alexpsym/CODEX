@@ -223,24 +223,6 @@
       ? `${spec.mode === 'duration' ? 'Estimated at submission: ' : 'Deadline: '}${brisbaneTime(ms)}. Duration starts at the server submission attempt.`
       : 'Enter a valid future expiry before submitting.';
   }
-  let expiryStatusInFlight = null;
-  async function refreshExpiryStatus() {
-    if (expiryStatusInFlight) return expiryStatusInFlight;
-    const el = $('bybit-expiry-status'); if (!el) return;
-    expiryStatusInFlight = (async()=>{
-      try {
-        const response = await fetch('/api/calculator/order-expiry/status', {cache:'no-store'});
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Expiry status unavailable');
-        el.textContent = `Local expiry worker: ${data.worker?.healthy ? 'running' : 'unavailable/stopped'}. `
-          + (data.error ? data.error + ' ' : '')
-          + (data.schedules || []).map(r=>`${r.mode} ${r.symbol} ${r.order_id || r.order_link_id}: ${r.status_label}; ${brisbaneTime(r.deadline_ms)}${r.last_error ? "; " + r.last_error : ""}`).join(' | ');
-      } catch (_) { el.textContent = 'Expiry status unavailable. Check the local worker status before scheduling.'; }
-      finally { expiryStatusInFlight = null; }
-    })();
-    return expiryStatusInFlight;
-  }
-
   function refreshPrewarmSchedule() {
     if (walletPrewarmInterval) {
       clearInterval(walletPrewarmInterval);
@@ -249,7 +231,7 @@
     if (state.asset === 'crypto') {
       prewarmAccountDependencies();
       if (typeof setInterval === 'function') {
-        walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); refreshExpiryStatus(); syncExpiryControls(); }, 20000);
+        walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); syncExpiryControls(); }, 20000);
         if (walletPrewarmInterval && typeof walletPrewarmInterval.unref === 'function') walletPrewarmInterval.unref();
       }
     }
@@ -751,7 +733,7 @@
       `account=${payload.account}`,
       ...(resolvedBroker === 'pepperstone' ? [`pepperstone_account_type=${resolved?.pepperstone_account_type || payload.pepperstone_account_type || 'razor'}`] : []),
       `symbol=${payload.symbol}`,
-      `webhook=${payload.webhook}`,
+      `webhook=${payload.webhook ?? state.webhook_mode}`,
       `test=${payload.test}`,
       `timeframe=${state.timeframe || payload.timeframe || ''}`,
       `setup=${state.setup || payload.setup || ''}`,
@@ -764,7 +746,7 @@
       `risk_value=${payload.risk_value}`,
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
       `order_type=${payload.order_type}`,
-      `side=${payload.side}`,
+      `side=${payload.side || payload.action || state.side}`,
       `pending_webhook_id=${payload.pending_webhook_id || ''}`,
       `previous_pending_webhook_id=${payload.previous_pending_webhook_id || ''}`,
     ];
@@ -782,8 +764,10 @@
     ].forEach((k) => {
       if (payload[k] !== undefined && payload[k] !== null && payload[k] !== '') lines.push(`${k}=${payload[k]}`);
     });
-    requestSummaryEl.style.whiteSpace = 'pre-wrap';
-    requestSummaryEl.textContent = lines.join('\n');
+    requestSummaryEl.innerHTML = '<strong>Submitted payload</strong><dl class="payload-grid">'+lines.slice(1).map(line=>{
+      const at=line.indexOf('=');
+      return `<div class="payload-pair"><dt>${escapeHtml(line.slice(0,at))}</dt><dd>${escapeHtml(line.slice(at+1))}</dd></div>`;
+    }).join('')+'</dl>';
   }
 
   function buildPepperstoneSetPayload(quote) {
@@ -894,19 +878,17 @@
   let anchorImageSeq = 0;
   let anchorImageController = null;
   function retireAnchorImage() { ++anchorImageSeq; anchorImageController?.abort(); anchorImageController=null; }
-  let anchorImport = null;
   let anchorImportContext = '';
   const anchorFormIds = ['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price'];
   const anchorContext = () => JSON.stringify([state.asset,state.broker,state.account,state.resolvedSymbol,state.timeframe,state.trendlineEditId]);
   function clearAnchorImport(message='') {
     retireAnchorImage();
-    anchorImport=null; anchorImportContext='';
+    anchorImportContext='';
     if($('trendline-import-text')) $('trendline-import-text').value='';
     if($('trendline-import-preview')) $('trendline-import-preview').textContent=message;
-    if($('trendline-import-apply')) $('trendline-import-apply').disabled=true;
   }
   function syncAnchorImportContext() {
-    if(anchorImportContext && anchorImportContext!==anchorContext()) clearAnchorImport('Calculator context changed. Preview a matching export again.');
+    if(anchorImportContext && anchorImportContext!==anchorContext()) clearAnchorImport();
   }
   function setAnchorTime(id,ms) {
     const el=$(id); el.value=localDateTime(ms);
@@ -930,11 +912,18 @@
     if(packet.anchors[1].timestamp_ms<=packet.anchors[0].timestamp_ms) throw new Error('Anchor 2 must be later than anchor 1.');
     return packet;
   }
+  function anchorImportFailure(error) {
+    const message=String(error?.message||error);
+    const reason=/timeframe/i.test(message)?'wrong timeframe':/venue|instrument|symbol/i.test(message)?'wrong symbol':/milliseconds|timestamp/i.test(message)?'invalid anchor time':/Anchor 2/i.test(message)?'anchor 2 must be later':/prices/i.test(message)?'invalid price':/extension/i.test(message)?'invalid extension':/8192/i.test(message)?'export too long':/unambiguous|exactly two|one export/i.test(message)?'use one export':/draft request/i.test(message)?'draft busy':/JSON|schema|ltt-anchors/i.test(message)?'invalid JSON':'unreadable export';
+    $('trendline-import-preview').textContent=`Fail \u2014 ${reason}. Retry.`;
+  }
   function previewAnchorImport() {
     clearAnchorImportPreview();
+    const text=String($('trendline-import-text')?.value||'').trim();
+    if(!text) return;
     try {
-      const text=String($('trendline-import-text')?.value||'').trim();
-      if(!text || text.length>8192) throw new Error('Paste one export message (maximum 8192 characters).');
+      if(state.trendlineMutationPending) throw new Error('Current draft request pending.');
+      if(text.length>8192) throw new Error('Maximum 8192 characters.');
       let json=text;
       if(!text.startsWith('{')) {
         const marker='LTT_ANCHORS_V1'; const at=text.indexOf(marker);
@@ -953,50 +942,40 @@
         json=tail.slice(0,end);
       }
       const packet=validateAnchorPacket(JSON.parse(json));
-      anchorImport={packet,form:anchorFormIds.map(id=>$(id).value),extension:$('trendline-right-extension').checked};
+      // Validate the complete packet before changing either anchor or extension.
+      packet.anchors.forEach((a,i)=>{setAnchorTime(`trendline-anchor-${i+1}-time`,a.timestamp_ms);$(`trendline-anchor-${i+1}-price`).value=a.price;anchorEpoch(`trendline-anchor-${i+1}-time`,`trendline-anchor-${i+1}-utc`);});
+      if(Object.prototype.hasOwnProperty.call(packet,'right_extension')) $('trendline-right-extension').checked=packet.right_extension;
       anchorImportContext=anchorContext();
-      $('trendline-import-preview').textContent=`Preview successful - fields unchanged. Next: click Apply anchors, then Save/Update draft.\nSource: ${packet.symbol} | timeframe ${packet.timeframe}\nRight extension: ${Object.prototype.hasOwnProperty.call(packet,'right_extension')?(packet.right_extension?'ON (right ray)':'OFF (segment)'):'not supplied; preserve checkbox ('+($('trendline-right-extension').checked?'ON':'OFF')+')'}\n`+packet.anchors.map((a,i)=>`Anchor ${i+1}: ${a.price} | UTC ${new Date(a.timestamp_ms).toISOString()} | Browser local ${localDateTime(a.timestamp_ms)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`).join('\n');
-      $('trendline-import-apply').disabled=false;
-    } catch(err) { $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
+      $('trendline-import-preview').textContent='Success';
+    } catch(err) { anchorImportFailure(err); }
   }
   function clearAnchorImportPreview() {
     retireAnchorImage();
-    anchorImport=null;anchorImportContext='';
-    if($('trendline-import-apply')) $('trendline-import-apply').disabled=true;
-  }
-  function applyAnchorImport() {
-    if(!anchorImport || state.trendlineMutationPending) return;
-    try {
-      if(anchorImportContext!==anchorContext() || anchorImport.extension!==$('trendline-right-extension').checked || anchorImport.form.some((value,i)=>value!==$(anchorFormIds[i]).value)) throw new Error('Form/context changed. Preview the export again before applying.');
-      const packet=validateAnchorPacket(anchorImport.packet);
-      packet.anchors.forEach((a,i)=>{setAnchorTime(`trendline-anchor-${i+1}-time`,a.timestamp_ms);$(`trendline-anchor-${i+1}-price`).value=a.price;anchorEpoch(`trendline-anchor-${i+1}-time`,`trendline-anchor-${i+1}-utc`);});
-      if(Object.prototype.hasOwnProperty.call(packet,'right_extension')) $('trendline-right-extension').checked=packet.right_extension;
-      anchorImport=null;$('trendline-import-apply').disabled=true;
-      $('trendline-import-preview').textContent+='\nApplied successfully: both anchor times and prices are populated and unsaved. Next: Save/Update draft explicitly.';
-    } catch(err) { clearAnchorImport('Import rejected: '+String(err.message||err)); }
+    anchorImportContext='';
+    if($('trendline-import-preview')) $('trendline-import-preview').textContent='';
   }
   async function importAnchorImage(file) {
     clearAnchorImportPreview();
-    if(state.trendlineMutationPending) { $('trendline-import-preview').textContent='Import rejected: wait for the current draft request to finish.'; return; }
+    if(state.trendlineMutationPending) { anchorImportFailure(new Error('wait for the current draft request to finish.')); return; }
     if(!file || (file.type!=='image/png' && !(file.type==='' && /\.png$/i.test(file.name||'')))) {
-      $('trendline-import-preview').textContent='Import rejected: paste or drop one PNG screenshot.'; return;
+      anchorImportFailure(new Error('paste or drop one PNG screenshot.')); return;
     }
     if((typeof location!=='undefined' && !['localhost','127.0.0.1','[::1]'].includes(location.hostname)) || file.size>6*1024*1024 || !state.trendlinePlansAvailable) {
-      $('trendline-import-preview').textContent='Import rejected: use a PNG up to 6 MB in the local calculator.'; return;
+      anchorImportFailure(new Error('use a PNG up to 6 MB in the local calculator.')); return;
     }
     const sequence=++anchorImageSeq, context=anchorContext(), form=anchorFormIds.map(id=>$(id).value), extension=$('trendline-right-extension').checked;
     const controller=new AbortController(); anchorImageController=controller; anchorImportContext=context;
     const current=()=>sequence===anchorImageSeq && context===anchorContext() && !state.trendlineMutationPending && extension===$('trendline-right-extension').checked && form.every((value,i)=>value===$(anchorFormIds[i]).value);
-    $('trendline-import-preview').textContent='Reading screenshot locally; current anchors unchanged?';
+    $('trendline-import-preview').textContent='Reading screenshot...';
     try {
       const bytes=await file.arrayBuffer(); if(!current()) return;
       const result=await request('/api/calculator/anchor-image',{method:'POST',headers:{'content-type':'image/png'},body:bytes,signal:controller.signal});
       if(!current()) return;
       const packet=validateAnchorPacket(result.packet);
       $('trendline-import-text').value=JSON.stringify(packet);
-      previewAnchorImport(); applyAnchorImport();
+      previewAnchorImport();
     } catch(err) {
-      if(current() && err?.name!=='AbortError') { clearAnchorImportPreview(); $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
+      if(current() && err?.name!=='AbortError') { clearAnchorImportPreview(); anchorImportFailure(err); }
     } finally { if(sequence===anchorImageSeq) anchorImageController=null; }
   }
   function pasteAnchorImport(event) {
@@ -1005,17 +984,17 @@
     const images=Array.from(event.clipboardData.items||[]).filter(item=>item.kind==='file');
     if(images.length) {
       event.preventDefault();
-      if(images.length!==1) { clearAnchorImportPreview(); $('trendline-import-preview').textContent='Import rejected: paste one screenshot at a time.'; return; }
+      if(images.length!==1) { clearAnchorImportPreview(); anchorImportFailure(new Error('paste one screenshot at a time.')); return; }
       return importAnchorImage(images[0].getAsFile());
     }
     event.preventDefault(); clearAnchorImportPreview();
-    if(state.trendlineMutationPending) { $('trendline-import-preview').textContent='Import rejected: wait for the current draft request to finish, then paste again.'; return; }
-    $('trendline-import-text').value=event.clipboardData.getData('text/plain'); previewAnchorImport(); applyAnchorImport();
+    if(state.trendlineMutationPending) { anchorImportFailure(new Error('wait for the current draft request to finish, then paste again.')); return; }
+    $('trendline-import-text').value=event.clipboardData.getData('text/plain'); previewAnchorImport();
   }
   function dropAnchorImport(event) {
     event.preventDefault();
     const files=Array.from(event.dataTransfer?.files||[]);
-    if(files.length!==1) { clearAnchorImportPreview(); $('trendline-import-preview').textContent='Import rejected: drop one PNG screenshot at a time.'; return; }
+    if(files.length!==1) { clearAnchorImportPreview(); anchorImportFailure(new Error('drop one PNG screenshot at a time.')); return; }
     return importAnchorImage(files[0]);
   }
   function syncTrendlineTriggerControls() {
@@ -1076,6 +1055,8 @@
     anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls();
     const save=$('trendline-save'); if(save) save.textContent='Save draft';
   }
+  const trendlineDetailsOpen = new Map();
+  const trendlineDetailsCollapse = new Set();
   function savedPlanDetails(plan) {
     const text=value=>value===null || value===undefined || value===''?'Not recorded':String(value);
     const date=value=>{
@@ -1092,7 +1073,7 @@
       ['Expiry',plan.expiry_at_ms===null?'Lifetime':date(plan.expiry_at_ms)]];
     for(let i=0;i<2;i++) entries.push([`Anchor ${i+1}`,`${date(plan.anchors?.[i]?.timestamp_ms)} | Price: ${text(plan.anchors?.[i]?.price)}`]);
     for(const key of ['setup','pattern','ema','vwap','aths_atls','round_number']) entries.push([key,text(plan.order_metadata?.[key])]);
-    return '<details open><summary>Saved settings (server record)</summary><div class="muted">'+entries.map(([label,value])=>`${escapeHtml(label)}: ${escapeHtml(value)}`).join('<br>')+'</div></details>';
+    return `<details data-tl-settings="${escapeHtml(plan.plan_id)}"${trendlineDetailsOpen.get(plan.plan_id)?' open':''}><summary>Saved settings (server record)</summary><div class="muted">`+entries.map(([label,value])=>`${escapeHtml(label)}: ${escapeHtml(value)}`).join('<br>')+'</div>'+trendlineEvaluationDetails(plan)+'<div class="muted">'+escapeHtml(String(plan.plan_id))+'</div></details>';
   }
   function trendlineEvaluationDetails(plan) {
     const item=plan.latest_evaluation;
@@ -1104,7 +1085,7 @@
     if(plan.status==='armed' && plan.monitoring_eligible!==true) actions=`<button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button>`+actions;
     if(plan.status==='armed' && plan.monitoring_eligible===true) actions+=`<button type="button" data-tl-action="risk-edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit stop and target</button>`;
     if(plan.can_delete===true || plan.can_dismiss_calculator===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Remove this card">Delete</button>`;
-    return `<strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.calculator_finish_kind==='closed'?'Closed':plan.calculator_finish_kind==='simulated'?'Simulated':plan.calculator_finish_kind==='confirm_finished'?'Submitted: close unverified':plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}${trendlineEvaluationDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div>`;
+    return `<strong>${escapeHtml(plan.status==='armed' ? (plan.monitoring_eligible===true ? 'Armed and monitoring' : 'Paused') : plan.calculator_finish_kind==='closed'?'Closed':plan.calculator_finish_kind==='simulated'?'Simulated':plan.calculator_finish_kind==='confirm_finished'?'Submitted: close unverified':plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}<div class="group">${actions}</div>`;
   }
   function updateRiskEditor() {
     const edit=state.trendlineRiskEdit;if(!edit)return;
@@ -1117,6 +1098,7 @@
   }
   function renderTrendlinePlans() {
     const list=$('trendline-plan-list');if(!list)return;
+    list.querySelectorAll('[data-tl-settings]').forEach(details=>{if(!trendlineDetailsCollapse.has(details.dataset.tlSettings)) trendlineDetailsOpen.set(details.dataset.tlSettings,details.open);});
     const edit=state.trendlineRiskEdit;
     if(!edit){
       list.innerHTML=state.trendlinePlans.length?state.trendlinePlans.map(plan=>`<div class="card" data-tl-plan="${escapeHtml(plan.plan_id)}"><div data-tl-content>${trendlineCardContent(plan)}</div></div>`).join(''):'<div class="muted">No local trendline plans saved.</div>';
@@ -1131,6 +1113,8 @@
       for(const card of cards){if(card.dataset.tlPlan!==edit.planId&&!state.trendlinePlans.some(plan=>plan.plan_id===card.dataset.tlPlan))card.remove();}
       updateRiskEditor();
     }
+    list.querySelectorAll('[data-tl-settings]').forEach(details=>details.addEventListener('toggle',()=>{if(details.isConnected) trendlineDetailsOpen.set(details.dataset.tlSettings,details.open);}));
+    trendlineDetailsCollapse.clear();
     list.querySelectorAll('[data-tl-action]').forEach(btn=>btn.addEventListener('click',()=>trendlineAction(btn.dataset.tlAction,btn.dataset.tlId)));
   }
   function openTrendlineRiskEditor(plan) {
@@ -1190,7 +1174,7 @@
   async function saveTrendlinePlan() {
     if (!state.trendlinePlansAvailable || state.trendlineMutationPending || state.trendlineMonitorPending) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true; const save=$('trendline-save'); if(save) save.disabled=true;
-    try { const payload=trendlinePayload(); const response=state.trendlineEditId ? await request(`/api/trendline-plans/${encodeURIComponent(state.trendlineEditId)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}) : await post('/api/trendline-plans',payload); trendlineStatus(state.trendlineEditId ? 'Draft updated.' : 'Draft saved.'); resetTrendlineForm(); state.trendlinePlans=response.plan ? [response.plan,...state.trendlinePlans.filter((p)=>p.plan_id!==response.plan.plan_id)] : state.trendlinePlans; state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; if(save) save.disabled=false; }
+    try { const payload=trendlinePayload(); const response=state.trendlineEditId ? await request(`/api/trendline-plans/${encodeURIComponent(state.trendlineEditId)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}) : await post('/api/trendline-plans',payload); if(response.plan) {trendlineDetailsOpen.set(response.plan.plan_id,false);trendlineDetailsCollapse.add(response.plan.plan_id);} trendlineStatus(state.trendlineEditId ? 'Draft updated.' : 'Draft saved.'); resetTrendlineForm(); state.trendlinePlans=response.plan ? [response.plan,...state.trendlinePlans.filter((p)=>p.plan_id!==response.plan.plan_id)] : state.trendlinePlans; state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; if(save) save.disabled=false; }
   }
   function editTrendlinePlan(plan) {
     if (!plan || plan.status!=='draft') return;
@@ -1272,7 +1256,7 @@
         if(state.trendlineEditId===planId) {
           state.trendlineDetachedExpiry={value:plan.expiry_at_ms};
           state.trendlineEditId='';state.trendlineRestoreMissing=[];
-          clearAnchorImport('Plan deleted. Entered settings retained; Save draft explicitly to create a new draft.');
+          clearAnchorImport();
           $('trendline-save').textContent='Save draft';
           trendlineStatus('Plan permanently deleted. Entered settings retained; the next explicit Save draft creates a new draft.');
         } else trendlineStatus(finished?'Finished card removed; execution history retained.':'Unused plan permanently deleted.');
@@ -1293,14 +1277,13 @@
     panel.style.display='none'; resetTrendlineForm();
     anchorFormIds.forEach(id=>$(id)?.addEventListener('input',()=>{
       delete $(id).dataset.anchorEpoch;delete $(id).dataset.anchorLocal;
-      clearAnchorImport('Manual anchor edit; import provenance cleared.');
+      clearAnchorImport();
       if(id.endsWith('-time')) anchorEpoch(id,id.replace('-time','-utc'));
     }));
     $('trendline-import-text')?.addEventListener('input',previewAnchorImport);
     $('trendline-import-text')?.addEventListener('paste',pasteAnchorImport);
     $('trendline-import-text')?.addEventListener('drop',dropAnchorImport);
     $('trendline-import-text')?.addEventListener('dragover',event=>{event.preventDefault();});
-    $('trendline-import-apply')?.addEventListener('click',applyAnchorImport);
     $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }
   function configureTrendlinePlans(bootstrap) {
@@ -1775,6 +1758,7 @@
     quoteBtn.dataset.defaultLabel = defaultLabel;
     quoteBtn.disabled = true;
     quoteBtn.textContent = 'Calculating…';
+    if($('calc-results-disclosure')) $('calc-results-disclosure').open=false;
     invalidateQuote({ status: 'calculating', reason: 'Calculating position…' });
     try {
       if (state.webhook_mode === 'yes' && state.webhookCapability && state.webhookCapability.available === false) {
@@ -2015,8 +1999,9 @@
       const brokerResult = submitResp?.result || {};
       if (brokerResult.order_expiry) {
         expirySubmissionLocked = true;
-        $('bybit-expiry-status').textContent = `${brokerResult.order_expiry.status_label}; ${brisbaneTime(brokerResult.order_expiry.deadline_ms)}. Do not resubmit this order.`;
-        refreshExpiryStatus();
+        // Keep accepted-order feedback outside the collapsed quote and do not
+        // depend on the removed historical worker-status element.
+
       }
       const brokerOrder = brokerResult?.order || {};
       notifyOpenOrdersStateChanged({
@@ -2030,12 +2015,13 @@
       const adj = submitResp?.submit_level_adjustments || {};
       if (adj && adj.submit_take_profit_auto_adjusted) okEl.textContent = `Order submitted. TP adjusted from ${adj.original_take_profit_price} to ${adj.adjusted_take_profit_price} because LastPrice moved since quote.`;
       else okEl.textContent = 'Order submitted successfully.';
+      if(brokerResult.order_expiry) okEl.textContent += ` ${brokerResult.order_expiry.status_label}; ${brisbaneTime(brokerResult.order_expiry.deadline_ms)}. Do not resubmit this order.`;
       const submitWarnings = [];
       if (submitResp?.journal_context_saved === false) submitWarnings.push('Order may have been submitted, but journal enrichment context was not safely saved. Sync Journal may not be able to fill SL/target/timeframe/test/risk fields.');
       if (submitResp?.context_save_error) submitWarnings.push(String(submitResp.context_save_error));
       if (Array.isArray(submitResp?.warnings)) submitWarnings.push(...submitResp.warnings.map((w)=>String(w||'')).filter(Boolean));
       if (submitWarnings.length) {
-        okEl.textContent = 'Order submitted, but journal context warning requires attention.';
+        okEl.textContent += ' Journal context warning requires attention.';
         errorEl.textContent = submitWarnings.join(' ');
       }
       submitBtn.dataset.submitVisualState = 'success';
@@ -2048,7 +2034,7 @@
         }
       }, 1200);
     } catch (e) {
-      if (e.detail?.do_not_resubmit) { expirySubmissionLocked = true; refreshExpiryStatus(); }
+      if (e.detail?.do_not_resubmit) { expirySubmissionLocked = true; }
       okEl.textContent = '';
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
@@ -2066,9 +2052,9 @@
     $(id)?.addEventListener('input', syncExpiryControls);
   }
   syncExpiryControls();
-  refreshExpiryStatus();
+
   if (typeof window !== 'undefined' && window.__CALCULATOR_TESTING__) {
-    window.__expiryTestHooks = {state, expiryPayload, expiryPreviewDeadline, syncExpiryControls, refreshExpiryStatus};
+    window.__expiryTestHooks = {state, expiryPayload, expiryPreviewDeadline, syncExpiryControls};
   }
   setToggle('pepperstone-account-type-toggle', 'pepperstone_account_type');
   setToggle('account-toggle', 'account', () => { refreshPrewarmSchedule(); resolveSymbolAndLoad(); });

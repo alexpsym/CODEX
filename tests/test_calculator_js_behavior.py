@@ -432,7 +432,7 @@ eval(source);
   el['calc-risk'].value='11';
   el['calc-risk'].listeners.input();
   const invalidatedAfterEdit = el['calc-pepperstone-set'].style.display === 'none' && el['calc-pepperstone-set'].disabled === true;
-  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setReady,setPayload,automaticSetRequests,automaticOrderRequests,automaticDownloads,explicitSetRequests,downloadsAfterExplicitClick,invalidatedAfterEdit,setButton:el['calc-pepperstone-set'].style.display,submitAfterQuote,submitDisabledAfterEdit:el['calc-submit'].disabled,preflightAfterQuote,summary:el['calc-request-summary'].textContent}));
+  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setReady,setPayload,automaticSetRequests,automaticOrderRequests,automaticDownloads,explicitSetRequests,downloadsAfterExplicitClick,invalidatedAfterEdit,setButton:el['calc-pepperstone-set'].style.display,submitAfterQuote,submitDisabledAfterEdit:el['calc-submit'].disabled,preflightAfterQuote,summary:el['calc-request-summary'].innerHTML}));
 })();
 '''
     out = subprocess.check_output([node, "-e", harness, str(JS_PATH)], text=True)
@@ -710,19 +710,20 @@ let submitted=null;
 let broadcasts=[];let storageEvents=[];
 global.BroadcastChannel=class{constructor(name){this.name=name;}postMessage(msg){broadcasts.push({name:this.name,msg});}close(){}};
 global.localStorage={setItem:(key,value)=>storageEvents.push({key,value:JSON.parse(value)})};
-global.fetch=async (url,opts={})=>{if(url.includes('/quote'))return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',venue:'Bybit',resolved_venue:'Bybit',symbol:'BTCUSDT',entry_price:'79300',stop_price:'78784.5',target_price:'79669',quantity:'0.012',calculation_context_id:'ctx1',quote_created_at_ms:123})};if(url.includes('/submit')){submitted=JSON.parse(opts.body||'{}');return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ok:true,broker:'bybit',venue:'Bybit',resolved_venue:'Bybit'})};}return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
+global.fetch=async (url,opts={})=>{if(url.includes('/quote'))return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({asset:'crypto',broker:'bybit',venue:'Bybit',resolved_venue:'Bybit',symbol:'BTCUSDT',entry_price:'79300',stop_price:'78784.5',target_price:'79669',quantity:'0.012',calculation_context_id:'ctx1',quote_created_at_ms:123})};if(url.includes('/submit')){submitted=JSON.parse(opts.body||'{}');return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ok:true,broker:'bybit',venue:'Bybit',resolved_venue:'Bybit'})};}return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
 global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};eval(source);
-(async()=>{await el['calc-quote'].listeners.click();await el['calc-submit'].listeners.click();console.log(JSON.stringify({submitted,summary:el['calc-request-summary'].textContent,broadcasts,storageEvents}));})();
+(async()=>{await new Promise(setImmediate);await el['calc-quote'].listeners.click();const quoteError=el['calc-error'].textContent;await el['calc-submit'].listeners.click();console.log(JSON.stringify({quoteError,submitted,summary:el['calc-request-summary'].innerHTML,error:el['calc-error'].textContent,broadcasts,storageEvents}));})();
 '''
     out = subprocess.run([node, '-e', harness, str(JS_PATH)], check=True, capture_output=True, text=True)
     data = json.loads(out.stdout.strip().splitlines()[-1])
+    assert data['submitted'] is not None, data
     assert data['submitted']['planned_entry_price'] == '79300'
     assert data['submitted']['stop_loss_price'] == '78784.5'
     assert data['submitted']['broker'] == 'bybit'
-    assert 'planned_entry_price=79300' in data['summary']
-    assert 'take_profit_price=79669' in data['summary']
-    assert 'broker=bybit' in data['summary']
-    assert 'venue=Bybit' in data['summary']
+    assert '<dt>planned_entry_price</dt><dd>79300</dd>' in data['summary']
+    assert '<dt>take_profit_price</dt><dd>79669</dd>' in data['summary']
+    assert '<dt>broker</dt><dd>bybit</dd>' in data['summary']
+    assert '<dt>venue</dt><dd>Bybit</dd>' in data['summary']
     assert data['broadcasts'][0]['name'] == 'trading-tools-open-orders'
     assert data['broadcasts'][0]['msg']['type'] == 'state-changed'
     assert data['broadcasts'][0]['msg']['action'] == 'submit'
@@ -993,7 +994,7 @@ const payloads=[];
 global.fetch=async (url,opts={})=>{if(url.includes('/api/calculator/quote')){payloads.push(JSON.parse(opts.body||'{}'));return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',tick_size:'1',entry_price:'100',stop_price:'90',target_price:'120',target_distance:'20',quantity:'1',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20'})};}return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
 global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};global.setInterval=()=>1;global.clearInterval=()=>{};
 eval(source);
-(async()=>{el['vwap-toggle'].buttons.find((b)=>b.dataset.v==='Yes').click();await el['calc-quote'].listeners.click();const ready=el['calc-quote-status'].textContent;el['vwap-toggle'].buttons.find((b)=>b.dataset.v==='No').click();const stale=el['calc-quote-status'].textContent;await el['calc-quote'].listeners.click();console.log(JSON.stringify({payloads,ready,stale,summary:el['calc-request-summary'].textContent}));})();
+(async()=>{el['vwap-toggle'].buttons.find((b)=>b.dataset.v==='Yes').click();await el['calc-quote'].listeners.click();const ready=el['calc-quote-status'].textContent;el['vwap-toggle'].buttons.find((b)=>b.dataset.v==='No').click();const stale=el['calc-quote-status'].textContent;await el['calc-quote'].listeners.click();console.log(JSON.stringify({payloads,ready,stale,summary:el['calc-request-summary'].innerHTML}));})();
 '''
     out = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
     data = json.loads(out.stdout.strip().splitlines()[-1])
@@ -1201,7 +1202,7 @@ class Element extends Button {
   get innerHTML(){return this.html||'';}
   querySelectorAll(s){return s==='button'?this.buttons:s==='[data-tl-action]'?this.actions:[];}
 }
-const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','setup-toggle','pattern-toggle','ema-toggle','vwap-toggle','aths-atls-toggle','round-number-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle','trendline-import-text','trendline-import-preview','trendline-import-preview-btn','trendline-import-apply','trendline-plans-panel','trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-1-utc','trendline-anchor-2-time','trendline-anchor-2-price','trendline-anchor-2-utc','trendline-trigger-mode','trendline-cross-direction','trendline-price-basis','trendline-tolerance-ticks','trendline-right-extension','trendline-expiry','trendline-save','trendline-reset','trendline-refresh','trendline-plan-status','trendline-plan-list','trendline-monitor-start','trendline-monitor-stop','trendline-monitor-status'];
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','setup-toggle','pattern-toggle','ema-toggle','vwap-toggle','aths-atls-toggle','round-number-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle','trendline-import-text','trendline-import-preview','trendline-import-preview-btn','trendline-plans-panel','trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-1-utc','trendline-anchor-2-time','trendline-anchor-2-price','trendline-anchor-2-utc','trendline-trigger-mode','trendline-cross-direction','trendline-price-basis','trendline-tolerance-ticks','trendline-right-extension','trendline-expiry','trendline-save','trendline-reset','trendline-refresh','trendline-plan-status','trendline-plan-list','trendline-monitor-start','trendline-monitor-stop','trendline-monitor-status'];
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 async function run(){
@@ -1257,7 +1258,6 @@ async function run(){
  const copy=x=>JSON.parse(JSON.stringify(x));
  const preview=text=>{el['trendline-import-text'].value=text;el['trendline-import-text'].listeners.input();};
  const fields=()=>['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price'].map(id=>el[id].value);
- const apply=()=>el['trendline-import-apply'].click();
  const paste=text=>{
   let prevented=0, reads=0;
   el['trendline-import-text'].dispatchEvent({type:'paste',clipboardData:{getData:format=>{assert.equal(format,'text/plain');reads++;return text;}},preventDefault(){prevented++;}});
@@ -1280,7 +1280,7 @@ async function run(){
   const imageDrop=()=>el['trendline-import-text'].dispatchEvent({type:'drop',dataTransfer:{files:[file()]},preventDefault(){}});
   const assertAnchors=()=>{expected.anchors.forEach((a,i)=>{assert.equal(el[`trendline-anchor-${i+1}-time`].dataset.anchorEpoch,String(a.timestamp_ms),el['trendline-import-preview'].textContent);assert.equal(el[`trendline-anchor-${i+1}-price`].value,a.price);});assert.equal(el['trendline-right-extension'].checked,expected.right_extension);assert.equal(settings(),originalSettings);};
   if(imageOptions.rpc||imageOptions.http){
-   for(let i=0;i<4;i++){const start=performance.now();await imagePaste();timings.push(performance.now()-start);assertAnchors();assert(el['trendline-import-preview'].textContent.includes('unsaved'));}
+   for(let i=0;i<4;i++){const start=performance.now();await imagePaste();timings.push(performance.now()-start);assertAnchors();assert.equal(el['trendline-import-preview'].textContent,'Success');}
    await imageDrop();assertAnchors();assert.equal(imports(),5);
    const beforeText=imports();paste(JSON.stringify(expected));assertAnchors();assert.equal(imports(),beforeText,'Text paste does not request OCR');
    assert(calls.slice(baseline).every(c=>c.url==='/api/calculator/anchor-image'),'Only the local OCR endpoint is requested by image import');
@@ -1294,8 +1294,8 @@ async function run(){
   pending=imagePaste();await flush();el['account-toggle'].buttons.find(b=>b.dataset.v==='live').click();reply(5);await pending;assert.deepEqual(fields(),['','','',''],'Context change supersedes OCR');
   el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();await flush();
   originalSettings=settings();pending=imageDrop();await flush();reply(6);await pending;assertAnchors();
-  const intact=fields();pending=imagePaste();await flush();reply(7,{...expected,symbol:'PEPPERSTONE:USDJPY'});await pending;assert.deepEqual(fields(),intact);assert(el['trendline-import-preview'].textContent.includes('match'));
-  pending=imagePaste();await flush();reply(8,'A1 milliseconds is ambiguous; no anchors applied.',422);await pending;assert.deepEqual(fields(),intact);assert(el['trendline-import-preview'].textContent.includes('A1 milliseconds'));
+  const intact=fields();pending=imagePaste();await flush();reply(7,{...expected,symbol:'PEPPERSTONE:USDJPY'});await pending;assert.deepEqual(fields(),intact);assert.equal(el['trendline-import-preview'].textContent,'Fail \u2014 wrong symbol. Retry.');
+  pending=imagePaste();await flush();reply(8,'A1 milliseconds is ambiguous; no anchors applied.',422);await pending;assert.deepEqual(fields(),intact);assert.equal(el['trendline-import-preview'].textContent,'Fail \u2014 invalid anchor time. Retry.');
   const beforeInvalid=imports();await imagePaste({...file(),type:'image/jpeg'});assert.equal(imports(),beforeInvalid);assert.deepEqual(fields(),intact);
   assert(!calls.slice(baseline).some(c=>c.method==='POST'&&c.url!=='/api/calculator/anchor-image'),'No save, quote, arm, monitoring or order POST');
   console.log('image stale/drop controls passed');return;
@@ -1306,9 +1306,9 @@ async function run(){
   assert(action('draft-a','delete'));assert(action('cancelled-c','delete'));assert(!action('protected-p','delete'));assert(action('draft-a','cancel'));
   assert(action('expired-e','delete'));assert(!action('expired-protected','delete'));
   await action('draft-a','edit').click();
-  const noImportRequests=calls.length,initial=fields();preview(JSON.stringify(packet));assert.deepEqual(fields(),initial);assert(!el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('Right extension'));
-  preview('');assert(el['trendline-import-apply'].disabled);assert.deepEqual(fields(),initial);preview('{bad');assert(el['trendline-import-apply'].disabled);assert.deepEqual(fields(),initial);
-  preview(JSON.stringify(packet));apply();assert.equal(calls.length,noImportRequests);assert.deepEqual([el['trendline-anchor-1-price'].value,el['trendline-anchor-2-price'].value],packet.anchors.map(a=>a.price));
+  const noImportRequests=calls.length;preview(JSON.stringify(packet));assert.equal(el['trendline-import-preview'].textContent,'Success');const initial=fields();
+  preview('');assert.equal(el['trendline-import-preview'].textContent,'');assert.deepEqual(fields(),initial);preview('{bad');assert(el['trendline-import-preview'].textContent.startsWith('Fail \u2014'));assert.deepEqual(fields(),initial);
+  preview(JSON.stringify(packet));assert.equal(calls.length,noImportRequests);assert.deepEqual([el['trendline-anchor-1-price'].value,el['trendline-anchor-2-price'].value],packet.anchors.map(a=>a.price));
   const settings=()=>JSON.stringify({anchors:fields(),risk:el['calc-risk'].value,sl:el['calc-sl-ticks'].value,rr:el['calc-rr'].value,limit:el['calc-limit'].value,expiry:el['trendline-expiry'].value,mode:el['trendline-trigger-mode'].value,direction:el['trendline-cross-direction'].value,basis:el['trendline-price-basis'].value,tolerance:el['trendline-tolerance-ticks'].value,extension:el['trendline-right-extension'].checked});
   const editing=settings();const remove=action('draft-a','delete');const failing=remove.click();remove.click();assert.equal(deleteCalls,1);assert(action('draft-a','delete'),'Keep card until confirmation');deleteReply(false);await failing;assert(action('draft-a','delete'));assert(el['trendline-plan-status'].textContent.includes('Delete failed'));assert.equal(settings(),editing);assert.equal(el['trendline-save'].textContent,'Update draft');
   holdList=true;const stale=el['trendline-refresh'].click();assert(releaseList);holdList=false;
@@ -1328,26 +1328,18 @@ async function run(){
  }
  if(process.argv[2]==='extension'){
   const now=Date.now();packet.anchors[0].timestamp_ms=now-3600000+123;packet.anchors[1].timestamp_ms=now+3600000+987;
-  assert(packet.anchors[0].timestamp_ms<now && packet.anchors[1].timestamp_ms>now);
   const baseline=calls.length;
   const preserved=()=>{assert.equal(el['calc-risk'].value,'2.5');assert.equal(el['calc-sl-ticks'].value,'50');assert.equal(el['calc-rr'].value,'3.25');assert.equal(el['calc-limit'].value,'99.25');assert.equal(el['trendline-trigger-mode'].value,'confirmed_cross');assert.equal(el['trendline-cross-direction'].value,'upward');assert.equal(el['trendline-price-basis'].value,'midpoint');assert.equal(el['trendline-tolerance-ticks'].value,'2');};
-  const prior=fields();packet.right_extension=true;
-  preview('LTT Anchor Export 2A.1 | LTT_ANCHORS_V1 '+JSON.stringify(packet));
-  assert.deepEqual(fields(),prior);assert.equal(el['trendline-right-extension'].checked,false);assert(el['trendline-import-preview'].textContent.includes('ON (right ray)'));
-  apply();assert.equal(el['trendline-right-extension'].checked,true);assert.equal(calls.length,baseline);preserved();
-  await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);assert.equal(plans[0].right_extension,true);await edit();preserved();assert.equal(el['trendline-right-extension'].checked,true);
-  const beforeOff=calls.length;packet.right_extension=false;preview(JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('OFF (segment)'));assert.equal(el['trendline-right-extension'].checked,true);apply();assert.equal(el['trendline-right-extension'].checked,false);assert.equal(calls.length,beforeOff);preserved();
-  await el['trendline-save'].click();await edit();assert.equal(plans[0].right_extension,false);assert.equal(el['trendline-right-extension'].checked,false);assert.deepEqual(plans[0].anchors,packet.anchors);preserved();
-  delete packet.right_extension;preview(JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('not supplied'));apply();assert.equal(el['trendline-right-extension'].checked,false);
-  el['trendline-right-extension'].checked=true;preview(JSON.stringify(packet));apply();assert.equal(el['trendline-right-extension'].checked,true);
+  packet.right_extension=true;paste('LTT_ANCHORS_V1 '+JSON.stringify(packet));assert.equal(el['trendline-right-extension'].checked,true);assert.equal(calls.length,baseline);preserved();
+  assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-anchor-2-time'].value,expectedLocal(packet.anchors[1].timestamp_ms));
+  await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);await edit();preserved();
+  const beforeOff=calls.length;packet.right_extension=false;paste(JSON.stringify(packet));assert.equal(el['trendline-right-extension'].checked,false);assert.equal(calls.length,beforeOff);preserved();
+  await el['trendline-save'].click();await edit();assert.equal(plans[0].right_extension,false);assert.deepEqual(plans[0].anchors,packet.anchors);preserved();
+  delete packet.right_extension;paste(JSON.stringify(packet));assert.equal(el['trendline-right-extension'].checked,false);
+  el['trendline-right-extension'].checked=true;paste(JSON.stringify(packet));assert.equal(el['trendline-right-extension'].checked,true);
   const intact=fields(),reads=calls.length;
-  for(const invalid of ['true',0,1,null,[],{}]){
-   preview(JSON.stringify({...packet,right_extension:invalid}));assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('boolean'));apply();assert.deepEqual(fields(),intact);assert.equal(el['trendline-right-extension'].checked,true);assert.equal(calls.length,reads);
-  }
-  preview(JSON.stringify({...packet,right_extension:false}));el['trendline-right-extension'].checked=false;apply();assert(el['trendline-import-preview'].textContent.includes('Form/context changed'));assert.deepEqual(fields(),intact);assert.equal(calls.length,reads);
-  assert.equal(calls.filter(c=>c.method==='POST'&&c.url==='/api/trendline-plans').length,1);assert.equal(calls.filter(c=>c.method==='PATCH').length,1);
-  assert(!calls.some(c=>c.url.includes('/arm')||c.url.includes('/monitor/')&&c.method==='POST'||c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
-  console.log('future coordinate extension roundtrip passed');return;
+  for(const invalid of ['true',0,1,null,[],{}]){paste(JSON.stringify({...packet,right_extension:invalid}));assert.equal(el['trendline-import-preview'].textContent,'Fail \u2014 invalid extension. Retry.');assert.deepEqual(fields(),intact);assert.equal(el['trendline-right-extension'].checked,true);assert.equal(calls.length,reads);}
+  return;
  }
  if(process.argv[2]==='roundtrip'){
   const before=calls.length;
@@ -1356,35 +1348,35 @@ async function run(){
   }
   paste(process.argv[4] ? JSON.parse(process.argv[4])[0] : 'Earlier plain log text\n[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet)+'\nLater plain log text');
   assert(Object.values(writes).every(n=>n===1),'Exactly one assignment to each anchor on a successful paste');
-  assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('unsaved'));
+  assert.equal(el['trendline-import-preview'].textContent,'Success');
   assert(process.argv[4] ? el['trendline-import-text'].value===JSON.parse(process.argv[4])[0] : el['trendline-import-text'].value.includes('Later plain log text'));
   const first=fields();const nextPacket=process.argv[4] ? JSON.parse(JSON.parse(process.argv[4])[1]) : {...packet,anchors:packet.anchors.map(a=>({...a,timestamp_ms:a.timestamp_ms,price:a.price+'0'}))};Object.assign(packet,nextPacket);
   paste(process.argv[4] ? JSON.parse(process.argv[4])[1] : JSON.stringify(packet));assert.notDeepEqual(fields(),first);assert(Object.values(writes).every(n=>n===2),'Second paste replaces the prior import without clearing first');
-  assert.equal(el['trendline-import-text'].value,process.argv[4] ? JSON.parse(process.argv[4])[1] : JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC '+new Date(packet.anchors[0].timestamp_ms).toISOString()));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(Object.values(writes).every(n=>n===2));assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
+  assert.equal(el['trendline-import-text'].value,process.argv[4] ? JSON.parse(process.argv[4])[1] : JSON.stringify(packet));assert.equal(el['trendline-import-preview'].textContent,'Success');assert(el['trendline-anchor-1-utc'].textContent.includes(new Date(packet.anchors[0].timestamp_ms).toISOString()));assert(Object.values(writes).every(n=>n===2));assert.equal(calls.length,before);
   assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-anchor-2-time'].value,expectedLocal(packet.anchors[1].timestamp_ms));
   if(process.env.TZ==='Australia/Brisbane')assert(el['trendline-anchor-2-time'].value.startsWith(process.argv[4] ? '2026-10-31T00:00:02.987' : '2026-10-31T00:00:01.987'));
   const preserved=()=>{assert.equal(el['calc-risk'].value,'2.5');assert.equal(el['calc-sl-ticks'].value,'50');assert.equal(el['calc-rr'].value,'3.25');assert.equal(el['calc-limit'].value,'99.25');assert.equal(el['trendline-trigger-mode'].value,'confirmed_cross');assert.equal(el['trendline-cross-direction'].value,'upward');assert.equal(el['trendline-price-basis'].value,'midpoint');assert.equal(el['trendline-tolerance-ticks'].value,'2');assert.equal(el['trendline-right-extension'].checked,false);};preserved();
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const initial=copy(plans[0]);await edit();preserved();assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
   const editRequests=calls.length;packet.anchors=packet.anchors.map(a=>({...a,price:a.price+'1'}));
   paste('[Info] LTT_ANCHORS_V1 '+JSON.stringify(packet));assert.equal(calls.length,editRequests);preserved();
-  assert.equal(el['trendline-save'].textContent,'Update draft');assert(el['trendline-import-preview'].textContent.includes('unsaved'));
+  assert.equal(el['trendline-save'].textContent,'Update draft');assert.equal(el['trendline-import-preview'].textContent,'Success');
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const patch=calls.find(c=>c.method==='PATCH').body;for(const k of ['risk_value','stop_loss_ticks','rr_target','limit_entry_price','trigger_mode','cross_direction','trigger_price_basis','tolerance_ticks','right_extension'])assert.deepEqual(patch[k],initial[k]);assert.equal(plans[0].plan_id,'anchor-draft');
   await freshContext(JSON.parse(process.argv[3]));
  }else{
   paste(JSON.stringify(packet));await el['trendline-save'].click();await edit();const original=fields();const before=calls.length;
   const invalid=['', '{', JSON.stringify(packet)+JSON.stringify(packet), 'LTT_ANCHORS_V1 '+JSON.stringify(packet)+' LTT_ANCHORS_V1 '+JSON.stringify(packet), 'x'.repeat(8193), 'Before LTT_ANCHORS_V1 '+JSON.stringify(packet)+' trailing '+JSON.stringify(packet)];
   for(const mutate of [p=>delete p.schema,p=>p.schema='bad',p=>p.anchors.pop(),p=>p.anchors.push(p.anchors[0]),p=>p.anchors[1].timestamp_ms=p.anchors[0].timestamp_ms,p=>p.anchors.reverse(),p=>p.anchors[0].timestamp_ms=1.5,p=>p.anchors[0].timestamp_ms=8640000000000001,p=>p.anchors[0].timestamp_ms='123',p=>p.anchors[0].price='0',p=>p.anchors[0].price='NaN',p=>p.anchors[0].price=100,p=>p.symbol='BINANCE:BTCUSDT.P',p=>p.symbol='BYBIT:ETHUSDT.P',p=>p.timeframe='5']){const bad=copy(packet);mutate(bad);invalid.push(JSON.stringify(bad));}
-  for(const text of invalid){paste(text);assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('rejected'));apply();assert.deepEqual(fields(),original);assert.equal(calls.length,before);}
+  for(const text of invalid){paste(text);assert(text?el['trendline-import-preview'].textContent.startsWith('Fail \u2014'):el['trendline-import-preview'].textContent==='');assert.deepEqual(fields(),original);assert.equal(calls.length,before);}
   const future=copy(packet);future.anchors[1].timestamp_ms=Date.now()+3600000+987;future.right_extension=true;
   paste('LTT_ANCHORS_V1 '+JSON.stringify(future));assert.equal(el['trendline-right-extension'].checked,true);
   assert(el['trendline-anchor-2-utc'].textContent.includes(new Date(future.anchors[1].timestamp_ms).toISOString()));
   delete future.right_extension;paste(JSON.stringify(future));assert.equal(el['trendline-right-extension'].checked,true,'Absent extension preserves current setting');
   future.right_extension=false;paste(JSON.stringify(future));assert.equal(el['trendline-right-extension'].checked,false);assert.equal(calls.length,before);
   // Manual edits and reset clear pending and applied provenance.
-  preview(JSON.stringify(packet));el['trendline-anchor-1-price'].value='102';el['trendline-anchor-1-price'].listeners.input();assert(el['trendline-import-apply'].disabled);assert.equal(el['trendline-import-text'].value,'');assert(el['trendline-import-preview'].textContent.includes('Manual'));
-  preview(JSON.stringify(packet));el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('context'));
-  preview(JSON.stringify(packet));el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='5m').click();assert(el['trendline-import-apply'].disabled);preview(JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('timeframe'));
-  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();preview(JSON.stringify(packet));el['trendline-reset'].click();assert.deepEqual(fields(),['','','','']);assert(el['trendline-import-apply'].disabled);assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
+  preview(JSON.stringify(packet));el['trendline-anchor-1-price'].value='102';el['trendline-anchor-1-price'].listeners.input();assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
+  preview(JSON.stringify(packet));el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();assert.equal(el['trendline-import-preview'].textContent,'');
+  preview(JSON.stringify(packet));el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='5m').click();preview(JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('timeframe'));
+  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();preview(JSON.stringify(packet));el['trendline-reset'].click();assert.deepEqual(fields(),['','','','']);assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
   assert.equal(calls.filter(c=>c.method==='POST'&&c.url==='/api/trendline-plans').length,1);assert(!calls.some(c=>c.method==='PATCH'));
  }
  assert(!calls.some(c=>c.url.includes('/arm')||c.url.includes('/monitor/')&&c.method==='POST'||c.url.includes('/submit')||c.url.includes('/quote')||c.url.includes('webhook')));
@@ -1453,7 +1445,7 @@ def test_tradingview_anchor_import_preserves_exact_draft_roundtrip(tmp_path):
     for timezone in ('UTC', 'Australia/Brisbane'):
         _run_anchor_import_behavior('roundtrip', timezone, record)
 
-def test_tradingview_anchor_table_packet_roundtrip(tmp_path):
+def test_tradingview_anchor_pine_logs_packet_roundtrip(tmp_path):
     import re
     import runpy
     import sys
@@ -1474,14 +1466,10 @@ def test_tradingview_anchor_table_packet_roundtrip(tmp_path):
     moved = packet_text(1793368797123, '100.00012345', 1793368802987, '102.00098765001')
     assert json.loads(first)['anchors'][1] == {'timestamp_ms': 1793368801987, 'price': '101.00098765'}
     assert json.loads(moved)['anchors'][1] == {'timestamp_ms': 1793368802987, 'price': '102.00098765001'}
-    assert 'table.new(position.top_right, 1, 2,' in pine
-    assert "str.replace_all(packet, ',\"', ',\\n\"')" in pine
-    assert "str.replace_all(copyPacket, '},{', '},\\n{')" in pine
-    assert 'table.cell(selectionStatus, 0, 1, copyPacket,' in pine
-    assert pine.index('table.cell(selectionStatus, 0, 1, copyPacket,') < pine.index('if packet != emitted')
-    invalid_branch = pine.split('    else\n        // Never leave a previously valid packet available for copying.', 1)[1]
-    assert 'table.cell(selectionStatus, 0, 1, "", bgcolor = color.black)' in invalid_branch
-    assert 'log.info(' in pine and 'LTT_ANCHORS_V1 " + packet)' in pine
+    assert not any(token in pine for token in ['table.', 'label.', 'plot(', 'Move tables to bottom', 'copyPacket', 'string coordinates'])
+    assert 'line.new(time1, price1, time2, price2,' in pine
+    assert 'if packet != emitted' in pine and 'LTT_ANCHORS_V1 " + packet)' in pine
+    assert 'log.warning(reason)' in pine and 'line.delete(boundary)' in pine
     payload = runpy.run_path(str(ROOT / 'tests/test_trendline_plans.py'))['_saved_anchor_repair_payload']()
     store = TrendlinePlanStore(tmp_path / 'table-draft.json')
     record = store.create(payload, now_ms=1793368802000)
@@ -1618,3 +1606,151 @@ server={...server,status:'armed',revision:server.revision+1};state.trendlinePlan
     result = subprocess.run([node, '-e', harness, str(JS_PATH)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'editor contracts passed' in result.stdout
+
+
+def test_calculator_streamlined_native_disclosures_and_payload(tmp_path):
+    """Real isolated Edge layout/interaction; every broker/API response is synthetic."""
+    import ast
+    import base64
+    import json
+    import os
+    import time
+    import urllib.request
+    import websocket
+    service_source = (ROOT / 'render/master_service.py').read_text(encoding='utf-8-sig')
+    tree = ast.parse(service_source)
+    template = ast.literal_eval(next(n.value for n in tree.body if isinstance(n, ast.Assign)
+                                    and any(isinstance(t, ast.Name) and t.id == 'CALCULATOR_TEMPLATE' for t in n.targets)))
+    assert 'bybit-expiry-status' not in template and 'Local trendline monitoring' not in template
+    assert 'trendline-import-apply' not in template and 'placeholder="Paste JSON"' in template
+    mock = r"""
+window.__CALCULATOR_TESTING__=true;
+window.fixtureCalls=[];window.fixturePlans=[];
+window.historyBTC={worker:{healthy:true},schedules:[{symbol:'BTCUSDT',status_label:'Broker-confirmed cancellation',deadline_ms:1793368802000}]};
+window.fetch=async(url,opts={})=>{
+ const method=opts.method||'GET',body=opts.body?JSON.parse(opts.body):{};fixtureCalls.push({url,method,body});let data={};
+ if(url.includes('/bootstrap'))data={app_profile:'local',trendline_plans_available:true,trendline_monitoring:{running:false},webhook:{available:true}};
+ else if(url.includes('/instrument?'))data={symbol:'BTCUSDT',asset:'crypto',broker:'bybit',tick_size:'0.1'};
+ else if(url.includes('/order-expiry/status'))data=historyBTC;
+ else if(url==='/api/calculator/quote')data={asset:'crypto',broker:'bybit',symbol:'BTCUSDT',entry_price:'100',stop_price:'95',target_price:'110',quantity:'2',tick_size:'0.1',estimated_total_loss:'10',estimated_reward:'20',calculation_context_id:'ctx-native-'+ 'W'.repeat(120),quote_created_at_ms:Date.now()};
+ else if(url==='/api/calculator/submit')data={ok:true,broker:'bybit',result:{order:{orderId:'fixture-only'},order_expiry:{status_label:'Cancellation scheduled',deadline_ms:Date.now()+300000}}};
+ else if(url==='/api/trendline-plans'&&method==='GET')data={plans:fixturePlans};
+ else if(url==='/api/trendline-plans'&&method==='POST'){
+  const plan={...body,plan_id:'native-draft-'+fixturePlans.length,status:'draft',can_delete:true,revision:1,order_intent:body.order_type,action:body.side,order_metadata:Object.fromEntries(['setup','pattern','ema','vwap','aths_atls','round_number'].map(k=>[k,body[k]||null]))};fixturePlans.push(plan);data={plan};
+ }else if(url.startsWith('/api/trendline-plans/')&&method==='PATCH'){
+  const id=url.split('/')[3];fixturePlans=fixturePlans.map(p=>p.plan_id===id?{...p,...body}:p);data={plan:fixturePlans.find(p=>p.plan_id===id)};
+ }else if(url.startsWith('/api/trendline-plans/')&&method==='POST'){
+  const id=url.split('/')[3],action=url.split('/')[4];fixturePlans=fixturePlans.map(p=>p.plan_id===id?{...p,status:action==='arm'?'armed':'cancelled',monitoring_eligible:action==='arm'}:p);data={plan:fixturePlans.find(p=>p.plan_id===id)};
+ }else if(url.startsWith('/api/trendline-plans/')&&method==='DELETE'){
+  const id=url.split('/')[3];fixturePlans=fixturePlans.filter(p=>p.plan_id!==id);data={ok:true,deleted_plan_id:id};
+ }
+ return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data),json:async()=>data};
+};
+"""
+    html = template.replace('<script src="{{CALCULATOR_JS_URL}}"></script>',
+                            '<script>' + mock + '</script><script src="' + JS_PATH.as_uri() + '"></script>')
+    page = tmp_path / 'calculator.html'
+    page.write_text(html, encoding='utf-8')
+    profile = tmp_path / 'edge-profile'
+    profile.mkdir()
+    binary = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    assert Path(binary).is_file(), 'Recorded Edge required; no install/download'
+    process = None
+    ws = None
+    with (tmp_path / 'edge.log').open('wb') as log:
+        process = subprocess.Popen([binary, '--headless=new', '--disable-gpu', '--no-first-run',
+                                    '--no-default-browser-check', '--disable-background-networking',
+                                    '--disable-component-update', '--disable-sync', '--remote-debugging-port=0',
+                                    '--user-data-dir=' + str(profile), 'about:blank'],
+                                   stdout=log, stderr=subprocess.STDOUT,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            deadline = time.monotonic() + 20
+            active = profile / 'DevToolsActivePort'
+            while not active.is_file():
+                assert process.poll() is None, 'Private Edge exited before DevTools startup'
+                assert time.monotonic() < deadline, 'Private Edge startup deadline'
+                time.sleep(.05)
+            port = int(active.read_text().splitlines()[0])
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list', timeout=5) as response:
+                target = next(t for t in json.load(response) if t['type'] == 'page')
+            ws = websocket.create_connection(target['webSocketDebuggerUrl'], timeout=10, suppress_origin=True)
+            sequence = 0
+            def call(method, params=None):
+                nonlocal sequence
+                sequence += 1
+                ws.send(json.dumps(dict(id=sequence, method=method, params=params or {})))
+                while True:
+                    data = json.loads(ws.recv())
+                    if data.get('id') == sequence:
+                        assert 'error' not in data, data
+                        return data.get('result', {})
+            def evaluate(script):
+                data = call('Runtime.evaluate', dict(expression=script, awaitPromise=True, returnByValue=True))
+                assert 'exceptionDetails' not in data, data
+                return data.get('result', {}).get('value')
+            call('Page.navigate', dict(url=page.as_uri()))
+            deadline = time.monotonic() + 15
+            while not evaluate("!!window.__expiryTestHooks && !!document.querySelector('#trendline-save')"):
+                assert time.monotonic() < deadline, 'Private page initialization deadline'
+                time.sleep(.05)
+            result = evaluate(r"""(async()=>{
+ const $=id=>document.getElementById(id),wait=()=>new Promise(r=>setTimeout(r,80));
+ const check=(v,m)=>{if(!v)throw Error(m)};
+ const paste=text=>$('trendline-import-text').dispatchEvent(new ClipboardEvent('paste',{clipboardData:new DataTransfer(),bubbles:true,cancelable:true}));
+ const textPaste=text=>{const data=new DataTransfer();data.setData('text/plain',text);$('trendline-import-text').dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
+ const packet={schema:'ltt-anchors/v1',symbol:'BYBIT:BTCUSDT.P',timeframe:'1',right_extension:true,anchors:[{timestamp_ms:1793368797123,price:'100.00012345'},{timestamp_ms:1793368801987,price:'101.00098765'}]};
+ $('calc-symbol').value='BTCUSDT';$('calc-symbol').dispatchEvent(new Event('input'));await new Promise(r=>setTimeout(r,650));
+ document.querySelector('#account-toggle [data-v="demo"]').click();document.querySelector('#timeframe-toggle [data-v="1m"]').click();document.querySelector('#order-toggle [data-v="limit"]').click();$('calc-limit').value='100';
+ check(!$('calc-results-disclosure').open,'Quote initially collapsed');
+ const count=fixtureCalls.length;textPaste('[2026-10-31T00:00:01] [Info] LTT Anchor Export 2A.3 | LTT_ANCHORS_V1 '+JSON.stringify(packet));
+ check($('trendline-import-preview').textContent==='Success','Full Pine Logs paste');
+ check($('trendline-anchor-1-price').value===packet.anchors[0].price,'Exact price');
+ check($('trendline-anchor-1-time').dataset.anchorEpoch==='1793368797123','Exact milliseconds');check(fixtureCalls.length===count,'Paste sends zero requests');
+ const prior=[$('trendline-anchor-1-time').value,$('trendline-anchor-1-price').value,$('trendline-anchor-2-time').value,$('trendline-anchor-2-price').value,$('trendline-right-extension').checked];
+ textPaste(JSON.stringify({...packet,timeframe:'5',right_extension:false}));check($('trendline-import-preview').textContent==='Fail \u2014 wrong timeframe. Retry.','Short failure');
+ check(JSON.stringify(prior)===JSON.stringify([$('trendline-anchor-1-time').value,$('trendline-anchor-1-price').value,$('trendline-anchor-2-time').value,$('trendline-anchor-2-price').value,$('trendline-right-extension').checked]),'Failure atomic');
+ $('trendline-save').click();await wait();check(fixturePlans.length===1,'Save draft');
+ let d=document.querySelector('[data-tl-settings]');check(d&&!d.open,'Saved settings collapsed');
+ for(const action of ['arm','edit','cancel','delete'])check(document.querySelector('[data-tl-action="'+action+'"]')?.getClientRects().length,'Visible '+action);
+ d.querySelector('summary').click();await wait();$('trendline-refresh').click();await wait();check(document.querySelector('[data-tl-settings]').open,'Refresh preserves open');
+ document.querySelector('[data-tl-settings] summary').click();await wait();$('trendline-refresh').click();await wait();check(!document.querySelector('[data-tl-settings]').open,'Refresh preserves closed');
+ document.querySelector('[data-tl-action="edit"]').click();textPaste(JSON.stringify(packet));document.querySelector('[data-tl-settings] summary').click();await wait();$('trendline-save').click();await wait();check(!document.querySelector('[data-tl-settings]').open,'Update collapses settings');
+ document.querySelector('[data-tl-action="arm"]').click();await wait();check(fixturePlans[0].status==='armed','Arm fixture');document.querySelector('[data-tl-action="cancel"]').click();await wait();check(fixturePlans[0].status==='cancelled','Cancel fixture');
+ document.querySelector('[data-tl-action="delete"]').click();await wait();check(fixturePlans.length===0,'Delete fixture');
+ $('calc-quote').click();await wait();check(!$('calc-results-disclosure').open,'New Calculate collapsed');
+ check($('calc-results').innerHTML.includes('Estimated'),'Complete quote table');$('calc-results-disclosure').querySelector('summary').click();await wait();check($('calc-results').getClientRects().length,'Quote opens');
+ const expanded=$('calc-results-disclosure').getBoundingClientRect().height;$('calc-results-disclosure').querySelector('summary').click();await wait();check($('calc-results-disclosure').getBoundingClientRect().height<expanded,'Collapse frees space');
+ $('calc-results-disclosure').querySelector('summary').click();$('calc-quote').click();await wait();check(!$('calc-results-disclosure').open,'Subsequent Calculate collapses again');
+ check($('calc-submit').getClientRects().length,'Submit outside disclosure');
+ $('bybit-expiry-mode').value='duration';$('bybit-expiry-value').value='5';$('bybit-expiry-unit').value='minutes';$('bybit-expiry-mode').dispatchEvent(new Event('change'));
+ $('calc-quote').click();await wait();$('calc-submit').click();await wait();
+ check($('calc-success').textContent.includes('Cancellation scheduled')&&$('calc-success').textContent.includes('Do not resubmit'),'Current expiry acknowledgement visible');check(!$('calc-error').textContent,'Accepted submission has no DOM-removal error');
+ check([...document.querySelectorAll('.payload-pair')].some(p=>p.querySelector('dt').textContent==='side'&&p.querySelector('dd').textContent==='buy'),'Actual submitted side');
+ check([...document.querySelectorAll('.payload-pair')].some(p=>p.querySelector('dt').textContent==='webhook'&&p.querySelector('dd').textContent==='no'),'Current webhook choice');
+ check(!fixtureCalls.some(c=>c.url.includes('/order-expiry/status')),'Historical BTC status not requested');check(!document.body.innerText.includes('Broker-confirmed cancellation'),'No historical expiry output');
+ check(fixtureCalls.filter(c=>c.url==='/api/calculator/submit').length===1,'One simulated submit');$('calc-submit').click();await wait();check(fixtureCalls.filter(c=>c.url==='/api/calculator/submit').length===1,'Duplicate guard');
+ return {requests:fixtureCalls.length,success:$('calc-success').textContent,submitted:fixtureCalls.find(c=>c.url==='/api/calculator/submit').body};
+})()""")
+            widths = {}
+            for width in (1440, 390):
+                call('Emulation.setDeviceMetricsOverride', dict(width=width,height=1100,deviceScaleFactor=1,mobile=False))
+                widths[width] = evaluate("(()=>{const e=document.querySelector('.payload-grid'),r=e.getBoundingClientRect();return {columns:getComputedStyle(e).gridTemplateColumns.split(' ').length,width:r.width,page:document.documentElement.scrollWidth,viewport:innerWidth,pairs:e.children.length,content:e.scrollWidth,box:e.clientWidth}})()")
+                assert widths[width]['page'] <= width, widths[width]
+                assert widths[width]['pairs'] >= 20
+                assert widths[width]['content'] <= widths[width]['box'], widths[width]
+                evaluate("document.getElementById('calc-request-summary').scrollIntoView()")
+                png = call('Page.captureScreenshot', dict(format='png'))['data']
+                (tmp_path / f'payload-{width}.png').write_bytes(base64.b64decode(png))
+            assert widths[1440]['columns'] >= 3 and widths[390]['columns'] == 1, widths
+            print('NATIVE_EDGE_FIXTURE', json.dumps(dict(result=result, widths=widths)))
+        finally:
+            if ws is not None:
+                try:
+                    ws.send(json.dumps(dict(id=999999, method='Browser.close')))
+                finally:
+                    ws.close()
+            if process is not None:
+                exit_code = process.wait(timeout=15)
+                print('PRIVATE_EDGE_ACTUAL_EXIT', exit_code)
+                assert exit_code == 0

@@ -29730,6 +29730,11 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .action-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-start;padding:10px;border:1px solid var(--line);background:#0b1220}
     .quote-panel{display:flex;flex-direction:column;gap:12px}
     .calc-results-area{grid-column:1 / -1;min-width:0}
+    .quote-disclosure>summary{cursor:pointer;font-weight:600;padding:10px;border:1px solid var(--line);background:var(--panel-2)}
+    .payload-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:10px;margin:8px 0}
+    .payload-pair{min-width:0;border:1px solid var(--line-soft);padding:8px;background:var(--panel-2);border-radius:6px}
+    .payload-pair dt{color:var(--muted);font-size:.86rem;overflow-wrap:anywhere}
+    .payload-pair dd{margin:3px 0 0;overflow-wrap:anywhere;white-space:normal}
     .quote-results{border:1px solid var(--line);background:#0b1220;min-height:160px}
     .quote-results table{width:100%;border-collapse:collapse;table-layout:fixed}
     .quote-results th,.quote-results td{border-bottom:1px solid var(--line-soft);padding:8px 10px;text-align:left;vertical-align:top}
@@ -29815,14 +29820,15 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <div class="grid" id="calc-error-debug"></div>
             <div id="calc-success" class="ok"></div>
             <div id="calc-request-summary" class="muted"></div>
-            <div id="bybit-expiry-status" class="muted" role="status" aria-label="Durable Bybit expiry status"></div>
           </div>
-          <table class="calc-table">
-            <caption>Quote Results</caption>
+          <details id="calc-results-disclosure" class="quote-disclosure">
+            <summary>Quote Results</summary>
+            <table class="calc-table">
             <tbody>
               <tr><td colspan="2"><div class="quote-results" id="calc-results"></div></td></tr>
             </tbody>
-          </table>
+            </table>
+          </details>
           <div id="calc-webhook-panel" class="status-area" style="display:none">
             <table class="calc-table">
               <caption>Webhook</caption>
@@ -29836,8 +29842,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <table class="calc-table">
               <caption id="trendline-plans-title">Local trendline plans</caption>
               <tbody>
-                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Save draft, then click Arm on the selected plan. Arm starts watching that plan while Local Trading Tools is running and the computer is awake. Stop monitoring pauses all plans; click Arm on each specific card to resume after Stop or an LTT restart. Bybit plans submit an actual order to their saved Demo or Live account after fresh validation, including Test Yes; Test is a trade classification. Any Bybit Live order requires explicit Live confirmation. OANDA Test plans retain simulation without a broker order. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below to fill both anchor fields immediately; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Import shows its optional extension flag and applies it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and paste/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
-                <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste a chart screenshot, export text/JSON, or drop one PNG"></textarea><div class="group"><div class="muted">Select the existing LTT Anchor Export indicator and drag either point, or choose More &rarr; Reset points and click two new endpoints on the same boundary. Paste a chart screenshot with the full export and A1/A2 lines visible, drop one PNG here, or paste export text/JSON. Recognition stays on this machine; both validated anchors fill immediately, unsaved. Save/Update draft explicitly.</div><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
+                <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste JSON"></textarea><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" ></div></td></tr>
                 <tr><th><label for="trendline-anchor-1-time">Anchor 1</label></th><td><div class="grid"><input id="trendline-anchor-1-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-1-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-1-utc" class="muted"></div></td></tr>
                 <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
                 <tr><th>Trigger</th><td><div class="grid"><label>Mode <select id="trendline-trigger-mode"><option value="touch">Touch</option><option value="confirmed_cross">Confirmed cross</option></select></label><label>Direction <select id="trendline-cross-direction"><option value="either">Either</option><option value="upward">Upward</option><option value="downward">Downward</option></select></label><label>Price basis <select id="trendline-price-basis"><option value="executable">Executable price</option><option value="bid">Bid</option><option value="ask">Ask</option><option value="midpoint">Midpoint</option></select></label><label>Tolerance ticks <input id="trendline-tolerance-ticks" type="number" min="0" step="1" value="0"/></label></div></td></tr>
