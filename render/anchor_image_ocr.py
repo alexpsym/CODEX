@@ -106,8 +106,11 @@ def _lines(tsv: str) -> list[dict]:
 
 def _number_crop(image: Image.Image, line: dict, label: str) -> Image.Image:
     for word in line['words']:
-        match = re.search(r'[0-9@Oo]+(?:\.[0-9@Oo]+)?', word['text'])
-        if match and (len(match.group()) >= 10 or '.' in match.group()):
+        # OCR can join the key and value into one token. A short match (the
+        # 'o' in anchors, for example) must not hide the subsequent value.
+        for match in re.finditer(r'[0-9@Oo]+(?:\.[0-9@Oo]+)?', word['text']):
+            if len(match.group()) < 10 and '.' not in match.group():
+                continue
             # The packet and A1/A2 numeric fields are monospace. Keep padding so
             # recognition, rather than a guessed digit substitution, decides.
             left = word['x'] + word['w'] * match.start() / max(1, len(word['text']))
@@ -165,7 +168,8 @@ def _tight_numeric_pixels(crop: Image.Image) -> Image.Image:
                       min(crop.width, spans[first + count - 1][1] + 2), min(crop.height, bottom + 3)))
 
 
-def _numeric_reads(crops: list[Image.Image], binary: str, deadline: float) -> list[str]:
+def _numeric_reads(crops: list[Image.Image], binary: str, deadline: float,
+                   timestamp_rows: list[Image.Image] | None = None) -> list[str]:
     versions = []
     for threshold in (None, 180):
         processed = []
@@ -193,6 +197,15 @@ def _numeric_reads(crops: list[Image.Image], binary: str, deadline: float) -> li
     agreed = list(versions[0])
     for i, (first, second) in enumerate(zip(*versions)):
         if first != second:
+            if i < 2 and timestamp_rows is not None:
+                # Read the complete labelled row independently. The UTC label
+                # only proves seconds; it cannot repair or supply milliseconds.
+                row = ImageOps.expand(ImageOps.invert(timestamp_rows[i].convert('L')), border=20, fill=255)
+                text = _ocr(row, binary, deadline, psm=7)
+                matches = re.findall(r'timestamp[_\s]*ms[^\d\n]*([0-9]{13,16})(?!\d)', text, re.I)
+                if len(matches) == 1 and matches[0] in (first, second):
+                    agreed[i] = matches[0]
+                    continue
             # Resolve only by another actual pixel read, never by choosing the
             # value closest to a price or by replacing a suspected digit.
             # Preserve native glyph strokes. Upscaling the slashed zero can
@@ -248,8 +261,13 @@ def _read_panel(panel: Image.Image, binary: str, deadline: float) -> dict:
             printed_prices.append(match.group(2))
         except ValueError as exc:
             raise AnchorImageError(f'A{index} printed UTC time invalid.') from exc
-    crops = [_number_crop(image, line, 'Timestamp/price') for line in times + prices + printed]
-    values = _numeric_reads(crops, binary, deadline)
+    fields = times + prices + printed
+    labels = ['A1 milliseconds', 'A2 milliseconds', 'A1 export price', 'A2 export price', 'A1 printed price', 'A2 printed price']
+    crops = [_number_crop(image, line, label) for line, label in zip(fields, labels)]
+    timestamp_rows = [image.crop((0, max(0, min(w['y'] for w in line['words']) - 4), image.width,
+                                  min(image.height, max(w['y'] + w['h'] for w in line['words']) + 5)))
+                      for line in times]
+    values = _numeric_reads(crops, binary, deadline, timestamp_rows)
     anchors = []
     for i in range(2):
         if not re.fullmatch(r'[1-9]\d{12,15}', values[i]):

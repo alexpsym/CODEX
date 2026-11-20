@@ -1221,6 +1221,7 @@ async function run(){
  const fetch=async(url,opts={})=>{
   const method=opts.method||'GET';const body=url==='/api/calculator/anchor-image'?null:opts.body?JSON.parse(opts.body):null;calls.push({url,method,body});
   if(url==='/api/calculator/anchor-image') {
+   if(imageOptions.http)return globalThis.fetch(imageOptions.http+url,opts);
    if(imageOptions.rpc){
     const index=calls.filter(c=>c.url==='/api/calculator/anchor-image').length-1;
     const path=require('path'),replyPath=path.join(imageOptions.rpc,'response-'+index+'.json');
@@ -1231,7 +1232,7 @@ async function run(){
    return new Promise(resolve=>imageReplies.push({resolve,signal:opts.signal}));
   }
   if(url==='/api/calculator/bootstrap')return response({app_profile:'local',trendline_plans_available:true,trendline_monitoring:{running:false},webhook:{available:true}});
-  if(url.startsWith('/api/calculator/instrument?'))return response(imageOptions?{symbol:'NZD_USD',asset:'fx',broker:'pepperstone'}:{symbol:'BTCUSDT',asset:'crypto',broker:'bybit'});
+  if(url.startsWith('/api/calculator/instrument?'))return response(imageOptions?(imageOptions.expected.symbol.startsWith('BYBIT:')?{symbol:'XRPUSDT',asset:'crypto',broker:'bybit'}:{symbol:'NZD_USD',asset:'fx',broker:'pepperstone'}):{symbol:'BTCUSDT',asset:'crypto',broker:'bybit'});
   if(url==='/api/trendline-plans'&&method==='GET'){
    if(holdList){const old=JSON.parse(JSON.stringify(plans));return new Promise(resolve=>{releaseList=()=>resolve(response({plans:old}));});}
    return response({plans});
@@ -1265,11 +1266,12 @@ async function run(){
  const edit=()=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction==='edit').click();
  const expectedLocal=ms=>{const d=new Date(ms),p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;};
  if(imageOptions){
-  el['asset-toggle'].buttons.find(b=>b.dataset.v==='fx').click();
-  el['broker-toggle'].buttons.find(b=>b.dataset.v==='pepperstone').click();
+  const isBybit=imageOptions.expected.symbol.startsWith('BYBIT:');
+  el['asset-toggle'].buttons.find(b=>b.dataset.v===(isBybit?'crypto':'fx')).click();
+  if(!isBybit)el['broker-toggle'].buttons.find(b=>b.dataset.v==='pepperstone').click();
   el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();
-  el['calc-symbol'].value='NZDUSD';el['calc-symbol'].listeners.input();await flush();
-  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='5m').click();await flush();
+  el['calc-symbol'].value=isBybit?'XRPUSDT':'NZDUSD';el['calc-symbol'].listeners.input();await flush();
+  el['timeframe-toggle'].buttons.find(b=>b.dataset.v===(isBybit?'1m':'5m')).click();await flush();
   const expected=imageOptions.expected, imports=()=>calls.filter(c=>c.url==='/api/calculator/anchor-image').length;
   const baseline=calls.length, settings=()=>JSON.stringify([el['calc-risk'].value,el['calc-sl-ticks'].value,el['calc-rr'].value,el['calc-limit'].value,el['trendline-trigger-mode'].value,el['trendline-expiry'].value]);
   let originalSettings=settings();const timings=[];
@@ -1277,7 +1279,7 @@ async function run(){
   const imagePaste=(value=file())=>el['trendline-import-text'].dispatchEvent({type:'paste',clipboardData:{items:[{kind:'file',type:'image/png',getAsFile:()=>value}]},preventDefault(){}});
   const imageDrop=()=>el['trendline-import-text'].dispatchEvent({type:'drop',dataTransfer:{files:[file()]},preventDefault(){}});
   const assertAnchors=()=>{expected.anchors.forEach((a,i)=>{assert.equal(el[`trendline-anchor-${i+1}-time`].dataset.anchorEpoch,String(a.timestamp_ms),el['trendline-import-preview'].textContent);assert.equal(el[`trendline-anchor-${i+1}-price`].value,a.price);});assert.equal(el['trendline-right-extension'].checked,expected.right_extension);assert.equal(settings(),originalSettings);};
-  if(imageOptions.rpc){
+  if(imageOptions.rpc||imageOptions.http){
    for(let i=0;i<4;i++){const start=performance.now();await imagePaste();timings.push(performance.now()-start);assertAnchors();assert(el['trendline-import-preview'].textContent.includes('unsaved'));}
    await imageDrop();assertAnchors();assert.equal(imports(),5);
    const beforeText=imports();paste(JSON.stringify(expected));assertAnchors();assert.equal(imports(),beforeText,'Text paste does not request OCR');
