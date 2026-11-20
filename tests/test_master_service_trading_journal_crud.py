@@ -1244,6 +1244,11 @@ def test_pepperstone_legacy_zero_stays_historical_and_compatible_cashflow_can_up
 def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applies_balance(
     temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    # Isolate durable contexts before the normal import touches classification enrichment.
+    monkeypatch.setattr(master_service,'TRADE_CONTEXTS_PATH',temp_state_paths/'contexts.json')
+    monkeypatch.setattr(master_service,'_TRADE_CONTEXTS_CACHE',{})
+    monkeypatch.setattr(master_service,'_trade_context_backup_fallback_enabled',lambda:False)
+    master_service._save_calculator_trade_contexts([])
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
     transaction_lock = temp_state_paths / "journal-transaction.lock"
     monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda _path: transaction_lock)
@@ -1354,6 +1359,179 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     reloaded = load_workbook(tiny_path)
     assert list(reloaded.active.values)[1] == (row_id, *expected_wall)
     reloaded.close()
+
+    # Job7: normal statement import/reimport with exact local classifications.
+    import tools.master_journal_workbook as journal
+    import zipfile
+    import xml.etree.ElementTree as ET
+    prior_row_id=row_id
+    # Add a second genuine statement position; prior imported/manual rows remain.
+    native=_pepperstone_mt5_native_rows();additional=[]
+    for old in native:
+        if len(old)>8 and old[1] in {'1001','1002','1003','1004'}:
+            new=list(old);new[0]=new[0].replace('2026.09.01','2026.09.02');new[1]=str(int(new[1])+1000)
+            new[7]=str(int(new[7])+1000);new[8]='7002';new[13]=float(new[13])+114.2;additional.append(new)
+    report=native[:-1]+additional+[['Balance',1128.40]]
+    payload=('<html><body><table>'+''.join('<tr>'+''.join('<td>'+str(v)+'</td>' for v in r)+'</tr>' for r in report)+'</table></body></html>').encode('utf-16')
+    input_path=temp_state_paths/'original-statement.html'
+    input_path.write_bytes(payload)
+    parsed,balance=master_service._parse_local_trading_journal_workbook(input_path,account_mode='live')
+    statement=next(row for row in parsed if (row.get('raw_refs') or {}).get('position_ticket')=='7002')
+    row_id=statement['id'];expected_financials={key:statement[key] for key in financial_fields}
+    context=dict(broker='pepperstone',account='demo',instrument=statement['symbol'],side=statement['side'],
+                 order_id=statement['raw_refs'].get('opening_order_id'),position_id=statement['raw_refs'].get('position_ticket'),
+                 calculation_context_id='matched-local',local_tracking=True,local_tracking_kind='pepperstone_calculator',
+                 order_type='limit',entry_price=statement['entry_price'],quantity=statement['qty'],open_time=statement['open_time'],
+                 planned_entry_price=str(statement['entry_price']),planned_stop_price=str(statement['entry_price']-.01),
+                 planned_target_price=str(statement['entry_price']+.025),risk_mode='fixed_aud',risk_value='10',risk_reward='2.5',
+                 target_mode='rr',timeframe='5m',setup='Pullback',pattern='channel',ema='9',vwap='No',
+                 classification_version=1,classification_overrides={'timeframe':'15MIN','setup':'Breakout','pattern':'',
+                     'ema':'20','vwap':'Yes','aths_atls':'All-Time High','round_number':'Yes'})
+    master_service._save_calculator_trade_contexts([context,dict(context,account='live',calculation_context_id='other-account'),
+        dict(context,instrument='GBPUSD',calculation_context_id='other-symbol')])
+    # Existing authored journal overrides still own their fields.
+    workbook_state['items'][0]['manual_overrides'].update(setup='Manual setup',notes='Keep this journal note')
+    monkeypatch.setattr(journal,'REPORT_START_YEAR',2026);monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(journal,'REPO_ROOT',temp_state_paths)
+    monkeypatch.setattr(journal,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    # A genuine non-Test saved trade supplies the writer's ordinary style baseline.
+    donor=copy.deepcopy(workbook_state['items'][0]);donor.update(id='fixture:ordinary-donor',symbol='GBPUSD',account='OANDA DEMO',is_test_trade=False,manual_overrides={},notes=None,raw_refs={})
+    workbook_state['items'].append(donor)
+    master_service._set_trading_journal_rows(copy.deepcopy(workbook_state['items']))
+    built=temp_state_paths/'seeded-package.xlsx'
+    journal._counter_build(copy.deepcopy(workbook_state),built,publish_recommendation_assets=False)
+    built.replace(workbook_path)
+    wb=load_workbook(workbook_path);authored=wb.create_sheet('Authored notes');authored['A1']='Keep this authored sheet';authored['B1']='=1+2'
+    from openpyxl.styles import Font
+    authored['A1'].font=Font(name='Arial',sz=17,bold=True)
+    trade=wb['Trade Log'];headers=journal._trade_log_header_map(trade)
+    source_row=next(i for i in range(4,trade.max_row+1) if trade.cell(i,headers['Row ID']).value==prior_row_id)
+    trade.cell(source_row,headers['Notes']).font=Font(name='Arial',sz=17,bold=True)
+    wb.save(workbook_path);wb.close()
+    with zipfile.ZipFile(workbook_path) as package:
+        infos=package.infolist();parts={i.filename:package.read(i.filename) for i in infos}
+    inspected=load_workbook(workbook_path);authored_part='xl/worksheets/sheet%d.xml'%len(inspected.sheetnames);inspected.close()
+    parts[authored_part]=parts[authored_part].replace(b'<f>1+2</f><v></v>',b'<f>1+2</f><v>3</v>').replace(b'<f>1+2</f><v />',b'<f>1+2</f><v>3</v>')
+    assert b'<f>1+2</f><v>3</v>' in parts[authored_part]
+    with zipfile.ZipFile(workbook_path,'w') as package:
+        for info in infos:package.writestr(info,parts[info.filename])
+    authored_xml=parts[authored_part];styles_xml=parts['xl/styles.xml']
+    baseline_wb=load_workbook(workbook_path);baseline_ws=baseline_wb['Trade Log'];prior_styles=[baseline_ws.cell(source_row,c).style_id for c in range(1,len(journal.TRADE_LOG_HEADERS)+1)];baseline_wb.close()
+    def real_fixture_sync(**kwargs):
+        snapshot=copy.deepcopy(kwargs['prebuilt_snapshot'])
+        result=journal.update_master_journal_workbook_data_only(workbook_path,snapshot,preserve_existing_layout=True,
+            publish_recommendation_assets=False,_new_row_ids={r['id'] for r in snapshot['items']}-{r['id'] for r in journal.read_master_journal_source(workbook_path)['items']})
+        assert result['ok'],result
+        candidate=Path(result['candidate_path'])
+        verified=journal.verify_saved_journal_workbook(candidate,expected_snapshot=snapshot)
+        assert verified['ok'],verified
+        candidate.replace(workbook_path)  # Only this isolated fixture is published.
+        workbook_state.clear();workbook_state.update(snapshot)
+        return {'ok':True,'master_journal_ok':True,'github_sync_ok':None,'missing_row_ids':[]}
+    def verify_published_ids(path,ids):
+        actual=load_workbook(path)
+        try:
+            ws=actual['Trade Log'];headers=journal._trade_log_header_map(ws)
+            found={str(ws.cell(i,headers['Row ID']).value) for i in range(4,ws.max_row+1) if ws.cell(i,headers['Row ID']).value}
+            missing=set(ids)-found
+            assert not missing,('missing published IDs',sorted(missing),sorted(found))
+            return {'ok':True,'missing_row_ids':[]}
+        finally:actual.close()
+    monkeypatch.setattr(master_service,'_verify_trade_log_row_ids_in_workbook',verify_published_ids)
+    monkeypatch.setattr(master_service,'_sync_master_journal_workbook',real_fixture_sync)
+    changed=master_service._import_uploaded_trading_journal_file('classification-statement.html',payload)
+    assert changed['ok'],(changed.get('errors'),changed.get('missing_row_ids'),changed.get('rollback_errors'))
+    updated=next(r for r in workbook_state['items'] if r['id']==row_id)
+    assert updated['timeframe']=='15MIN' and updated['pattern'] in ('',None)
+    assert updated['setup']=='Breakout'
+    prior=next(r for r in workbook_state['items'] if r['id']==prior_row_id)
+    assert prior['setup']=='Manual setup' and prior['notes']=='Keep this journal note'
+    assert updated['ema']=='20' and updated['vwap']=='Yes' and updated['round_number']=='Yes'
+    assert updated['risk_mode']=='fixed_aud' and str(updated['risk_value'])=='10' and str(updated['risk_reward'])=='2.5'
+    assert updated['raw_refs']['calculator_context']['risk_value']=='10'
+    assert updated['raw_refs']['calculator_context']['risk_reward']=='2.5'
+    assert {key:updated[key] for key in financial_fields}==expected_financials
+    # A new durable edit (including explicit clears) must survive the normal reimport merge.
+    context=dict(context,classification_version=2,classification_overrides={**context['classification_overrides'],'timeframe':'','ema':'','round_number':'No'})
+    master_service._save_calculator_trade_contexts([context])
+    repeated=master_service._import_uploaded_trading_journal_file('latest-statement.html',payload)
+    assert repeated['ok'],repeated
+    latest=next(r for r in workbook_state['items'] if r['id']==row_id)
+    assert latest['timeframe'] in ('',None) and latest['ema'] in ('',None)
+    assert latest['round_number']=='No' and latest['setup']=='Breakout'
+    assert len([r for r in workbook_state['items'] if r['id']==row_id])==1
+    assert {key:latest[key] for key in financial_fields}==expected_financials
+    with zipfile.ZipFile(workbook_path) as package:
+        assert package.read(authored_part)==authored_xml
+        before_styles=ET.fromstring(styles_xml);after_styles=ET.fromstring(package.read('xl/styles.xml'))
+        for before_group in before_styles:
+            after_group=after_styles.find(before_group.tag);assert after_group is not None
+            assert len(after_group)>=len(before_group)
+            assert [ET.tostring(c) for c in list(after_group)[:len(before_group)]]==[ET.tostring(c) for c in before_group]
+    wb=load_workbook(workbook_path);ws=wb['Trade Log'];h=journal._trade_log_header_map(ws)
+    rownum=next(i for i in range(4,ws.max_row+1) if ws.cell(i,h['Row ID']).value==prior_row_id)
+    assert ws.cell(rownum,h['Notes']).font.sz==17
+    assert [ws.cell(rownum,c).style_id for c in range(1,len(journal.TRADE_LOG_HEADERS)+1)]==prior_styles
+    assert len([r for r in workbook_state['items'] if r['id']==prior_row_id])==1
+    assert wb['Authored notes']['B1'].value=='=1+2';wb.close()
+    cached=load_workbook(workbook_path,data_only=True);assert cached['Authored notes']['B1'].value==3;cached.close()
+    # Competing exact contexts cannot inject their newer values, even through reimport.
+    before=copy.deepcopy(latest)
+    competing=dict(context,calculation_context_id='ambiguous-second',classification_version=9,
+                   classification_overrides={'ema':'99','setup':'WRONG'})
+    master_service._save_calculator_trade_contexts([context,competing])
+    ambiguous=master_service._import_uploaded_trading_journal_file('ambiguous-statement.html',payload)
+    assert ambiguous['ok'],ambiguous
+    after=next(r for r in workbook_state['items'] if r['id']==row_id)
+    assert after['ema'] in ('',None) and after['setup']=='Breakout'
+    assert after['risk_value']==before['risk_value'] and after['risk_reward']==before['risk_reward']
+    different=copy.deepcopy(statement)  # Same symbol, price, quantity and time; different proven broker references.
+    different['raw_refs']={**different.get('raw_refs',{}),'opening_order_id':'different','opening_order_ids':['different'],'position_ticket':'different'}
+    assert master_service._lookup_pepperstone_trade_context(different) is None
+    assert master_service._backfill_trade_row_context_fields(different).get('risk_value') is None
+    # A unique geometric candidate B is not proof of statement trade A.
+    unproven=dict(context,order_id=None,position_id=None,calculation_context_id='unproven-other-trade',risk_value='99',risk_reward='99',
+                  classification_overrides={'setup':'NEVER','ema':'99'})
+    master_service._save_calculator_trade_contexts([unproven])
+    assert master_service._lookup_pepperstone_trade_context(statement) is not None  # Legacy display estimate only.
+    assert master_service._lookup_pepperstone_trade_context(statement,require_identity=True) is None
+    guarded=master_service._backfill_trade_row_context_fields(copy.deepcopy(statement))
+    assert guarded.get('setup')!='NEVER' and guarded.get('ema')!='99'
+    assert guarded.get('risk_value') is None and guarded.get('risk_reward') is None
+    assert 'calculator_context' not in guarded.get('raw_refs',{})
+    unlinked=master_service._import_uploaded_trading_journal_file('unproven-statement.html',payload)
+    assert unlinked['ok'],unlinked
+    final=next(r for r in workbook_state['items'] if r['id']==row_id)
+    assert final.get('setup')!='NEVER' and final.get('ema')!='99'
+    assert final['risk_value']=='10' and final['risk_reward']=='2.5'
+    with monkeypatch.context() as changing:
+        strong=dict(context,calculation_context_id='proven-snapshot')
+        calls=[0]
+        def changing_lookup(row,*,require_identity=False):
+            if not require_identity:return unproven
+            calls[0]+=1
+            return None if calls[0]==1 else strong
+        changing.setattr(master_service,'_lookup_pepperstone_trade_context',changing_lookup)
+        coherent=master_service._backfill_trade_row_context_fields(copy.deepcopy(statement))
+        assert coherent['risk_value']=='10' and coherent['risk_reward']=='2.5'
+        assert coherent['raw_refs']['calculation_context_id']=='proven-snapshot'
+        assert coherent['raw_refs']['calculator_context']['risk_value']=='10'
+    # An initially unedited proven import is stamped too; later edits can update
+    # generated fields, while subsequent bare Excel changes/clears remain owned.
+    unedited=dict(context,classification_version=0,classification_overrides={})
+    master_service._save_calculator_trade_contexts([unedited])
+    generated=master_service._backfill_trade_row_context_fields(copy.deepcopy(statement))
+    assert generated['raw_refs']['pepperstone_classification']['version']==0
+    master_service._save_calculator_trade_contexts([context])
+    incoming=master_service._backfill_trade_row_context_fields(copy.deepcopy(statement))
+    managed=master_service._preserve_workbook_manual_fields(incoming,generated)
+    assert managed['round_number']=='No'
+    authored=copy.deepcopy(generated);authored['ema']='Manual EMA';authored['timeframe']=''
+    protected=master_service._preserve_workbook_manual_fields(incoming,authored)
+    assert protected['ema']=='Manual EMA' and protected['timeframe']==''
+
+
+
 
 
 def _job11_timestamp_fixture(tmp_path, monkeypatch):

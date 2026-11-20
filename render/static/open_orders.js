@@ -475,7 +475,14 @@
   const fieldValue = (item,field) => choiceValue(field,Object.prototype.hasOwnProperty.call(item.classification_values||{},field)?item.classification_values[field]:item[field]);
   const displayChoice = (field,value) => !value?'\u2014':field==='timeframe'?(timeframeLabels[value]||value):field==='pattern'?value[0].toUpperCase()+value.slice(1):value;
   const button = (label, action) => {const el=document.createElement('button');el.type='button';el.className='action-btn';el.textContent=label;el.addEventListener('click',action);return el;};
-  const classificationAllowed = (item,field) => Boolean(item?.classification_target) && (!item.classification_capabilities || item.classification_capabilities[field]===true);
+  const classificationAllowed = (item,field) => {
+    if(item?.local_tracking && String(item.broker||'').toLowerCase()==='pepperstone') {
+      if(item.classification_target_kind!=='pepperstone_local'||!['demo','live'].includes(item.account)||!item.calculation_context_id
+          ||item.id!==`pepperstone-local:${item.account}:${item.calculation_context_id}`
+          ||!String(item.classification_target||'').startsWith('pepperstone-local-classification:'))return false;
+    }
+    return Boolean(item?.classification_target) && (!item.classification_capabilities || item.classification_capabilities[field]===true);
+  };
   const updateCellAvailability = (entry,state) => {
     const draft=state.draft;if(!draft)return;
     const available=entry.present&&classificationAllowed(entry.item,state.field);
@@ -523,7 +530,7 @@
     const selected=state.select.value;
     const value=state.field==='is_test_trade'?(selected===''?null:selected==='Yes'):selected;
     entry.saving=state.field;draft.message='Saving...';synchronizeDrafts(entry);
-    const requestedTarget=entry.item.classification_target,requestedObject=brokerObjectKey(entry.item);
+    const requestedTarget=entry.item.classification_target,requestedObject=brokerObjectKey(entry.item),requestedVersion=draft.version;
     const planTarget=entry.item.classification_target_kind==='trendline_plan',planId=entry.item.trendline_plan_id;
     const committed=()=>{state.draft=null;state.valueButton=null;state.savedUntil=Date.now()+2500;
       render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
@@ -536,6 +543,15 @@
       if(entry.item.classification_target!==requestedTarget||brokerObjectKey(entry.item)!==requestedObject){
         if(planTarget&&data.ok===true&&data.saved_target===requestedTarget){committed();return;}
         draft.conflict=true;throw new Error('Broker object changed. Draft retained; Reload before saving.');
+      }
+      if(entry.item.classification_target_kind==='pepperstone_local' &&
+          (data.ok!==true||data.saved_target!==requestedTarget||!data.item||brokerObjectKey(data.item)!==requestedObject
+           ||data.item.calculation_context_id!==entry.item.calculation_context_id
+           ||data.item.classification_target!==requestedTarget||!Number.isSafeInteger(data.version)||data.version!==requestedVersion+1
+           ||data.item.classification_version!==data.version||!Object.prototype.hasOwnProperty.call(data.values||{},state.field)
+           ||fieldValue({classification_values:data.values},state.field)!==selected
+           ||fieldValue(data.item,state.field)!==selected)) {
+        draft.conflict=true;throw new Error('Local save acknowledgement did not match this row. Draft retained; Reload before saving.');
       }
       // A delayed earlier publication/acknowledgment cannot replace newer metadata.
       if(Number(data.version)>=Number(entry.item.classification_version||0))entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};

@@ -6393,6 +6393,8 @@ def _merge_trading_journal_row(
             if (value is None or (isinstance(value, str) and value.strip() == "")) and merged.get(key) is not None:
                 continue
         merged[key] = value
+    if str(incoming.get("source") or "").lower() == "pepperstone_mt5_statement":
+        merged = _apply_journal_classification(merged)  # Explicit clears survive null-preserving merges.
     return _normalize_journal_profit_fields(_reapply_trading_journal_manual_overrides(merged))
 
 
@@ -7743,6 +7745,35 @@ def _preserve_workbook_manual_fields(
             continue
         value = workbook_row.get(field)
         merged[field] = copy.deepcopy(value)
+    if str(current.get("source") or "").lower() == "pepperstone_mt5_statement":
+        context = _lookup_pepperstone_trade_context(current, require_identity=True)
+        if context is not None:
+            previous = (workbook_row.get("raw_refs") or {}).get("pepperstone_classification") or {}
+            owned = previous.get("values") if (previous.get("context_id") == context.get("calculation_context_id")
+                     and previous.get("account") == context.get("account")
+                     and type(previous.get("version")) is int
+                     and previous["version"] <= int(context.get("classification_version") or 0)) else {}
+            manual = dict(merged.get("manual_overrides") or {})
+            protected = set(manual) | set(merged.get("manual_override_fields") or [])
+            for field in _PEPPERSTONE_CLASSIFICATION_FIELDS:
+                if field not in workbook_row:
+                    continue
+                def comparable(value):
+                    if value in (None, ""):
+                        return ""
+                    return (_normalize_journal_timeframe(value) if field == "timeframe"
+                            else _CLASSIFICATION_FIELDS[field](value))
+                try:
+                    unchanged = field in (owned or {}) and comparable(workbook_row[field]) == comparable(owned[field])
+                except (TypeError, ValueError):
+                    unchanged = False
+                if field in protected or not unchanged:
+                    # An unstamped or subsequently authored value/clear stays
+                    # journal-owned; never infer ownership from a blank cell.
+                    manual[field] = copy.deepcopy(workbook_row[field])
+            merged["manual_overrides"] = manual
+            merged["manual_override_fields"] = sorted(set(merged.get("manual_override_fields") or []) | set(manual))
+            merged = _apply_journal_classification(merged)
     return merged
 
 
@@ -23408,6 +23439,24 @@ def _trendline_classification_view(plan):
             "classification_capabilities": {field: bool(target and field in PLAN_CLASSIFICATION_FIELDS) for field in _CLASSIFICATION_FIELDS}}
 
 
+_PEPPERSTONE_CLASSIFICATION_FIELDS = frozenset({"timeframe", "setup", "pattern", "ema", "vwap", "aths_atls", "round_number"})
+
+
+def _pepperstone_local_classification_target(context):
+    if (str(context.get("broker") or "").lower() != "pepperstone"
+            or context.get("local_tracking") is not True
+            or context.get("local_tracking_kind") != "pepperstone_calculator"
+            or context.get("local_tracking_removed_at")
+            or str(context.get("order_type") or "").lower() not in {"market", "limit"}
+            or context.get("account") not in {"demo", "live"}
+            or not str(context.get("calculation_context_id") or "").strip()):
+        return None
+    # Metadata authority only: this does not establish a broker order or fill.
+    identity = {key: context.get(key) for key in ("account", "calculation_context_id", "instrument", "side",
+                "order_type", "quote_created_at_ms", "account_identity", "account_fingerprint", "planned_entry_price")}
+    return "pepperstone-local-classification:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 def _classification_writable_context(row, context):
     # The display matcher may enrich incomplete scopes; write authority is stricter.
     if str(row.get("broker") or "").lower() not in {"bybit", "oanda"}:
@@ -23440,6 +23489,8 @@ def _classification_target(row, context):
 
 
 def _classification_for_journal(row):
+    if str(row.get("source") or "").lower() == "pepperstone_mt5_statement":
+        return _lookup_pepperstone_trade_context(row, require_identity=True)
     from tools.master_journal_workbook import _trade_folder_identity
     scope, identities = _trade_folder_identity(row)
     if not identities:
@@ -23465,16 +23516,28 @@ def _classification_for_journal(row):
 def _apply_journal_classification(row):
     context = _classification_for_journal(row)
     overlay = context.get("classification_overrides") if context else None
-    if not isinstance(overlay, dict) or not overlay:
+    proven_pepperstone = str(row.get("source") or "").lower() == "pepperstone_mt5_statement" and context is not None
+    if not isinstance(overlay, dict):
+        overlay = {}
+    if not overlay and not proven_pepperstone:
         return row
     updated = dict(row)
     updated.update(overlay)
     metrics = dict(row.get("metrics") or {})
     metrics.update({key: value for key, value in overlay.items() if key in {"timeframe", "is_test_trade"}})
     updated["metrics"] = metrics
-    updated["classification_version"] = context["classification_version"]
+    updated["classification_version"] = int(context.get("classification_version") or 0)
     # Existing journal/workbook manual edits retain their established precedence.
-    return _reapply_trading_journal_manual_overrides(updated)
+    updated = _reapply_trading_journal_manual_overrides(updated)
+    if str(row.get("source") or "").lower() == "pepperstone_mt5_statement":
+        manual = set(updated.get("manual_overrides") or {}) | set(updated.get("manual_override_fields") or [])
+        refs = dict(updated.get("raw_refs") or {})
+        refs["pepperstone_classification"] = {
+            "context_id": context.get("calculation_context_id"), "account": context.get("account"),
+            "version": int(context.get("classification_version") or 0),
+            "values": {key: updated.get(key) for key in _PEPPERSTONE_CLASSIFICATION_FIELDS if key not in manual}}
+        updated["raw_refs"] = refs
+    return updated
 
 
 # Separate from calculator intent and classification versions. Journal reservations
@@ -24041,6 +24104,35 @@ async def save_open_order_classification(payload: Dict[str, object]) -> Dict[str
                 "item": item, "saved_target": payload["target"],
                 "publication": {"version": job.version if job and job.authoritative else _OPEN_ORDERS_CACHE.get("version"),
                                 "progress_revision": (job.payload if job and job.authoritative else snapshot or {}).get("progress_revision", 0)}}
+    if str(payload.get("target") or "").startswith("pepperstone-local-classification:"):
+        if set(normalized) - _PEPPERSTONE_CLASSIFICATION_FIELDS:
+            raise HTTPException(400, "Only local Pepperstone annotation fields may change")
+        with _TRADE_CONTEXTS_LOCK:
+            items = _load_calculator_trade_contexts()  # Fresh durable read inside the existing context transaction.
+            matches = [(index, context) for index, context in enumerate(items)
+                       if _pepperstone_local_classification_target(context) == payload["target"]]
+            rows = [row for row in _pepperstone_local_tracker_rows(items)
+                    if row.get("classification_target") == payload["target"]]
+            if len(matches) != 1 or len(rows) != 1:
+                raise HTTPException(409, "Local row is removed, changed or ambiguous. Reload; draft was not saved.")
+            index, context = matches[0]
+            version = int(context.get("classification_version") or 0)
+            if payload["version"] != version:
+                raise HTTPException(409, "Classification changed. Reload this cell before saving; draft retained.")
+            saved = dict(context, classification_overrides={**context.get("classification_overrides", {}), **normalized},
+                         classification_version=version + 1, classification_updated_at=_utc_now_iso())
+            items[index] = saved
+            _save_calculator_trade_contexts(items)  # Atomic write BEFORE any success acknowledgement.
+            item = next(row for row in _pepperstone_local_tracker_rows(items) if row["id"] == rows[0]["id"])
+        if job and job.authoritative:
+            job.publish()
+        elif snapshot:
+            for i, row in enumerate(snapshot.get("items", [])):
+                if row.get("local_tracking") and row.get("id") == item["id"]:
+                    snapshot["items"][i] = dict(item)
+            snapshot["progress_revision"] = int(snapshot.get("progress_revision") or 0) + 1
+        return {"ok": True, "saved_target": payload["target"], "version": version + 1,
+                "values": item["classification_values"], "item": item}
     from tools.master_journal_workbook import _trade_allocation_lock
     with _trade_allocation_lock(), _TRADE_CONTEXTS_LOCK:
         candidates = []
@@ -24405,7 +24497,7 @@ def _lookup_trade_context_by_market_window(
     return candidates[0][1]
 
 
-def _lookup_pepperstone_trade_context(row: Dict[str, object]) -> Optional[Dict[str, object]]:
+def _lookup_pepperstone_trade_context(row: Dict[str, object], *, require_identity: bool = False) -> Optional[Dict[str, object]]:
     """Match a Pepperstone statement row only when the evidence identifies one quote.
 
     MT5 statement rows use a journal label while calculator contexts use the
@@ -24441,6 +24533,10 @@ def _lookup_pepperstone_trade_context(row: Dict[str, object]) -> Optional[Dict[s
         ctx_identity = str(ctx.get("account_identity") or ctx.get("account_fingerprint") or "").strip()
         if row_identity and ctx_identity and row_identity != ctx_identity:
             return False
+        if opening_order_ids and ctx.get("order_id") and str(ctx["order_id"]).strip() not in opening_order_ids:
+            return False
+        if position_ticket and ctx.get("position_id") and str(ctx["position_id"]).strip() != position_ticket:
+            return False
         if _canonical_symbol(str(ctx.get("instrument") or ctx.get("symbol") or "")) != symbol:
             return False
         return _normalize_side_for_comparison(ctx.get("side")) == side
@@ -24453,7 +24549,7 @@ def _lookup_pepperstone_trade_context(row: Dict[str, object]) -> Optional[Dict[s
     ]
     if len(linked) == 1:
         return linked[0]
-    if linked:
+    if linked or require_identity:
         return None
     if entry is None or qty is None or row_open is None:
         return None
@@ -27741,7 +27837,8 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
     current_aths_atls = str(row.get("aths_atls") or "").strip()
     current_round_number = str(row.get("round_number") or "").strip()
     if (
-        current_timeframe
+        str(row.get("source") or "").lower() != "pepperstone_mt5_statement"
+        and current_timeframe
         and not needs_tpsl
         and current_is_test_trade is not None
         and current_setup
@@ -27779,11 +27876,28 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
 
     patched = dict(row)
     if is_pepperstone_statement:
+        proven_context = _lookup_pepperstone_trade_context(row, require_identity=True)
+        original = proven_context if proven_context is not None else ctx
+        proven = proven_context is not None
+        if proven:
+            ctx = {**proven_context, **proven_context.get("classification_overrides", {})}
+            for key in ("risk_mode", "risk_value", "risk_reward", "target_basis", "target_mode", "stop_loss_ticks",
+                        "planned_entry_price", "planned_stop_price", "planned_target_price",
+                        "original_stop_distance", "original_target_distance"):
+                if key in original:
+                    patched[key] = original[key]
+            ctx.setdefault("stop_loss", original.get("planned_stop_price"))
+            ctx.setdefault("take_profit", original.get("planned_target_price"))
         refs = dict(patched.get("raw_refs") or {}) if isinstance(patched.get("raw_refs"), dict) else {}
         context_id = str(ctx.get("calculation_context_id") or ctx.get("context_id") or "").strip()
         if context_id:
             refs["calculation_context_id"] = context_id
             refs["context_linked_by"] = "pepperstone_exact_statement_match"
+            if proven:
+                refs["calculator_context"] = {key: original[key] for key in _CALCULATOR_INTENT_FIELDS if key in original}
+                patched["classification_version"] = int(original.get("classification_version") or 0)
+            else:
+                refs["context_linked_by"] = "pepperstone_compatible_estimate"
             patched["raw_refs"] = refs
     if not current_timeframe:
         timeframe = _normalize_timeframe(ctx.get("timeframe"))
@@ -38513,8 +38627,11 @@ def _open_orders_transient(errors):
 
 def _pepperstone_local_tracker_rows(contexts=None):
     """Build visible planning rows only from explicitly durable ready contexts."""
+    contexts = list(contexts if contexts is not None else _load_calculator_trade_contexts())
     rows = {}
-    for ctx in contexts if contexts is not None else _load_calculator_trade_contexts():
+    identities = [(str(ctx.get("account") or "").lower(), str(ctx.get("calculation_context_id") or "").strip()) for ctx in contexts
+                  if str(ctx.get("broker") or "").lower() == "pepperstone"]
+    for ctx in contexts:
         if (str(ctx.get("broker") or "").lower() != "pepperstone"
                 or ctx.get("local_tracking") is not True
                 or ctx.get("local_tracking_removed_at")
@@ -38556,6 +38673,17 @@ def _pepperstone_local_tracker_rows(contexts=None):
             "source_key": "Pepperstone local calculator",
         }
         _enrich_open_item_with_trade_context(row, ctx)
+        target = _pepperstone_local_classification_target(ctx) if identities.count((account, cid)) == 1 else None
+        row.update(classification_target=target, classification_target_kind="pepperstone_local",
+                   classification_version=int(ctx.get("classification_version") or 0),
+                   classification_values={key: ctx.get("classification_overrides", {}).get(key, ctx.get(key))
+                                          for key in _PEPPERSTONE_CLASSIFICATION_FIELDS},
+                   classification_capabilities={key: bool(target and key in _PEPPERSTONE_CLASSIFICATION_FIELDS)
+                                                for key in _CLASSIFICATION_FIELDS})
+        if not target:
+            row["classification_unavailable"] = "Local context identity is ambiguous or unavailable"
+        else:
+            row.pop("classification_unavailable", None)
         row["venue"] = "Pepperstone (local MT5)"
         fill = ctx.get("local_mt5_fill") if order_type == "market" else None
         row["manual_fill_revision"] = int(fill.get("revision") or 0) if isinstance(fill, dict) else 0

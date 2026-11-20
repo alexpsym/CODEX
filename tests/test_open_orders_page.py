@@ -5515,7 +5515,7 @@ const reply=(data,status=200)=>({ok:status===200,status,statusText:'fixture',tex
 global.fetch=async(url,opts={})=>{
   if(opts.method==='POST'){
     assert.strictEqual(url,'/api/open-orders/classification');const body=JSON.parse(opts.body);calls.push({url,body});
-    assert.deepStrictEqual(Object.keys(body).sort(),['changes','target','version']);assert.strictEqual(Object.keys(body.changes).length,1);assert.strictEqual(body.target,'exact-accepted-target');
+    assert.deepStrictEqual(Object.keys(body).sort(),['changes','target','version']);assert.strictEqual(Object.keys(body.changes).length,1);assert.strictEqual(body.target,row.classification_target);
     if(mode==='hold')await new Promise(resolve=>release=resolve);
     if(mode==='fail')return reply({detail:'Save failed; retry explicitly'},500);
     if(mode==='conflict'){
@@ -5525,7 +5525,7 @@ global.fetch=async(url,opts={})=>{
     assert.strictEqual(body.version,row.classification_version,'each serialized save must use the latest acknowledged version');
     const values={...row.classification_values,...body.changes};
     publish({classification_values:values,classification_version:row.classification_version+1,timeframe:labels[values.timeframe]||'',pattern:values.pattern?values.pattern[0].toUpperCase()+values.pattern.slice(1):'None',setup:values.setup,is_test_trade:values.is_test_trade===true?'Yes':values.is_test_trade===false?'No':''});
-    return reply({ok:true,values,version:row.classification_version,item:row});
+    return reply({ok:true,saved_target:body.target,values,version:mode==='badversion'?undefined:row.classification_version,item:mode==='wrongack'?{...row,calculation_context_id:'wrong'}:row});
   }
   return reply(url.includes('/version')?{version:1,progress_revision:snapshot.progress_revision}:snapshot);
 };
@@ -5591,6 +5591,27 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
   const unlinked=tbody.children.find(tr=>idle(cell(tr,'Timeframe'))?.title==='No exact calculator linkage');assert(unlinked);
   for(const header of Object.keys(mapping)){assert(idle(cell(unlinked,header)).disabled);idle(cell(unlinked,header)).click();assert(!select(cell(unlinked,header)));}
   find(timeframe,'Cancel').click();assert.strictEqual(select(pattern),orphanPattern);find(pattern,'Cancel').click();assert(!tbody.children.includes(main));
+  for(const account of ['demo','live'])for(const kind of ['market','limit']){
+    const cid=account+'-'+kind;
+    row={...row,broker:'Pepperstone',account,category:'forex',instrument:'EURUSD',type:kind==='market'?'Market plan':'Limit plan',order_type:kind,
+      id:`pepperstone-local:${account}:${cid}`,calculation_context_id:cid,local_tracking:true,status:kind==='limit'?'Pending limit; execution unverified':'Awaiting MT5 fill price',
+      classification_target:'pepperstone-local-classification:'+cid,classification_target_kind:'pepperstone_local',classification_version:0,
+      classification_capabilities:Object.fromEntries(Object.values(mapping).map(k=>[k,!['is_test_trade','webhook_classification'].includes(k)])),
+      classification_values:{timeframe:'1m',setup:'Pullback',pattern:'channel',ema:'9',vwap:'No',aths_atls:'All-Time Low',round_number:'No'}};
+    snapshot={...snapshot,items:[row],progress_revision:snapshot.progress_revision+1};await hooks.refresh('progress');
+    let tr=tbody.children[0];assert(!find(cell(tr,'Action'),'Close'));assert(!find(cell(tr,'Action'),'Cancel'));
+    for(const [header,value] of Object.entries({Timeframe:'5m',Setup:'Breakout',Pattern:'range',EMA:'20',VWAP:'Yes','ATH / ATL':'All-Time High','Round Number':'Yes'})){
+      const td=cell(tr,header);assert(!idle(td).disabled);const beforeCancel=calls.length,previous=idle(td).textContent;
+      idle(td).click();change(select(td),value);find(td,'Cancel').click();assert.strictEqual(calls.length,beforeCancel);assert.strictEqual(idle(td).textContent,previous);
+      idle(td).click();change(select(td),value);mode='hold';const save=find(td,'Save').click();await flush();assert(!td.textContent.includes('Saved'));find(td,'Save').click();assert.strictEqual(calls.length,beforeCancel+1);release();await save;mode='success';assert(td.textContent.includes('Saved'));
+      await hooks.refresh('progress');tr=tbody.children[0];assert(!select(cell(tr,header)));
+    }
+    assert(idle(cell(tr,'Test')).disabled);assert(idle(cell(tr,'Webhook classification')).disabled);
+    const tf=cell(tr,'Timeframe');idle(tf).click();change(select(tf),'15m');mode='wrongack';await find(tf,'Save').click();assert(select(tf));assert(tf.textContent.includes('acknowledgement'));assert(!tf.textContent.includes('Saved'));find(tf,'Cancel').click();mode='success';await hooks.refresh('progress');
+    idle(tf).click();change(select(tf),'30m');mode='badversion';await find(tf,'Save').click();assert(select(tf));assert(tf.textContent.includes('acknowledgement'));assert(!tf.textContent.includes('Saved'));find(tf,'Cancel').click();mode='success';
+    // A full page refresh recreates the renderer from durable server values.
+    const persisted=JSON.parse(JSON.stringify(row));hooks.render([],[],[]);hooks.render([persisted],[],[]);assert.strictEqual(idle(cell(tbody.children[0],'Timeframe')).textContent,'30MIN');
+  }
   assert(calls.every(call=>call.url==='/api/open-orders/classification'));console.log('classification cell assertions passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
@@ -7184,3 +7205,61 @@ def test_bybit_opened_current_cycle_in_mounted_brisbane_cell():
     result=subprocess.run([shutil.which('node') or r'C:\Program Files\nodejs\node.exe','-e',harness,str(ROOT/'render/static/open_orders.js'),json.dumps(headers)],env=env,capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
     assert 'Bybit Opened mounted cell assertions passed' in result.stdout
+
+
+def test_pepperstone_local_classification_identity_and_conflicts(_pepperstone_fill_state, monkeypatch):
+    import copy
+    service, market, target, fill_request, calls, reads = _pepperstone_fill_state
+    # Existing fixture denies broker, HTTP, export and folder transports.
+    def rows():
+        service._TRADE_CONTEXTS_CACHE.clear()
+        return service._pepperstone_local_tracker_rows()
+    initial = service.TRADE_CONTEXTS_PATH.read_bytes()
+    live = next(row for row in rows() if row['account']=='live')
+    demo = next(row for row in rows() if row['calculation_context_id']=='shared' and row['account']=='demo')
+    assert demo['classification_target'] != live['classification_target']
+    fields={'timeframe':'15m','setup':'Breakout','pattern':'range','ema':'20','vwap':'Yes','aths_atls':'All-Time High','round_number':'Yes'}
+    async def save(row, changes, version=None):
+        return await service.save_open_order_classification(dict(target=row['classification_target'],version=row['classification_version'] if version is None else version,changes=changes))
+    saved=_run_scoped_price_mock_io(save(demo, fields))
+    assert saved['ok'] and saved['saved_target']==demo['classification_target']
+    assert saved['version']==1 and saved['item']['id']==demo['id']
+    assert saved['item']['classification_capabilities']['is_test_trade'] is False
+    assert next(row for row in rows() if row['id']==live['id'])['classification_version']==0
+    # Fresh disk/cache reload, same ID and saved annotations; original risk/target untouched.
+    current=next(row for row in rows() if row['id']==demo['id'])
+    assert current['classification_values']['timeframe']=='15m'
+    assert current['risk_value_display']=='AUD 10' and current['risk_reward']=='2'
+    assert current['planned_target_price']=='1.12'
+    with pytest.raises(service.HTTPException) as exc:_run_scoped_price_mock_io(save(demo,{'setup':'Pullback'}))
+    assert exc.value.status_code==409
+    cleared=_run_scoped_price_mock_io(save(current,{key:'' for key in fields}))
+    assert cleared['version']==2
+    for key in fields:assert cleared['values'][key] in ('',None)
+    assert next(row for row in rows() if row['id']==live['id'])['classification_version']==0
+    for bad in ({'is_test_trade':False},{'webhook_classification':'No'},{'risk_value':'1'}):
+        with pytest.raises(service.HTTPException) as exc:_run_scoped_price_mock_io(save(cleared['item'],bad))
+        assert exc.value.status_code==400
+    # Save failure cannot mutate in-memory saved values or durable bytes.
+    before=service.TRADE_CONTEXTS_PATH.read_bytes();real_save=service._save_calculator_trade_contexts
+    monkeypatch.setattr(service,'_save_calculator_trade_contexts',lambda *a,**k:(_ for _ in ()).throw(OSError('fixture write failure')))
+    with pytest.raises(OSError):_run_scoped_price_mock_io(save(cleared['item'],{'setup':'Breakout'}))
+    assert service.TRADE_CONTEXTS_PATH.read_bytes()==before
+    monkeypatch.setattr(service,'_save_calculator_trade_contexts',real_save)
+    records=service._load_calculator_trade_contexts();duplicate=copy.deepcopy(next(c for c in records if c.get('calculation_context_id')=='shared' and c.get('account')=='demo'))
+    duplicate['calculation_context_id']=' shared '
+    service._save_calculator_trade_contexts(records+[duplicate])
+    assert next(row for row in rows() if row['id']==demo['id'])['classification_target'] is None
+    with pytest.raises(service.HTTPException) as exc:_run_scoped_price_mock_io(save(cleared['item'],{'setup':'Breakout'}))
+    assert exc.value.status_code==409
+    service._save_calculator_trade_contexts(records)
+    service._remove_pepperstone_local_tracking(target())
+    with pytest.raises(service.HTTPException) as exc:_run_scoped_price_mock_io(save(cleared['item'],{'setup':'Breakout'}))
+    assert exc.value.status_code==409
+    # Market-fill revisions are independent of classification versions.
+    market_row=next(row for row in rows() if row['calculation_context_id']=='market')
+    market_saved=_run_scoped_price_mock_io(save(market_row,{'pattern':'channel'}))
+    assert market_saved['item']['manual_fill_revision']==0
+    assert service._record_pepperstone_local_fill(fill_request())['revision']==1
+    assert next(row for row in rows() if row['id']==market_row['id'])['classification_version']==1
+    assert not calls and not reads
