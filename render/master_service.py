@@ -29837,7 +29837,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <caption id="trendline-plans-title">Local trendline plans</caption>
               <tbody>
                 <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Save draft, then click Arm on the selected plan. Arm starts watching that plan while Local Trading Tools is running and the computer is awake. Stop monitoring pauses all plans; click Arm on each specific card to resume after Stop or an LTT restart. Bybit plans submit an actual order to their saved Demo or Live account after fresh validation, including Test Yes; Test is a trade classification. Any Bybit Live order requires explicit Live confirmation. OANDA Test plans retain simulation without a broker order. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below to fill both anchor fields immediately; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Import shows its optional extension flag and applies it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and paste/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
-                <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste one LTT_ANCHORS_V1 export or its JSON"></textarea><div class="group"><div class="muted">Select the existing LTT Anchor Export indicator and drag either point, or choose More &rarr; Reset points and click two new endpoints on the same boundary. Copy the newly emitted LTT_ANCHORS_V1 Pine Logs entry and paste here: both anchors fill immediately, unsaved. Save/Update draft explicitly.</div><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
+                <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste a chart screenshot, export text/JSON, or drop one PNG"></textarea><div class="group"><div class="muted">Select the existing LTT Anchor Export indicator and drag either point, or choose More &rarr; Reset points and click two new endpoints on the same boundary. Paste a chart screenshot with the full export and A1/A2 lines visible, drop one PNG here, or paste export text/JSON. Recognition stays on this machine; both validated anchors fill immediately, unsaved. Save/Update draft explicitly.</div><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
                 <tr><th><label for="trendline-anchor-1-time">Anchor 1</label></th><td><div class="grid"><input id="trendline-anchor-1-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-1-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-1-utc" class="muted"></div></td></tr>
                 <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
                 <tr><th>Trigger</th><td><div class="grid"><label>Mode <select id="trendline-trigger-mode"><option value="touch">Touch</option><option value="confirmed_cross">Confirmed cross</option></select></label><label>Direction <select id="trendline-cross-direction"><option value="either">Either</option><option value="upward">Upward</option><option value="downward">Downward</option></select></label><label>Price basis <select id="trendline-price-basis"><option value="executable">Executable price</option><option value="bid">Bid</option><option value="ask">Ask</option><option value="midpoint">Midpoint</option></select></label><label>Tolerance ticks <input id="trendline-tolerance-ticks" type="number" min="0" step="1" value="0"/></label></div></td></tr>
@@ -31621,6 +31621,21 @@ def _calculator_effective_route(asset: object, broker: object, symbol: object) -
     if asset_norm == "crypto":
         return "crypto", "bybit", symbol_text
     return asset_norm, broker_norm, symbol_text
+
+
+@app.post("/api/calculator/anchor-image")
+def calculator_anchor_image(request: Request, image: bytes = Body(..., media_type="image/png")) -> JSONResponse:
+    # Screenshots never leave the local instance or enter runtime/journal stores.
+    _trendline_plans_require_local()
+    if not request.client or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="Screenshot import requires local loopback access.")
+    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "image/png":
+        raise HTTPException(status_code=415, detail="Paste or drop one PNG screenshot.")
+    from render.anchor_image_ocr import AnchorImageError, recognize_anchor_image
+    try:
+        return JSONResponse(recognize_anchor_image(image), headers={"cache-control": "no-store"})
+    except AnchorImageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/calculator/instrument")

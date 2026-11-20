@@ -891,11 +891,15 @@
     if (preview) preview.textContent = Number.isFinite(ms) ? `Stored UTC: ${new Date(ms).toISOString()}` : 'Enter a local date/time to preview UTC.';
     return ms;
   }
+  let anchorImageSeq = 0;
+  let anchorImageController = null;
+  function retireAnchorImage() { ++anchorImageSeq; anchorImageController?.abort(); anchorImageController=null; }
   let anchorImport = null;
   let anchorImportContext = '';
   const anchorFormIds = ['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price'];
   const anchorContext = () => JSON.stringify([state.asset,state.broker,state.account,state.resolvedSymbol,state.timeframe,state.trendlineEditId]);
   function clearAnchorImport(message='') {
+    retireAnchorImage();
     anchorImport=null; anchorImportContext='';
     if($('trendline-import-text')) $('trendline-import-text').value='';
     if($('trendline-import-preview')) $('trendline-import-preview').textContent=message;
@@ -956,6 +960,7 @@
     } catch(err) { $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
   }
   function clearAnchorImportPreview() {
+    retireAnchorImage();
     anchorImport=null;anchorImportContext='';
     if($('trendline-import-apply')) $('trendline-import-apply').disabled=true;
   }
@@ -970,18 +975,48 @@
       $('trendline-import-preview').textContent+='\nApplied successfully: both anchor times and prices are populated and unsaved. Next: Save/Update draft explicitly.';
     } catch(err) { clearAnchorImport('Import rejected: '+String(err.message||err)); }
   }
-  function pasteAnchorImport(event) {
-    // Handle keyboard and context-menu paste synchronously: no clipboard permission or late callback.
-    if(!event.clipboardData) return;
-    event.preventDefault();
+  async function importAnchorImage(file) {
     clearAnchorImportPreview();
-    if(state.trendlineMutationPending) {
-      $('trendline-import-preview').textContent='Import rejected: wait for the current draft request to finish, then paste again.';
-      return;
+    if(state.trendlineMutationPending) { $('trendline-import-preview').textContent='Import rejected: wait for the current draft request to finish.'; return; }
+    if(!file || (file.type!=='image/png' && !(file.type==='' && /\.png$/i.test(file.name||'')))) {
+      $('trendline-import-preview').textContent='Import rejected: paste or drop one PNG screenshot.'; return;
     }
-    $('trendline-import-text').value=event.clipboardData.getData('text/plain');
-    previewAnchorImport();
-    applyAnchorImport();
+    if((typeof location!=='undefined' && !['localhost','127.0.0.1','[::1]'].includes(location.hostname)) || file.size>6*1024*1024 || !state.trendlinePlansAvailable) {
+      $('trendline-import-preview').textContent='Import rejected: use a PNG up to 6 MB in the local calculator.'; return;
+    }
+    const sequence=++anchorImageSeq, context=anchorContext(), form=anchorFormIds.map(id=>$(id).value), extension=$('trendline-right-extension').checked;
+    const controller=new AbortController(); anchorImageController=controller; anchorImportContext=context;
+    const current=()=>sequence===anchorImageSeq && context===anchorContext() && !state.trendlineMutationPending && extension===$('trendline-right-extension').checked && form.every((value,i)=>value===$(anchorFormIds[i]).value);
+    $('trendline-import-preview').textContent='Reading screenshot locally; current anchors unchanged?';
+    try {
+      const bytes=await file.arrayBuffer(); if(!current()) return;
+      const result=await request('/api/calculator/anchor-image',{method:'POST',headers:{'content-type':'image/png'},body:bytes,signal:controller.signal});
+      if(!current()) return;
+      const packet=validateAnchorPacket(result.packet);
+      $('trendline-import-text').value=JSON.stringify(packet);
+      previewAnchorImport(); applyAnchorImport();
+    } catch(err) {
+      if(current() && err?.name!=='AbortError') { clearAnchorImportPreview(); $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
+    } finally { if(sequence===anchorImageSeq) anchorImageController=null; }
+  }
+  function pasteAnchorImport(event) {
+    // Read only the user's clipboard event; never request clipboard permission.
+    if(!event.clipboardData) return;
+    const images=Array.from(event.clipboardData.items||[]).filter(item=>item.kind==='file');
+    if(images.length) {
+      event.preventDefault();
+      if(images.length!==1) { clearAnchorImportPreview(); $('trendline-import-preview').textContent='Import rejected: paste one screenshot at a time.'; return; }
+      return importAnchorImage(images[0].getAsFile());
+    }
+    event.preventDefault(); clearAnchorImportPreview();
+    if(state.trendlineMutationPending) { $('trendline-import-preview').textContent='Import rejected: wait for the current draft request to finish, then paste again.'; return; }
+    $('trendline-import-text').value=event.clipboardData.getData('text/plain'); previewAnchorImport(); applyAnchorImport();
+  }
+  function dropAnchorImport(event) {
+    event.preventDefault();
+    const files=Array.from(event.dataTransfer?.files||[]);
+    if(files.length!==1) { clearAnchorImportPreview(); $('trendline-import-preview').textContent='Import rejected: drop one PNG screenshot at a time.'; return; }
+    return importAnchorImage(files[0]);
   }
   function syncTrendlineTriggerControls() {
     const mode = $('trendline-trigger-mode'); const direction = $('trendline-cross-direction');
@@ -1263,6 +1298,8 @@
     }));
     $('trendline-import-text')?.addEventListener('input',previewAnchorImport);
     $('trendline-import-text')?.addEventListener('paste',pasteAnchorImport);
+    $('trendline-import-text')?.addEventListener('drop',dropAnchorImport);
+    $('trendline-import-text')?.addEventListener('dragover',event=>{event.preventDefault();});
     $('trendline-import-apply')?.addEventListener('click',applyAnchorImport);
     $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }

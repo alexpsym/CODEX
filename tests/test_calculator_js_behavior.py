@@ -1181,7 +1181,7 @@ def test_calculator_submits_without_pre_entry_classification():
     assert data["invalidQuoteDisabled"] and data["webhookDisabled"]
 
 
-def _run_anchor_import_behavior(mode, timezone, saved_record=None, table_packets=None):
+def _run_anchor_import_behavior(mode, timezone, saved_record=None, table_packets=None, image_options=None):
     import os
     node = r"C:\Program Files\nodejs\node.exe"
     harness = r'''
@@ -1207,6 +1207,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 async function run(){
  const el=Object.fromEntries(ids.filter(id=>process.argv[2]!=='deletion'||id!=='trendline-import-preview-btn').map(id=>[id,new Element(id)])),calls=[];
  const dynamic=[];
+ const imageOptions=process.argv[5]?JSON.parse(process.argv[5]):null,imageReplies=[];
  const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
  for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
  el['calc-symbol'].value='BTCUSDT';el['calc-risk'].value='2.5';el['calc-sl-ticks'].value='50';el['calc-rr'].value='3.25';
@@ -1218,9 +1219,19 @@ async function run(){
 
  const response=(data,status=200)=>({ok:status<400,status,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
  const fetch=async(url,opts={})=>{
-  const method=opts.method||'GET';const body=opts.body?JSON.parse(opts.body):null;calls.push({url,method,body});
+  const method=opts.method||'GET';const body=url==='/api/calculator/anchor-image'?null:opts.body?JSON.parse(opts.body):null;calls.push({url,method,body});
+  if(url==='/api/calculator/anchor-image') {
+   if(imageOptions.rpc){
+    const index=calls.filter(c=>c.url==='/api/calculator/anchor-image').length-1;
+    const path=require('path'),replyPath=path.join(imageOptions.rpc,'response-'+index+'.json');
+    fs.writeFileSync(path.join(imageOptions.rpc,'request-'+index+'.png'),Buffer.from(opts.body));
+    const deadline=Date.now()+90000;while(!fs.statSync(replyPath).size){if(Date.now()>deadline)throw Error('Offline OCR transport timed out');await new Promise(resolve=>setTimeout(resolve,5));}
+    const answer=JSON.parse(fs.readFileSync(replyPath,'utf8'));return response(answer.body,answer.status);
+   }
+   return new Promise(resolve=>imageReplies.push({resolve,signal:opts.signal}));
+  }
   if(url==='/api/calculator/bootstrap')return response({app_profile:'local',trendline_plans_available:true,trendline_monitoring:{running:false},webhook:{available:true}});
-  if(url.startsWith('/api/calculator/instrument?'))return response({symbol:'BTCUSDT',asset:'crypto',broker:'bybit'});
+  if(url.startsWith('/api/calculator/instrument?'))return response(imageOptions?{symbol:'NZD_USD',asset:'fx',broker:'pepperstone'}:{symbol:'BTCUSDT',asset:'crypto',broker:'bybit'});
   if(url==='/api/trendline-plans'&&method==='GET'){
    if(holdList){const old=JSON.parse(JSON.stringify(plans));return new Promise(resolve=>{releaseList=()=>resolve(response({plans:old}));});}
    return response({plans});
@@ -1236,7 +1247,7 @@ async function run(){
   if(url==='/api/trendline-plans/anchor-draft'&&method==='PATCH'){plans[0]={...plans[0],...body};return response({plan:plans[0]});}
   throw new Error('Unexpected mocked request '+url);
  };
- vm.runInNewContext(source,{document:{getElementById:id=>el[id]||dynamic.find(node=>node.id===id),createElement:tag=>{const node=new Element('');dynamic.push(node);return node;}},fetch,confirm:message=>{assert(message.includes('no remaining broker order'));prompts++;return confirmAnswer;},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
+ vm.runInNewContext(source,{document:{getElementById:id=>el[id]||dynamic.find(node=>node.id===id),createElement:tag=>{const node=new Element('');dynamic.push(node);return node;}},fetch,confirm:message=>{assert(message.includes('no remaining broker order'));prompts++;return confirmAnswer;},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:(fn,ms)=>{if(!imageOptions || !ms || ms<=250)fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
  await flush();el['calc-symbol'].listeners.input();await flush();
  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='1m').click();
  el['order-toggle'].buttons.find(b=>b.dataset.v==='limit').click();el['calc-limit'].value='99.25';
@@ -1253,6 +1264,40 @@ async function run(){
  };
  const edit=()=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction==='edit').click();
  const expectedLocal=ms=>{const d=new Date(ms),p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;};
+ if(imageOptions){
+  el['asset-toggle'].buttons.find(b=>b.dataset.v==='fx').click();
+  el['broker-toggle'].buttons.find(b=>b.dataset.v==='pepperstone').click();
+  el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();
+  el['calc-symbol'].value='NZDUSD';el['calc-symbol'].listeners.input();await flush();
+  el['timeframe-toggle'].buttons.find(b=>b.dataset.v==='5m').click();await flush();
+  const expected=imageOptions.expected, imports=()=>calls.filter(c=>c.url==='/api/calculator/anchor-image').length;
+  const baseline=calls.length, settings=()=>JSON.stringify([el['calc-risk'].value,el['calc-sl-ticks'].value,el['calc-rr'].value,el['calc-limit'].value,el['trendline-trigger-mode'].value,el['trendline-expiry'].value]);
+  let originalSettings=settings();const timings=[];
+  const file=()=>({type:'image/png',name:'chart.png',size:123,arrayBuffer:async()=>imageOptions.file?fs.readFileSync(imageOptions.file):new Uint8Array([137,80,78,71]).buffer});
+  const imagePaste=(value=file())=>el['trendline-import-text'].dispatchEvent({type:'paste',clipboardData:{items:[{kind:'file',type:'image/png',getAsFile:()=>value}]},preventDefault(){}});
+  const imageDrop=()=>el['trendline-import-text'].dispatchEvent({type:'drop',dataTransfer:{files:[file()]},preventDefault(){}});
+  const assertAnchors=()=>{expected.anchors.forEach((a,i)=>{assert.equal(el[`trendline-anchor-${i+1}-time`].dataset.anchorEpoch,String(a.timestamp_ms),el['trendline-import-preview'].textContent);assert.equal(el[`trendline-anchor-${i+1}-price`].value,a.price);});assert.equal(el['trendline-right-extension'].checked,expected.right_extension);assert.equal(settings(),originalSettings);};
+  if(imageOptions.rpc){
+   for(let i=0;i<4;i++){const start=performance.now();await imagePaste();timings.push(performance.now()-start);assertAnchors();assert(el['trendline-import-preview'].textContent.includes('unsaved'));}
+   await imageDrop();assertAnchors();assert.equal(imports(),5);
+   const beforeText=imports();paste(JSON.stringify(expected));assertAnchors();assert.equal(imports(),beforeText,'Text paste does not request OCR');
+   assert(calls.slice(baseline).every(c=>c.url==='/api/calculator/anchor-image'),'Only the local OCR endpoint is requested by image import');
+   console.log('IMAGE_TIMINGS '+JSON.stringify(timings));return;
+  }
+  const reply=(index,value=expected,status=200)=>imageReplies[index].resolve(response(status===200?{packet:value}:{detail:value},status));
+  let first=imagePaste();await flush();let second=imagePaste();await flush();assert.equal(imports(),2);assert(imageReplies[0].signal.aborted);reply(1);await second;assertAnchors();const stable=fields();reply(0,{...expected,anchors:expected.anchors.map(a=>({...a,price:'999'}))});await first;assert.deepEqual(fields(),stable,'Older OCR cannot overwrite newer paste');
+  let pending=imagePaste();await flush();paste(JSON.stringify(expected));reply(2,{...expected,anchors:expected.anchors.map(a=>({...a,price:'888'}))});await pending;assertAnchors();
+  pending=imagePaste();await flush();el['trendline-anchor-1-price'].value='123.456';el['trendline-anchor-1-price'].listeners.input();reply(3);await pending;assert.equal(el['trendline-anchor-1-price'].value,'123.456','Partial manual edit supersedes OCR');
+  pending=imagePaste();await flush();el['trendline-reset'].click();reply(4);await pending;assert.deepEqual(fields(),['','','',''],'Reset supersedes OCR');
+  pending=imagePaste();await flush();el['account-toggle'].buttons.find(b=>b.dataset.v==='live').click();reply(5);await pending;assert.deepEqual(fields(),['','','',''],'Context change supersedes OCR');
+  el['account-toggle'].buttons.find(b=>b.dataset.v==='demo').click();await flush();
+  originalSettings=settings();pending=imageDrop();await flush();reply(6);await pending;assertAnchors();
+  const intact=fields();pending=imagePaste();await flush();reply(7,{...expected,symbol:'PEPPERSTONE:USDJPY'});await pending;assert.deepEqual(fields(),intact);assert(el['trendline-import-preview'].textContent.includes('match'));
+  pending=imagePaste();await flush();reply(8,'A1 milliseconds is ambiguous; no anchors applied.',422);await pending;assert.deepEqual(fields(),intact);assert(el['trendline-import-preview'].textContent.includes('A1 milliseconds'));
+  const beforeInvalid=imports();await imagePaste({...file(),type:'image/jpeg'});assert.equal(imports(),beforeInvalid);assert.deepEqual(fields(),intact);
+  assert(!calls.slice(baseline).some(c=>c.method==='POST'&&c.url!=='/api/calculator/anchor-image'),'No save, quote, arm, monitoring or order POST');
+  console.log('image stale/drop controls passed');return;
+ }
  if(process.argv[2]==='deletion'){
   assert(!el['trendline-import-preview-btn'],'Removed Preview button is absent');
   const action=(id,name)=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlId===id&&b.dataset.tlAction===name);
@@ -1388,9 +1433,11 @@ async function freshContext(record){
 run().catch(e=>{console.error(e);process.exitCode=1;});
 
 '''
-    result = subprocess.run([node, '-e', "eval(require('fs').readFileSync(0,'utf8'))", str(JS_PATH), mode, json.dumps(saved_record), json.dumps(table_packets) if table_packets else ''], input=harness, capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
+    result = subprocess.run([node, '-e', "eval(require('fs').readFileSync(0,'utf8'))", str(JS_PATH), mode, json.dumps(saved_record), json.dumps(table_packets) if table_packets else '', json.dumps(image_options) if image_options else ''], input=harness, capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
     if result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
+    if image_options:
+        print(result.stdout)
 
 def test_tradingview_anchor_import_preserves_exact_draft_roundtrip(tmp_path):
     import runpy
