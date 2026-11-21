@@ -30302,14 +30302,14 @@ def _pepperstone_guidance_snapshot(symbol, account):
     return (max(candidates, key=lambda item:item[0])[1] if candidates else None), diagnostics
 
 
-def _pepperstone_razor_estimate(snapshot, *, symbol, account, pip_location):
+def _pepperstone_razor_estimate(snapshot, *, symbol, account, pip_location, planning=False):
     """Calculator-only estimate; opt-in confirms the export is from Standard."""
     status = dict(available=False, label="Estimated Razor from Standard", reason="Current matching Standard MT5 quote unavailable.")
     if snapshot is None:
         return snapshot, status
-    code, reason, age = _pepperstone_snapshot_condition(snapshot, account)
+    code, reason, age = (_pepperstone_calculator_quote_condition if planning else _pepperstone_snapshot_condition)(snapshot, account)
     status.update(source=snapshot["source_path"], quote_age_seconds=age, reason=reason)
-    if code != "ready":
+    if code not in ({"ready", "planning"} if planning else {"ready"}):
         return snapshot, status
     currencies = {"AUD", "USD", "GBP", "EUR", "JPY", "NZD", "CAD", "CHF", "NOK", "SEK", "DKK", "SGD", "HKD", "CNH", "ZAR", "MXN", "TRY", "PLN", "HUF", "CZK", "THB"}
     parts = symbol.split("_")
@@ -30566,17 +30566,78 @@ def _pepperstone_risk_band(risk_target):
     return target, target, maximum
 
 
-def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk_target):
+
+def _pepperstone_calculator_quote_condition(snapshot, account):
+    # Planning eligibility never makes an old tick fresh for execution/guidance.
+    code, reason, age = _pepperstone_snapshot_condition(snapshot, account)
+    if code != "stale_quote":
+        return code, reason, age
+    item = snapshot.get("distance_metadata", {})
+    try:
+        now = datetime.now(timezone.utc)
+        stamp = datetime.fromisoformat(_pepperstone_parse_snapshot_time(item.get("quote_timestamp"), "quote").replace("Z", "+00:00"))
+        friday = (now - timedelta(days=(now.weekday()-4)%7)).date()
+        bid, ask = Decimal(str(item.get("bid"))), Decimal(str(item.get("ask")))
+        weekend = now.weekday() == 5 or (now.weekday() == 6 and now.hour < 21)
+        if (weekend and stamp.date() == friday and stamp <= now
+                and item.get("available") is not False and bid.is_finite() and ask.is_finite() and 0 < bid <= ask):
+            return "planning", "Last available quote from the completed Friday session; current broker checks remain pending.", age
+    except (HTTPException, ValueError, TypeError, ArithmeticError):
+        pass
+    return code, reason, age
+
+
+def _pepperstone_fx_reference(symbol, account):
+    # One coherent AUD Trader snapshot; never infer a price or currency conversion.
+    snapshot, diagnostics = _pepperstone_guidance_snapshot(symbol, account)
+    reason = diagnostics[0]["reason"] if diagnostics else "matching Trader export missing."
+    if snapshot is None:
+        return None, None, None, reason
+    if snapshot.get("exported_account_mode") != account:
+        return snapshot, None, None, "matching MT5 Demo/Live mode."
+    parts = symbol.split("_")
+    currencies = {"AUD", "USD", "GBP", "EUR", "JPY", "NZD", "CAD", "CHF"}
+    if len(parts) != 2 or not all(p in currencies for p in parts):
+        return snapshot, None, None, "known currency FX pip size."
+    point = snapshot["point"]
+    precision = max(0, -point.normalize().as_tuple().exponent)
+    meta = dict(displayPrecision=precision, pipLocation=-2 if parts[1] == "JPY" else -4,
+                tradeUnitsPrecision=0, minimumTradeSize=None, maximumOrderUnits=None,
+                maximumPositionSize=None, marginRate=None)
+    code, reason, age = _pepperstone_calculator_quote_condition(snapshot, account)
+    if code not in {"ready", "planning"}:
+        return snapshot, meta, None, reason
+    if str(snapshot.get("exported_account_currency") or "").upper() != "AUD":
+        return snapshot, meta, None, "matching MT5 account AUD tick value."
+    item = snapshot["distance_metadata"]
+    try:
+        minimum, step, maximum, tick, value = [Decimal(str(item.get(k))) for k in
+            ("minimum_lot", "volume_step", "maximum_lot", "trade_tick_size", "tick_value")]
+        if any(not v.is_finite() or v <= 0 for v in (minimum, step, maximum, tick, value)) or minimum > maximum:
+            raise ValueError()
+    except (ValueError, TypeError, ArithmeticError):
+        return snapshot, meta, None, "MT5 volume min/step/max or AUD tick value."
+    factor = value / tick / Decimal(100000)
+    meta.update(minimumTradeSize=_fmt_dec(minimum*100000), maximumOrderUnits=_fmt_dec(maximum*100000))
+    prices = dict(prices=[dict(bids=[dict(price=str(item["bid"]))], asks=[dict(price=str(item["ask"]))], time=item["quote_timestamp"])],
+                  homeConversions=[dict(currency=parts[1], accountGain=str(factor), accountLoss=str(factor), positionValue=str(factor))],
+                  pepperstone_source=dict(label="Pepperstone Trader MT5" + (" - last completed session planning" if code == "planning" else ""),
+                       mt5_symbol=snapshot["mt5_symbol"], quote_timestamp=item["quote_timestamp"], quote_age_seconds=age,
+                       planning=code == "planning", source_path=snapshot["source_path"], live_checks_pending=code != "ready"))
+    return snapshot, meta, prices, ""
+
+
+def _pepperstone_standard_lot_estimate(snapshot, *, account, stop_distance, risk_target, planning=False):
     """Trader's AUD tick-value model, with whole broker-step counts; no order I/O."""
     from fractions import Fraction as F
     result = dict(state="pending", reason="Current MT5 sizing metadata unavailable; Trader checks pending.")
     if snapshot is None:
         return result
-    code, reason, age = _pepperstone_snapshot_condition(snapshot, account)
+    code, reason, age = (_pepperstone_calculator_quote_condition if planning else _pepperstone_snapshot_condition)(snapshot, account)
     result.update(source=snapshot.get("source"), source_path=snapshot.get("source_path"),
                   mt5_symbol=snapshot.get("mt5_symbol"), quote_age_seconds=age,
                   account_mode=snapshot.get("exported_account_mode"), currency=snapshot.get("exported_account_currency"))
-    if code != "ready":
+    if code not in ({"ready", "planning"} if planning else {"ready"}):
         return dict(result, reason=reason)
     if str(snapshot.get("exported_account_currency") or "").upper() != "AUD":
         return dict(result, reason="Matching AUD MT5 account currency required for lot sizing; Trader checks pending.")
@@ -31810,18 +31871,23 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
         )
 
     if asset_norm == "fx":
-        try:
-            cfg = _get_oanda_config(account_norm)
-            resolved_symbol = routed_symbol
-            meta = await _fetch_oanda_instrument_meta(
-                base_url=cfg["base_url"],
-                account_id=cfg["account_id"],
-                api_key=cfg["token"],
-                symbol=resolved_symbol,
-                mode=account_norm,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        resolved_symbol = routed_symbol
+        mt5_reference = _pepperstone_fx_reference(resolved_symbol, account_norm) if broker_norm == "pepperstone" else (None, None, None, "")
+        mt5_meta = mt5_reference[1]
+        if mt5_meta is not None:
+            meta = mt5_meta
+        else:
+            try:
+                cfg = _get_oanda_config(account_norm)
+                meta = await _fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"],
+                    api_key=cfg["token"], symbol=resolved_symbol, mode=account_norm)
+            except Exception as exc:
+                if broker_norm == "pepperstone":
+                    reason = _pepperstone_fx_reference(resolved_symbol, account_norm)[3]
+                    raise HTTPException(status_code=502, detail="Pepperstone symbol metadata unavailable: " + reason + " OANDA reference unavailable.") from exc
+                if isinstance(exc, ValueError):
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise
         instrument_payload: Dict[str, object] = {
             "asset": "fx",
             "broker": broker_norm,
@@ -31851,7 +31917,7 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
                     "chart_tick_profile_id": chart_profile,
                 }
             )
-            point_snapshot, snapshot_diagnostics = _pepperstone_guidance_snapshot(resolved_symbol, account_norm)
+            point_snapshot, snapshot_diagnostics = (mt5_reference[0], []) if mt5_meta is not None else _pepperstone_guidance_snapshot(resolved_symbol, account_norm)
             estimate_status = None
             if pepperstone_account_type == "razor" and estimate_razor_from_standard is True:
                 point_snapshot, estimate_status = _pepperstone_razor_estimate(
@@ -32744,28 +32810,45 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     },
                 )
             symbol = normalize_oanda_symbol_query(symbol_in)
-            try:
-                cfg = _get_oanda_config(account)
-            except ValueError as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
-            oanda_parallel_started = time.perf_counter()
-            meta_task = asyncio.create_task(_fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=account))
-            pricing_task = asyncio.create_task(_fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true", mode=account))
+            mt5_reference = _pepperstone_fx_reference(symbol, account) if is_pepperstone else (None, None, None, "")
+            reference_snapshot, reference_meta, reference_prices, reference_reason = mt5_reference
+            if reference_prices is not None and estimate_enabled:
+                _adjusted, estimate_check = _pepperstone_razor_estimate(reference_snapshot, symbol=symbol,
+                    account=account, pip_location=reference_meta.get("pipLocation"), planning=True)
+                if not estimate_check["available"]:
+                    reference_prices, reference_reason = None, estimate_check["reason"]
             summary_task = None
-            tasks = [meta_task, pricing_task]
-            if not is_pepperstone:
-                summary_task = asyncio.create_task(_fetch_oanda_account_summary(account))
-                tasks.append(summary_task)
-            try:
-                await asyncio.gather(*tasks)
-            except Exception:
-                await _cancel_pending_tasks(tasks)
-                raise
-            timings_ms["oanda_upstream_parallel_ms"] = int((time.perf_counter()-oanda_parallel_started)*1000)
-            try:
-                meta = meta_task.result()
-            except ValueError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            if is_pepperstone and risk_mode == "fixed_aud" and reference_prices is not None:
+                meta, prices = reference_meta, reference_prices
+                cfg = None
+            else:
+                try:
+                    cfg = _get_oanda_config(account)
+                except ValueError as exc:
+                    if is_pepperstone:
+                        raise HTTPException(status_code=502, detail="Pepperstone calculation needs " + reference_reason + " OANDA reference unavailable.") from exc
+                    raise HTTPException(status_code=500, detail=str(exc)) from exc
+                oanda_parallel_started = time.perf_counter()
+                meta_task = asyncio.create_task(_fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=account))
+                pricing_task = asyncio.create_task(_fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true", mode=account))
+                summary_task = None
+                tasks = [meta_task, pricing_task]
+                if not is_pepperstone:
+                    summary_task = asyncio.create_task(_fetch_oanda_account_summary(account))
+                    tasks.append(summary_task)
+                try:
+                    await asyncio.gather(*tasks)
+                except Exception as exc:
+                    await _cancel_pending_tasks(tasks)
+                    if is_pepperstone:
+                        raise HTTPException(status_code=502, detail="Pepperstone calculation needs " + reference_reason + " OANDA reference unavailable.") from exc
+                    raise
+                timings_ms["oanda_upstream_parallel_ms"] = int((time.perf_counter()-oanda_parallel_started)*1000)
+                try:
+                    meta = meta_task.result()
+                except ValueError as exc:
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                prices = pricing_task.result()
             display_precision = int(meta["displayPrecision"])
             units_precision = int(meta.get("tradeUnitsPrecision", 0))
             min_trade_size = Decimal(str(meta.get("minimumTradeSize") or "0"))
@@ -32785,7 +32868,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 )
                 distance_tick_size = pepperstone_chart_tick_size
                 try:
-                    pepperstone_point_snapshot, pepperstone_snapshot_diagnostics = _pepperstone_guidance_snapshot(symbol, account)
+                    pepperstone_point_snapshot, pepperstone_snapshot_diagnostics = (reference_snapshot, []) if reference_prices is not None else _pepperstone_guidance_snapshot(symbol, account)
                     if pepperstone_point_snapshot is None:
                         raise HTTPException(status_code=400,detail="No usable Pepperstone point snapshot.")
                 except HTTPException as exc:
@@ -32818,10 +32901,6 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                             )
                         except HTTPException as exc:
                             pepperstone_export_status["metadata_reason"] = str(exc.detail)
-            try:
-                prices = pricing_task.result()
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"OANDA pricing/meta fetch failure: {exc}") from exc
             rows = prices.get("prices") or []
             if not rows:
                 raise HTTPException(status_code=502, detail="OANDA pricing/meta fetch failure.")
@@ -32834,11 +32913,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 raise HTTPException(status_code=502, detail="OANDA bid/ask unavailable.")
             if estimate_enabled:
                 pepperstone_point_snapshot, estimate_status = _pepperstone_razor_estimate(
-                    pepperstone_point_snapshot, symbol=symbol, account=account, pip_location=meta.get("pipLocation"))
+                    pepperstone_point_snapshot, symbol=symbol, account=account, pip_location=meta.get("pipLocation"), planning=reference_prices is not None)
                 if estimate_status["available"]:
                     bid, ask = Decimal(estimate_status["bid"]), Decimal(estimate_status["ask"])
             standard_fixed = is_pepperstone and account_type == "standard" and risk_mode == "fixed_aud"
-            standard_quote_current = standard_fixed and pepperstone_point_snapshot is not None and _pepperstone_snapshot_condition(pepperstone_point_snapshot, account)[0] == "ready"
+            standard_quote_current = standard_fixed and pepperstone_point_snapshot is not None and (_pepperstone_snapshot_condition(pepperstone_point_snapshot, account)[0] == "ready" or (reference_prices is not None and _pepperstone_calculator_quote_condition(pepperstone_point_snapshot, account)[0] == "planning"))
             if standard_quote_current:
                 bid = Decimal(str(pepperstone_point_snapshot["distance_metadata"]["bid"]))
                 ask = Decimal(str(pepperstone_point_snapshot["distance_metadata"]["ask"]))
@@ -32905,7 +32984,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
 
             pepperstone_target_limitation = None
             standard_lot = _pepperstone_standard_lot_estimate(pepperstone_point_snapshot,
-                account=account, stop_distance=abs(entry-sl), risk_target=risk_val) if standard_fixed else None
+                account=account, stop_distance=abs(entry-sl), risk_target=risk_val, planning=reference_prices is not None) if standard_fixed else None
             if standard_lot and standard_lot["state"] in ("ready", "no_fit"):
                 loss_per_unit_home = Decimal(standard_lot["loss_per_lot_aud"]) / Decimal(100000)
                 gain_factor = loss_factor = loss_per_unit_home / abs(entry-sl)
@@ -33029,6 +33108,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             response_payload = {
                     "asset": "fx",
                     "broker": broker,
+                    "pricing_source": prices.get("pepperstone_source") or {"label": "OANDA reference" if is_pepperstone else "OANDA", "quote_timestamp": row.get("time")},
                     "venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
                     "resolved_venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
                     "symbol": symbol,
@@ -33178,6 +33258,15 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     preflight.update(planned_buffer_points=standard_lot["buffer_points"], modeled_lot_buffer=True,
                         conservative_max_buffer_points=standard_lot["conservative_buffer_cap_points"],
                         nominal_loss_aud=standard_lot["nominal_loss_aud"], buffered_loss_aud=standard_lot["buffered_loss_aud"])
+            if is_pepperstone and prices.get("pepperstone_source"):
+                source = prices["pepperstone_source"]
+                response_payload["market_data_source"] = source["label"] + "; AUD tick-value model."
+                response_payload["position_size_estimate_note"] = "Trader export AUD model; live broker lots, margin and prices are checked only on explicit execution."
+                response_payload["spread_estimate_note"] = "MT5 exported Bid/Ask, with the selected account's commission treatment; spread is not charged twice."
+                if estimate_status and estimate_status.get("available"):
+                    response_payload["market_data_source"] = "Estimated Razor from Standard; " + response_payload["market_data_source"]
+                if source["planning"] and response_payload["pepperstone_mt5_export_status"].get("file_ready"):
+                    response_payload["pepperstone_mt5_export_status"].update(broker_check_state="pending", reason="Planning preset; a current broker quote is required for explicit execution.")
             if pepperstone_target_limitation:
                 response_payload["pepperstone_mt5_export_status"].update(ready=False, file_ready=False, broker_check_state="incompatible", code="PEPPERSTONE_NOMINAL_R_UNREPRESENTABLE", reason=pepperstone_target_limitation)
             calculation_context_id = (

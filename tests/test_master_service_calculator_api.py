@@ -12,6 +12,302 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture
+def pepperstone_weekend_reference(monkeypatch, tmp_path, pepperstone_account_fixture):
+    from datetime import datetime as RealDatetime, timezone
+    class Saturday(RealDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 11, 21, 8, tzinfo=timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    monkeypatch.setattr(master_service, 'datetime', Saturday)
+    monkeypatch.setattr(master_service, 'APP_PROFILE', 'local')
+    monkeypatch.setattr(master_service, '_trade_context_backup_fallback_enabled', lambda: False)
+    monkeypatch.setattr(master_service, '_invalidate_open_orders_cache', lambda: None)
+    monkeypatch.setattr(master_service, '_OPEN_ORDERS_SERVICES', {})
+    monkeypatch.setattr(master_service, '_OPEN_ORDERS_CACHE', {'payload': None})
+    monkeypatch.setattr(master_service, '_upsert_calculator_trade_context', pepperstone_account_fixture)
+    path = tmp_path / 'Trader-export.json'
+    monkeypatch.setenv('PEPPERSTONE_SPREAD_EXPORT_PATH', str(path))
+    item = dict(symbol='USDJPY', mt5_symbol='USDJPY.a', point='0.001', trade_tick_size='0.001',
+                quote_timestamp='2026-11-20T21:59:58Z', timestamp='2026-11-21T07:59:59Z',
+                bid='159.551', ask='159.562', available=True, stops_level=0, freeze_level=0,
+                minimum_lot='0.01', volume_step='0.01', maximum_lot='100', tick_value='1.5')
+    calls = []
+    async def unavailable(**kwargs):
+        calls.append(kwargs)
+        raise master_service.HTTPException(502, 'Isolated OANDA unavailable')
+    monkeypatch.setattr(master_service, '_get_oanda_config', lambda account: dict(base_url='https://fixture.invalid', account_id='fixture', token='fixture'))
+    monkeypatch.setattr(master_service, '_fetch_oanda_instrument_meta', unavailable)
+    monkeypatch.setattr(master_service, '_fetch_oanda_json', unavailable)
+    monkeypatch.setattr(master_service, '_fetch_oanda_account_summary', unavailable)
+    def write(**changes):
+        data = dict(version=1, broker='pepperstone', generated_at='2026-11-21T08:00:00Z',
+                    account=dict(mode=changes.pop('mode', 'demo'), currency=changes.pop('currency', 'AUD')),
+                    symbols=[dict(item, **changes)])
+        path.write_text(json.dumps(data), encoding='utf-8')
+    write()
+    master_service._save_calculator_trade_contexts([])
+    return write, calls
+
+
+def test_pepperstone_mt5_reference_calculate_without_oanda(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    write, calls = pepperstone_weekend_reference
+    service = master_service
+    assert service._pepperstone_local_tracker_rows() == []
+    # Execute the two old production functions, with fixture-only dependencies:
+    # resolution fails on metadata; Calculate fails on pricing even with metadata.
+    import ast, subprocess
+    previous = ast.parse(subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show','53c57db:render/master_service.py']).decode('utf-8-sig'))
+    scope = dict(vars(service))
+    nodes = [n for n in previous.body if isinstance(n,ast.AsyncFunctionDef) and n.name in {'calculator_instrument','_calculator_quote_impl'}]
+    for node in nodes:node.decorator_list=[]
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'<53c57db-calculator-fixture>','exec'),scope)
+    with pytest.raises(service.HTTPException):
+        asyncio.run(scope['calculator_instrument'](asset='fx',account='demo',symbol='USD_JPY',broker='pepperstone'))
+    async def old_meta(**kwargs):return dict(displayPrecision=3,pipLocation=-2,tradeUnitsPrecision=0,minimumTradeSize='1')
+    scope['_fetch_oanda_instrument_meta']=old_meta
+    with pytest.raises(service.HTTPException):
+        asyncio.run(scope['_calculator_quote_impl'](_pepperstone_quote_payload(symbol='USD_JPY',account='demo',risk_mode='fixed_aud',risk_value='10',stop_loss_ticks='108')))
+    print('BASELINE_53c57db_RESOLUTION_AND_PRICING_FAILURES_REPRODUCED',len(calls))
+    calls.clear()
+    for kind in ('standard', 'razor'):
+        request = _pepperstone_quote_payload(symbol='USD_JPY', account='demo', side='buy',
+            pepperstone_account_type=kind, estimate_razor_from_standard=kind == 'razor',
+            order_type='market', risk_mode='fixed_aud', risk_value='10', stop_loss_ticks='108',
+            chart_tick_size='0.001', target_mode='rr', risk_reward='2.5')
+        instrument = json.loads(asyncio.run(service.calculator_instrument(asset='fx', account='demo', symbol='USD_JPY',
+            broker='pepperstone', pepperstone_account_type=kind, chart_tick_size='0.001')).body)
+        assert instrument['symbol'] == 'USD_JPY' and instrument['mt5_symbol'] == 'USDJPY.a'
+        assert instrument['pepperstone_stop_guidance']['state'] == 'pending'
+        q = json.loads(asyncio.run(service.calculator_quote(request)).body)
+        assert q['calculation_context_saved'] and q['pepperstone_mt5_export_status']['file_ready']
+        assert q['pricing_source']['planning'] and q['pricing_source']['quote_timestamp'] == '2026-11-20T21:59:58Z'
+        assert 'OANDA' not in q['market_data_source']
+        assert Decimal(q['stop_loss_price_distance']) == Decimal('.108')
+        assert Decimal(q['estimated_commission_aud']) == (0 if kind == 'standard' else Decimal(q['quantity'])/100000*Decimal('8.4'))
+        rows = service._pepperstone_local_tracker_rows()
+        row = next(r for r in rows if r['calculation_context_id'] == q['calculation_context_id'])
+        assert row['execution_verified'] is False and row['classification_target']
+        if kind == 'standard':
+            assert Decimal(q['entry_price']) == Decimal('159.562')
+            assert Decimal(q['pepperstone_lot_estimate']['nominal_loss_aud']) == Decimal('11.34')
+            assert Decimal(q['quantity'])==7000 and Decimal(q['estimated_reward_aud'])==Decimal('28.35')
+            assert Decimal(q['stop_price'])==Decimal('159.454') and Decimal(q['target_price'])==Decimal('159.832')
+        else:
+            assert Decimal(q['entry_price']) == Decimal('159.557')
+        preset, filename = service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request, q))
+        values = _parse_set_file(preset)
+        assert values['UseDesktopTraderControls'] == 'true' and values['UsePriceDistanceInputs'] == 'true'
+        assert values['PresetAccountType'] == kind
+        assert Decimal(values['SL_PriceDistance']) == Decimal('.108')
+        assert tuple(Decimal(values[k]) for k in ('RiskAUD_Min','RiskAUD_Target','RiskAUD_Max')) == (10,10,12)
+        # The editable durable row already exists before downloading its preset.
+        saved = asyncio.run(service.save_open_order_classification(dict(target=row['classification_target'],
+            version=row['classification_version'], changes={'setup':'Breakout'})))
+        assert saved['ok']
+        service._TRADE_CONTEXTS_CACHE.clear()
+        assert next(r for r in service._pepperstone_local_tracker_rows() if r['id']==row['id'])['classification_values']['setup']=='Breakout'
+    assert calls == []
+    snapshot=service._pepperstone_fx_reference('USD_JPY','demo')[0]
+    assert service._pepperstone_snapshot_condition(snapshot,'demo')[0]=='stale_quote'
+    assert service._pepperstone_calculator_quote_condition(snapshot,'demo')[0]=='planning'
+    write(quote_timestamp='2026-11-20T08:00:00Z')
+    earlier=json.loads(asyncio.run(service.calculator_quote(request)).body)
+    assert earlier['pricing_source']['planning'] and earlier['pricing_source']['quote_timestamp']=='2026-11-20T08:00:00Z'
+    with monkeypatch.context() as weekday:
+        from datetime import timezone
+        class Monday(service.datetime):
+            @classmethod
+            def now(cls,tz=None):
+                value=cls(2026,11,23,8,tzinfo=timezone.utc)
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+        weekday.setattr(service,'datetime',Monday)
+        assert service._pepperstone_calculator_quote_condition(snapshot,'demo')[0]=='stale_quote'
+    # An older tick, wrong account, missing conversion model and missing price refuse.
+    for changes, required in [({'mode':'live'}, 'mode'), ({'tick_value':None}, 'tick value'),
+            ({'quote_timestamp':'2026-11-13T21:59:58Z'}, 'stale'), ({'bid':None}, 'quote'),
+            ({'quote_timestamp':None},'quote_timestamp'),
+            ({'bid':'159.560','ask':'159.562'},'cross')]:
+        write(**changes)
+        with pytest.raises(service.HTTPException) as exc:
+            asyncio.run(service.calculator_quote(request))
+        assert required in str(exc.value.detail).lower(), exc.value.detail
+    # Healthy OANDA remains a usable fallback with no usable Trader snapshot.
+    write(tick_value=None)
+    async def meta(**kwargs):return dict(displayPrecision=3,pipLocation=-2,tradeUnitsPrecision=0,minimumTradeSize='1',maximumOrderUnits='10000000')
+    async def pricing(**kwargs):return dict(prices=[dict(bids=[dict(price='159.400')],asks=[dict(price='159.411')],time='2026-11-20T21:59:58Z')],homeConversions=[dict(currency='JPY',accountGain='.015',accountLoss='.015',positionValue='.015')])
+    monkeypatch.setattr(service,'_fetch_oanda_instrument_meta',meta);monkeypatch.setattr(service,'_fetch_oanda_json',pricing)
+    q=json.loads(asyncio.run(service.calculator_quote(dict(request,pepperstone_account_type='standard',estimate_razor_from_standard=False))).body)
+    assert q['pricing_source']['label']=='OANDA reference' and q['pepperstone_mt5_export_status']['file_ready']
+    assert Decimal(q['entry_price'])==Decimal('159.411')  # No stale MT5/OANDA snapshot mixing.
+    with monkeypatch.context() as legacy:
+        legacy.setattr(service,'_get_oanda_config',lambda mode:(_ for _ in ()).throw(ValueError('fixture metadata unavailable')))
+        with pytest.raises(service.HTTPException) as exc:
+            asyncio.run(service.calculator_instrument(asset='fx',account='demo',symbol='USD_JPY',broker='oanda'))
+        assert exc.value.status_code==400
+
+
+def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    """Actual isolated pages/HTTP/production handlers; no production service or broker."""
+    import http.server
+    import threading
+    import urllib.request
+    import urllib.parse
+    import subprocess
+    import websocket
+    service=master_service
+    events=[];failures=[];downloads=[];cancelled_reads=[]
+    assert service._pepperstone_local_tracker_rows()==[]
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version='HTTP/1.1'
+        def log_message(self,*args):pass
+        def do_GET(self):self.dispatch()
+        def do_POST(self):self.dispatch()
+        def dispatch(self):
+            url=urllib.parse.urlsplit(self.path);path=url.path
+            query={k:v[-1] for k,v in urllib.parse.parse_qs(url.query).items()}
+            received=time.monotonic()
+            body_watchdog=None
+            if path=='/api/calculator/quote':
+                import faulthandler
+                body_watchdog=threading.Timer(3,lambda:faulthandler.dump_traceback(file=sys.stdout,all_threads=True));body_watchdog.start()
+                print('FIXTURE_HTTP_QUOTE_HEADERS',time.time(),dict(self.headers))
+            payload=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))) or b'{}') if self.command=='POST' else {}
+            if path=='/api/calculator/quote':print('FIXTURE_HTTP_BODY_READ_SECONDS',time.monotonic()-received)
+            events.append((self.command,path))
+            try:
+                mime='application/json';headers={}
+                if path=='/calculator':
+                    value=service.CALCULATOR_TEMPLATE.replace('{{CALCULATOR_JS_URL}}','/static/calculator.js');mime='text/html'
+                elif path=='/orders':
+                    value=service.OPEN_ORDERS_TEMPLATE.replace('{{OPEN_ORDERS_JS_URL}}','/static/open_orders.js');mime='text/html'
+                elif path in ('/static/calculator.js','/static/open_orders.js'):
+                    value=(ROOT/'render'/path.lstrip('/')).read_text(encoding='utf-8');mime='text/javascript'
+                elif path=='/api/calculator/bootstrap':value=dict(app_profile='local',trendline_plans_available=False,webhook=dict(available=False))
+                elif path=='/api/calculator/instrument':
+                    query['estimate_razor_from_standard']=query.get('estimate_razor_from_standard')=='true'
+                    value=json.loads(asyncio.run(service.calculator_instrument(**query)).body)
+                elif path=='/api/calculator/quote':
+                    import faulthandler
+                    started=time.monotonic();print('FIXTURE_QUOTE_START',json.dumps(payload))
+                    watchdog=threading.Timer(8,lambda:faulthandler.dump_traceback(file=sys.stdout,all_threads=True));watchdog.start()
+                    try:value=json.loads(asyncio.run(service.calculator_quote(payload)).body)
+                    finally:watchdog.cancel();watchdog.join(timeout=2)
+                    print('FIXTURE_QUOTE_DONE',time.monotonic()-started,value.get('timings_ms'))
+                elif path=='/api/calculator/pepperstone-set':
+                    # Durable local row must exist BEFORE any download request.
+                    rows=service._pepperstone_local_tracker_rows()
+                    assert len(rows)==1 and rows[0]['calculation_context_id']==payload['calculation_context_id']
+                    value,filename=service._build_pepperstone_trader_set(payload)
+                    sys.audit('ltt.browser_output',str(download_dir/filename))
+                    downloads.append((value,filename));mime='text/plain';headers['Content-Disposition']='attachment; filename="'+filename+'"'
+                elif path=='/api/open-orders/classification':value=asyncio.run(service.save_open_order_classification(payload))
+                elif path.startswith('/api/open-orders'):
+                    rows=service._pepperstone_local_tracker_rows();revision=sum(r['classification_version'] for r in rows)
+                    value=dict(items=rows,errors=[],warnings=[],version=1,progress_revision=revision,coverage=dict(empty_confirmed=not rows))
+                else:value={}
+                raw=value.encode('utf-8') if isinstance(value,str) else json.dumps(value).encode('utf-8')
+                if path=='/api/calculator/quote':print('FIXTURE_HTTP_RESPONSE_READY',time.monotonic()-received,len(raw),type(value).__name__)
+                self.send_response(200)
+                for key,val in headers.items():self.send_header(key,val)
+                self.send_header('Content-Type',mime+'; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.send_header('Connection','close');self.close_connection=True;self.end_headers();self.wfile.write(raw);self.wfile.flush()
+            except Exception as exc:
+                print('FIXTURE_HTTP_ERROR',path,time.monotonic()-received,repr(exc))
+                if isinstance(exc,ConnectionError) and path=='/api/calculator/instrument':
+                    cancelled_reads.append(repr(exc))  # Superseded lookup; never a quote/save/export error.
+                else:failures.append(repr(exc))
+                if not isinstance(exc,ConnectionError):
+                    raw=json.dumps(dict(detail=str(exc))).encode();self.send_response(500);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+            finally:
+                if body_watchdog is not None:body_watchdog.cancel();body_watchdog.join(timeout=2)
+    server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+    process=None;ws=None
+    profile=tmp_path/'edge-profile';profile.mkdir();download_dir=tmp_path/'downloads';download_dir.mkdir()
+    binary=Path(r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe');assert binary.is_file()
+    with (tmp_path/'edge.log').open('wb') as log:
+        try:
+            process=subprocess.Popen([str(binary),'--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check',
+                '--disable-background-networking','--disable-component-update','--disable-sync','--remote-debugging-port=0',
+                '--user-data-dir='+str(profile),'about:blank'],stdout=log,stderr=subprocess.STDOUT,creationflags=subprocess.CREATE_NO_WINDOW)
+            deadline=time.monotonic()+30
+            while not (profile/'DevToolsActivePort').is_file():
+                assert process.poll() is None and time.monotonic()<deadline;time.sleep(.05)
+            port=int((profile/'DevToolsActivePort').read_text().splitlines()[0])
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list',timeout=5) as response:target=next(t for t in json.load(response) if t['type']=='page')
+            ws=websocket.create_connection(target['webSocketDebuggerUrl'],timeout=20,suppress_origin=True);sequence=0
+            def call(method,params=None):
+                nonlocal sequence
+                sequence+=1;ws.send(json.dumps(dict(id=sequence,method=method,params=params or {})))
+                while True:
+                    value=json.loads(ws.recv())
+                    if value.get('method')=='Network.requestWillBeSent' and '/api/calculator/quote' in value['params']['request']['url']:
+                        print('BROWSER_QUOTE_REQUEST_WALL_TIME',value['params'].get('wallTime'))
+                    if value.get('id')==sequence:
+                        assert 'error' not in value,value
+                        return value.get('result',{})
+            def evaluate(script):
+                value=call('Runtime.evaluate',dict(expression=script,awaitPromise=True,returnByValue=True))
+                assert 'exceptionDetails' not in value,value
+                return value.get('result',{}).get('value')
+            def wait_for(script):
+                deadline=time.monotonic()+20
+                while not evaluate(script):
+                    if time.monotonic()>=deadline:
+                        observed=dict(waiting=script,events=events,failures=failures,page=evaluate("({error:document.getElementById('calc-error')?.textContent,status:document.getElementById('calc-quote-status')?.textContent,canonical:document.getElementById('calc-canonical-symbol')?.textContent,source:document.getElementById('calc-results')?.textContent,active:[...document.querySelectorAll('.toggle .active')].map(e=>[e.parentElement.id,e.dataset.v])})"))
+                        (tmp_path/'native-failure.json').write_text(json.dumps(observed,indent=2),encoding='utf-8')
+                        print('NATIVE_PAGE_FAILURE',json.dumps(observed))
+                        raise AssertionError(script)
+                    time.sleep(.1)
+            origin=f'http://127.0.0.1:{server.server_port}'
+            call('Network.enable')
+            def click(id):
+                rect=evaluate("(()=>{const e=document.getElementById("+json.dumps(id)+");e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()")
+                call('Input.dispatchMouseEvent',dict(type='mousePressed',button='left',clickCount=1,**rect))
+                call('Input.dispatchMouseEvent',dict(type='mouseReleased',button='left',clickCount=1,**rect))
+            call('Page.setDownloadBehavior',dict(behavior='allow',downloadPath=str(download_dir)))
+            call('Page.navigate',dict(url=origin+'/calculator'));wait_for("!!document.querySelector('#setup-toggle button')")
+            evaluate("""(()=>{
+                const click=(id,v)=>document.querySelector('#'+id+' [data-v="'+v+'"]').click();
+                click('asset-toggle','fx');click('broker-toggle','pepperstone');click('account-toggle','demo');click('pepperstone-account-type-toggle','standard');click('risk-toggle','fixed_aud');
+                for(const [id,val] of Object.entries({'calc-symbol':'USD_JPY','calc-risk':'10','calc-sl-ticks':'108','calc-rr':'2.5'})){
+                    const el=document.getElementById(id);el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));}
+            })()""")
+            wait_for("document.getElementById('calc-canonical-symbol').textContent.includes('USD_JPY')")
+            click('calc-quote')
+            wait_for("document.getElementById('calc-pepperstone-set').disabled===false")
+            rows=service._pepperstone_local_tracker_rows();assert len(rows)==1 and not rows[0]['execution_verified'];identity=rows[0]['id']
+            assert downloads==[]
+            assert evaluate("document.getElementById('calc-results').textContent.includes('2026-11-20T21:59:58Z')")
+            click('calc-pepperstone-set')
+            wait_for("document.getElementById('calc-success').textContent.includes('.set downloaded')")
+            assert len(downloads)==1 and 'UseDesktopTraderControls=true' in downloads[0][0]
+            downloaded=download_dir/downloads[0][1];deadline=time.monotonic()+15
+            while not downloaded.is_file():
+                assert time.monotonic()<deadline,'Native .set download did not complete'
+                time.sleep(.05)
+            assert downloaded.read_bytes()==downloads[0][0].encode('utf-8')
+            call('Page.navigate',dict(url=origin+'/orders'))
+            wait_for("document.querySelectorAll('#open-orders-table tbody tr').length===1")
+            evaluate("""(()=>{const headers=[...document.querySelectorAll('thead th')].map(e=>e.textContent.trim());const td=document.querySelector('#open-orders-table tbody tr').children[headers.indexOf('Setup')];td.querySelector('button').click();const s=td.querySelector('select');s.value='Breakout';s.dispatchEvent(new Event('change'));[...td.querySelectorAll('button')].find(b=>b.textContent==='Save').click();})()""")
+            wait_for("document.querySelector('#open-orders-table tbody').textContent.includes('Saved')")
+            call('Page.reload');wait_for("document.querySelector('#open-orders-table tbody').textContent.includes('Breakout')")
+            service._TRADE_CONTEXTS_CACHE.clear();rows=service._pepperstone_local_tracker_rows()
+            assert len(rows)==1 and rows[0]['id']==identity and rows[0]['classification_values']['setup']=='Breakout'
+            assert not failures,failures
+            assert not any(path.endswith('/submit') for method,path in events)
+            assert pepperstone_weekend_reference[1]==[]
+            print('NATIVE_PAGE_REAL_FIXTURE_HANDLERS',json.dumps(dict(row_id=identity,requests=events,preset=downloads[0][1],download_bytes=downloaded.stat().st_size,cancelled_instrument_reads=cancelled_reads,quote_time='2026-11-20T21:59:58Z')))
+        finally:
+            if ws is not None:
+                try:ws.send(json.dumps(dict(id=999999,method='Browser.close')))
+                finally:ws.close()
+            if process is not None:
+                code=process.wait(timeout=20);print('PRIVATE_EDGE_ACTUAL_EXIT',code);assert code==0
+            server.shutdown();server.server_close();worker.join(timeout=10);assert not worker.is_alive()
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 if "multipart" not in sys.modules:

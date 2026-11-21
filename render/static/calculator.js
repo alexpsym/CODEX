@@ -597,7 +597,7 @@
       ['Resolved broker', q.broker], ['Resolved venue', q.resolved_venue || q.venue], ['Resolved symbol', q.symbol],
       ['Entry price', fmtPriceLike(q.entry_price, tickSize)], ['Stop price', fmtPriceLike(q.stop_price, tickSize)], ['Target price', fmtPriceLike(q.target_price, tickSize)],
       ['TP distance', fmtPriceLike(q.target_distance, tickSize)],
-      [pepperstone ? (q.pepperstone_lot_estimate?.state==='ready'?'Estimated position size (MT5 lot model units)':'Estimated position size (OANDA pricing/conversion units)') : 'Qty / units', q.quantity],
+      [pepperstone ? ((q.pepperstone_lot_estimate?.state==='ready'||q.pricing_source?.label?.startsWith('Pepperstone Trader MT5'))?'Estimated position size (MT5 AUD model units)':'Estimated position size (OANDA pricing/conversion units)') : 'Qty / units', q.quantity],
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
       ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`],
@@ -622,6 +622,7 @@
     ];
     if (pepperstone) {
       rows.push(['Account type', q.pepperstone_account_type || 'razor']);
+      if(q.pricing_source){rows.push(['Price source',q.pricing_source.label]);rows.push(['Symbol quote time (UTC)',q.pricing_source.quote_timestamp || 'Unavailable']);}
       if(q.pepperstone_razor_estimate){
         const estimate=q.pepperstone_razor_estimate;
         rows.push(['Price preview',estimate.available?estimate.label:'OANDA reference calculation; Razor estimate unavailable']);
@@ -1741,6 +1742,13 @@
     syncExpiryControls();
     clearMessages();
     toggleWebhookPanel(false);
+    if (isPepperstoneFx()) {
+      // Calculate resolves this form itself. A prior input debounce must not
+      // invalidate its authoritative quote after it has already been sent.
+      if (symbolTimer !== null) { clearTimeout(symbolTimer); symbolTimer = null; }
+      if (resolveController) resolveController.abort();
+      resolveController = null; resolveInFlight = null;
+    }
     if (state.quoteController) state.quoteController.abort();
     if (journalController) journalController.abort();
     state.quoteController = new AbortController();
@@ -1926,7 +1934,7 @@
       if (!res.ok) throw buildFetchError('/api/calculator/pepperstone-set', 'POST', res.status, res.statusText, bodyText, bodyJson);
       const filename = filenameFromDisposition(res.headers.get('content-disposition'), 'Pepperstone_Trader.set');
       const downloaded = saveTextDownload(bodyText, filename);
-      const journalHint = 'Load only in the updated Trader EA. The preset starts with OrdersEnabled=false and does not arm or place an order; review broker checks, then explicitly enable the intended workflow.';
+      const journalHint = 'Load only in the updated Trader EA. Loading the preset does not submit an order. Trader Controls checks current broker conditions when you explicitly request execution.';
       okEl.textContent = `${downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`} ${journalHint}`;
     } catch (err) {
       errorEl.textContent = String(err?.message || err);
