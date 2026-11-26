@@ -38714,6 +38714,12 @@ def _open_orders_transient(errors):
                or error.get("transient") or error.get("retry_exhausted") for error in errors)
 
 
+def _pepperstone_local_fill_allowed(context):
+    return (str(context.get("order_type") or "").lower() in {"market", "limit"}
+            and not context.get("local_tracking_removed_at")
+            and str(context.get("status") or "").upper() not in {"CLOSED", "CANCELLED", "FAILED", "REJECTED"})
+
+
 def _pepperstone_local_tracker_rows(contexts=None):
     """Build visible planning rows only from explicitly durable ready contexts."""
     contexts = list(contexts if contexts is not None else _load_calculator_trade_contexts())
@@ -38774,14 +38780,17 @@ def _pepperstone_local_tracker_rows(contexts=None):
         else:
             row.pop("classification_unavailable", None)
         row["venue"] = "Pepperstone (local MT5)"
-        fill = ctx.get("local_mt5_fill") if order_type == "market" else None
+        row["manual_fill_allowed"] = identities.count((account, cid)) == 1 and _pepperstone_local_fill_allowed(ctx)
+        fill = ctx.get("local_mt5_fill") if order_type in {"market", "limit"} else None
         row["manual_fill_revision"] = int(fill.get("revision") or 0) if isinstance(fill, dict) else 0
         row["manual_fill_price"] = None
         if isinstance(fill, dict):
             row.update(local_mt5_fill=dict(fill), manual_fill_price=fill["price"],
                        entry_price=fill["price"], execution_price=fill["price"],
-                       stop_loss=fill["stop_price"], take_profit=fill["target_price"],
-                       status="MT5 fill recorded manually; SL/TP are local tracking only",
+                       stop_loss=fill["stop_price"] if order_type == "market" else ctx.get("planned_stop_price"),
+                       take_profit=fill["target_price"] if order_type == "market" else ctx.get("planned_target_price"),
+                       status=("MT5 fill recorded manually; SL/TP are local tracking only" if order_type == "market"
+                               else "MT5 fill recorded manually; execution unverified"),
                        execution_status="MT5 fill recorded manually; execution unverified")
         rows[row["id"]] = row
     return list(rows.values())
@@ -38816,22 +38825,37 @@ def _record_pepperstone_local_fill(payload):
         raise HTTPException(400, "A nonnegative integer manual-fill revision is required.")
     items = _load_calculator_trade_contexts()
     matches = [(index, ctx) for index, ctx in enumerate(items)
-               if str(ctx.get("broker") or "").lower() == "pepperstone" and ctx.get("account") == account
-               and ctx.get("calculation_context_id") == context_id and ctx.get("local_tracking") is True
-               and ctx.get("local_tracking_kind") == "pepperstone_calculator"]
+               if str(ctx.get("broker") or "").lower() == "pepperstone"
+               and str(ctx.get("account") or "").lower() == account
+               and str(ctx.get("calculation_context_id") or "").strip() == context_id]
     if not matches:
-        raise HTTPException(404, "Active local Pepperstone market context not found.")
+        raise HTTPException(404, "Active local Pepperstone context not found.")
     if len(matches) != 1:
         raise HTTPException(409, "Local tracking identity is ambiguous; nothing was saved.")
     index, ctx = matches[0]
-    if (ctx.get("local_tracking_removed_at") or str(ctx.get("order_type") or "").lower() != "market"
-            or str(ctx.get("status") or "").upper() in {"CLOSED", "CANCELLED", "FAILED", "REJECTED"}):
-        raise HTTPException(409, "Only an active, unremoved local market plan can record an MT5 fill.")
+    if (ctx.get("account") != account or ctx.get("calculation_context_id") != context_id
+            or ctx.get("local_tracking") is not True or ctx.get("local_tracking_kind") != "pepperstone_calculator"
+            or not _pepperstone_local_fill_allowed(ctx)):
+        raise HTTPException(409, "Only an active local market or limit plan can record an MT5 fill.")
     previous = ctx.get("local_mt5_fill") or {}
     revision = int(previous.get("revision") or 0)
     if payload["revision"] != revision:
         raise HTTPException(409, "MT5 fill changed in another editor. Reload this fill before saving; your draft is retained.")
     fill = _pepperstone_fill_decimal(payload["fill_price"], "MT5 fill price")
+    if str(ctx.get("order_type") or "").lower() == "limit":
+        # A limit fill can improve on the nominated entry. The nominated
+        # absolute SL/TP and original calculator intent still belong to the plan.
+        record = {"revision": revision + 1, "price": format(fill, "f"),
+                  "provenance": "manual_mt5", "recorded_at": _utc_now_iso()}
+    else:
+        record = _pepperstone_market_fill_record(ctx, previous, fill, revision)
+    saved = dict(ctx, local_mt5_fill=record)
+    items[index] = saved  # New dictionaries only: failed writes cannot mutate cached saved values.
+    _save_calculator_trade_contexts(items)
+    return {"ok": True, "revision": revision + 1, "item": _pepperstone_local_tracker_rows([saved])[0]}
+
+
+def _pepperstone_market_fill_record(ctx, previous, fill, revision):
     with localcontext() as precision:
         precision.prec = 500
         stop = _pepperstone_fill_decimal(ctx.get("original_stop_distance"), "Original stop distance")
@@ -38855,14 +38879,10 @@ def _record_pepperstone_local_fill(payload):
         sl, tp = fill - sign * stop, fill + sign * target
         if not sl.is_finite() or not tp.is_finite() or sl <= 0 or tp <= 0:
             raise HTTPException(422, "The fill produces a nonpositive or invalid local SL/TP; nothing was saved.")
-        record = {"revision": revision + 1, "price": format(fill, "f"), "stop_price": format(sl, "f"),
+        return {"revision": revision + 1, "price": format(fill, "f"), "stop_price": format(sl, "f"),
                   "target_price": format(tp, "f"), "provenance": "manual_mt5", "recorded_at": _utc_now_iso(),
                   "side": side, "original_stop_distance": str(ctx["original_stop_distance"]),
                   "original_target_distance": str(ctx["original_target_distance"])}
-    saved = dict(ctx, local_mt5_fill=record)
-    items[index] = saved  # New dictionaries only: failed writes cannot mutate cached saved values.
-    _save_calculator_trade_contexts(items)
-    return {"ok": True, "revision": revision + 1, "item": _pepperstone_local_tracker_rows([saved])[0]}
 
 
 @app.post("/api/open-orders/local-tracking/fill")

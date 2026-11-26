@@ -1378,17 +1378,30 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     parsed,balance=master_service._parse_local_trading_journal_workbook(input_path,account_mode='live')
     statement=next(row for row in parsed if (row.get('raw_refs') or {}).get('position_ticket')=='7002')
     row_id=statement['id'];expected_financials={key:statement[key] for key in financial_fields}
+    from decimal import Decimal
+    broker_entry=Decimal(str(statement['entry_price']))
+    direction=Decimal(1 if str(statement['side']).lower()=='buy' else -1)
+    planned_entry=broker_entry+direction*Decimal('.002')
+    planned_stop=planned_entry-direction*Decimal('.010')
+    planned_target=planned_entry+direction*Decimal('.025')
     context=dict(broker='pepperstone',account='demo',instrument=statement['symbol'],side=statement['side'],
                  order_id=statement['raw_refs'].get('opening_order_id'),position_id=statement['raw_refs'].get('position_ticket'),
                  calculation_context_id='matched-local',local_tracking=True,local_tracking_kind='pepperstone_calculator',
-                 order_type='limit',entry_price=statement['entry_price'],quantity=statement['qty'],open_time=statement['open_time'],
-                 planned_entry_price=str(statement['entry_price']),planned_stop_price=str(statement['entry_price']-.01),
-                 planned_target_price=str(statement['entry_price']+.025),risk_mode='fixed_aud',risk_value='10',risk_reward='2.5',
+                 order_type='limit',entry_price=str(planned_entry),quantity=statement['qty'],open_time=statement['open_time'],
+                 planned_entry_price=str(planned_entry),planned_stop_price=str(planned_stop),
+                 planned_target_price=str(planned_target),original_stop_distance='.010',original_target_distance='.025',
+                 risk_mode='fixed_aud',risk_value='10',risk_reward='2.5',
                  target_mode='rr',timeframe='5m',setup='Pullback',pattern='channel',ema='9',vwap='No',
                  classification_version=1,classification_overrides={'timeframe':'15MIN','setup':'Breakout','pattern':'',
                      'ema':'20','vwap':'Yes','aths_atls':'All-Time High','round_number':'Yes'})
     master_service._save_calculator_trade_contexts([context,dict(context,account='live',calculation_context_id='other-account'),
         dict(context,instrument='GBPUSD',calculation_context_id='other-symbol')])
+    # A manual fill is a tracking note. Even if it differs, MT5's statement owns execution.
+    manual_price=str(broker_entry-direction*Decimal('.001'))
+    fill=master_service._record_pepperstone_local_fill(dict(id='pepperstone-local:demo:matched-local',
+        account='demo',calculation_context_id='matched-local',fill_price=manual_price,revision=0))
+    assert fill['item']['manual_fill_price']==manual_price and not fill['item']['execution_verified']
+    context=next(c for c in master_service._load_calculator_trade_contexts() if c['calculation_context_id']=='matched-local')
     # Existing authored journal overrides still own their fields.
     workbook_state['items'][0]['manual_overrides'].update(setup='Manual setup',notes='Keep this journal note')
     monkeypatch.setattr(journal,'REPORT_START_YEAR',2026);monkeypatch.setattr(journal,'REPORT_MIN_END_YEAR',2026)
@@ -1450,6 +1463,9 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     assert updated['risk_mode']=='fixed_aud' and str(updated['risk_value'])=='10' and str(updated['risk_reward'])=='2.5'
     assert updated['raw_refs']['calculator_context']['risk_value']=='10'
     assert updated['raw_refs']['calculator_context']['risk_reward']=='2.5'
+    assert updated['planned_entry_price']==str(planned_entry)
+    assert updated['planned_stop_price']==str(planned_stop) and updated['planned_target_price']==str(planned_target)
+    assert Decimal(str(updated['entry_price']))==broker_entry!=Decimal(manual_price)
     assert {key:updated[key] for key in financial_fields}==expected_financials
     # A new durable edit (including explicit clears) must survive the normal reimport merge.
     context=dict(context,classification_version=2,classification_overrides={**context['classification_overrides'],'timeframe':'','ema':'','round_number':'No'})
@@ -1490,7 +1506,7 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     assert master_service._lookup_pepperstone_trade_context(different) is None
     assert master_service._backfill_trade_row_context_fields(different).get('risk_value') is None
     # A unique geometric candidate B is not proof of statement trade A.
-    unproven=dict(context,order_id=None,position_id=None,calculation_context_id='unproven-other-trade',risk_value='99',risk_reward='99',
+    unproven=dict(context,order_id=None,position_id=None,entry_price=statement['entry_price'],calculation_context_id='unproven-other-trade',risk_value='99',risk_reward='99',
                   classification_overrides={'setup':'NEVER','ema':'99'})
     master_service._save_calculator_trade_contexts([unproven])
     assert master_service._lookup_pepperstone_trade_context(statement) is not None  # Legacy display estimate only.

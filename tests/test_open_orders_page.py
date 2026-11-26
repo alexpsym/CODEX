@@ -567,7 +567,7 @@ def test_pepperstone_local_market_fill_rejects_invalid_stale_and_failed_saves(_p
         invalid += [dict(request(), stop_price="1"), dict(request(), original_stop_distance="1"), dict(request(), revision=True),
                     dict(request(), revision=-1), dict(request(), revision="0"), dict(request(), account="live"),
                     dict(request(), id="pepperstone-local:demo:shared"), request(context_id="missing"),
-                    request(context_id="shared"), request(context_id="unrelated"), request(context_id="historical")]
+                    request(context_id="unrelated"), request(context_id="historical")]
         for payload in invalid:
             with pytest.raises(service.HTTPException):
                 await service.record_pepperstone_local_fill(payload)
@@ -606,7 +606,40 @@ def test_pepperstone_local_market_fill_rejects_invalid_stale_and_failed_saves(_p
             assert error.value.status_code == 500 and "unchanged" in error.value.detail
         assert service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
         assert service._pepperstone_local_tracker_rows() == cached and service._OPEN_ORDERS_CACHE["version"] == version
-    asyncio.run(asyncio.wait_for(scenario(), 15))
+        # Demo and Live can have the same context ID, with independent fill revisions.
+        contexts = service._load_calculator_trade_contexts()
+        contexts = [dict(c, order_type="limit") if c["calculation_context_id"] == "shared" else c for c in contexts]
+        service._save_calculator_trade_contexts(contexts)
+        demo_before = next(c for c in contexts if c["account"] == "demo" and c["calculation_context_id"] == "shared")
+        demo = next(r for r in service._pepperstone_local_tracker_rows() if r["id"] == target()["id"])
+        assert demo["manual_fill_allowed"] and not demo["manual_fill_price"]
+        first_limit = json.loads((await service.record_pepperstone_local_fill(request("1.099", 0, "shared"))).body)["item"]
+        assert (first_limit["manual_fill_price"], first_limit["planned_entry_price"], first_limit["stop_loss"], first_limit["take_profit"]) == ("1.099", "1.1", "1.09", "1.12")
+        assert not first_limit["execution_verified"]
+        await service.save_open_order_classification(dict(target=demo["classification_target"], version=demo["classification_version"], changes={"ema":"20"}))
+        corrected = json.loads((await service.record_pepperstone_local_fill(request("1.098", 1, "shared"))).body)["item"]
+        assert corrected["classification_values"]["ema"] == "20"
+        assert corrected["manual_fill_revision"] == 2 and corrected["classification_version"] == 1
+        assert corrected["risk_value"] == demo_before["risk_value"] and corrected["risk_reward"] == demo_before["risk_reward"]
+        saved_bytes = service.TRADE_CONTEXTS_PATH.read_bytes()
+        with pytest.raises(service.HTTPException) as error:
+            await service.record_pepperstone_local_fill(request("1.097", 1, "shared"))
+        assert error.value.status_code == 409 and service.TRADE_CONTEXTS_PATH.read_bytes() == saved_bytes
+        service._TRADE_CONTEXTS_CACHE.clear()
+        live = next(r for r in service._pepperstone_local_tracker_rows() if r["id"] == target("shared","live")["id"])
+        assert live["manual_fill_allowed"] and live["manual_fill_revision"] == 0 and not live["manual_fill_price"]
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "_save_calculator_trade_contexts", fail)
+            with pytest.raises(service.HTTPException) as error:
+                await service.record_pepperstone_local_fill(request("1.097", 2, "shared"))
+            assert error.value.status_code == 500 and service.TRADE_CONTEXTS_PATH.read_bytes() == saved_bytes
+        contexts = service._load_calculator_trade_contexts()
+        service._save_calculator_trade_contexts(contexts + [dict(demo_before, calculation_context_id=" shared ")])
+        assert not next(r for r in service._pepperstone_local_tracker_rows() if r["id"] == demo["id"])["manual_fill_allowed"]
+        with pytest.raises(service.HTTPException) as error:
+            await service.record_pepperstone_local_fill(request("1.097", 2, "shared"))
+        assert error.value.status_code == 409
+    _run_scoped_price_mock_io(asyncio.wait_for(scenario(), 15))
     assert calls == [] and reads == []
 
 

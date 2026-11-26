@@ -301,7 +301,7 @@
     const d=state.manualDraft;if(!d)return;
     if(!d.pending&&Number(entry.item.manual_fill_revision||0)!==d.revision){d.conflict=true;d.message='MT5 fill changed. Reload the saved fill before correcting it; your draft is retained.';}
     state.fillInput.disabled=d.pending;
-    state.fillSave.disabled=!entry.present||d.pending||d.conflict||!d.dirty;
+    state.fillSave.disabled=!entry.present||!entry.item.manual_fill_allowed||d.pending||d.conflict||!d.dirty;
     state.fillCancel.disabled=d.pending;state.fillReload.disabled=d.pending||!entry.present;
     state.fillReload.hidden=!d.conflict;state.fillFeedback.textContent=d.message||'';
   };
@@ -314,11 +314,16 @@
       const response=await fetch('/api/open-orders/local-tracking/fill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       const text=await response.text(),data=text?JSON.parse(text):{};
       if(!response.ok){if(response.status===409)d.conflict=true;throw new Error(parseApiError(data,response));}
-      if(data.ok!==true||data.item?.id!==body.id||Number(data.item.manual_fill_revision)!==Number(data.revision)||Number(data.revision)<=d.revision)throw new Error('Save was not confirmed. Reload the saved fill before retrying.');
+      if(data.ok!==true||data.item?.id!==body.id||data.item.account!==body.account||
+          data.item.calculation_context_id!==body.calculation_context_id||data.item.manual_fill_revision!==data.revision||
+          data.revision!==d.revision+1)throw new Error('Save was not confirmed. Reload the saved fill before retrying.');
       state.manualDraft=null;
       // A removal or a newer publication may have arrived while this request was in flight.
       if(entry.present){
-        const item=preferNewerLocalFill(data.item,entry.item);
+        // Fill and classification have independent revisions. Merge only the
+        // fields owned by this acknowledgement into the currently visible row.
+        const fill=preferNewerLocalFill(data.item,entry.item);
+        const item={...entry.item,...Object.fromEntries(localFillFields.map(key=>[key,fill[key]]))};
         render((window.__openOrdersItems||[]).map(row=>rowKey(row)===rowKey(item)?item:row),window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
       }
       setBadge('MT5 fill recorded manually. SL/TP are local tracking only; manage MT5 orders in MT5.');
@@ -328,12 +333,12 @@
     }finally{d.pending=false;if(state.manualDraft===d)updateLocalFillCell(entry,state);}
   };
   const openLocalFillCell=(entry,state)=>{
-    if(state.manualDraft||!entry.present)return;
+    if(state.manualDraft||!entry.present||!entry.item.manual_fill_allowed)return;
     const d=state.manualDraft={revision:Number(entry.item.manual_fill_revision||0),pending:false,dirty:false,conflict:false,message:''};
     state.td.innerHTML='';
-    const label=document.createElement('span');label.textContent='Actual MT5 market fill: ';state.td.appendChild(label);
+    const label=document.createElement('span');label.textContent='Actual MT5 fill: ';state.td.appendChild(label);
     const input=state.fillInput=document.createElement('input');input.type='text';input.inputMode='decimal';input.value=entry.item.manual_fill_price||'';
-    input.setAttribute('aria-label','Actual MT5 market fill price (local tracking only)');state.td.appendChild(input);
+    input.setAttribute('aria-label','Actual MT5 fill price (local tracking only)');state.td.appendChild(input);
     input.addEventListener('input',()=>{d.dirty=input.value!==String(entry.item.manual_fill_price||'');if(!d.conflict)d.message='';updateLocalFillCell(entry,state);});
     state.fillSave=button('Save MT5 fill',()=>saveLocalFillCell(entry,state));
     state.fillCancel=button('Discard draft',()=>{if(d.pending)return;state.manualDraft=null;renderPriceCell(entry,state);});
@@ -366,10 +371,12 @@
       const planned=state.field==='entry'?item.planned_entry_price:state.field==='stop_loss'?item.planned_stop_price:item.planned_target_price;
       const text=document.createElement('span');
       const market=String(item.order_type).toLowerCase()==='market';
-      text.textContent=market&&item.manual_fill_price?(state.field==='entry'?`${item.manual_fill_price} (manual MT5 fill)`:`${fmt(item[state.field])} (local tracking; not sent to MT5)`)
-        :state.field==='entry'&&market?'Unknown (awaiting MT5 fill)':`${fmt(planned)} (planned)`;
+      if(state.field==='entry'&&item.manual_fill_price)text.textContent=`${item.manual_fill_price} (manual MT5 fill)`;
+      else if(state.field==='entry'&&market)text.textContent='Unknown (awaiting MT5 fill)';
+      else if(market&&item.manual_fill_price)text.textContent=`${fmt(item[state.field])} (local tracking; not sent to MT5)`;
+      else text.textContent=`${fmt(planned)} (planned)`;
       state.td.appendChild(text);
-      if(state.field==='entry'&&market&&entry.present){const edit=button(item.manual_fill_price?'Correct MT5 fill':'Record MT5 fill',()=>openLocalFillCell(entry,state));edit.setAttribute('aria-label','Record or correct actual MT5 market fill; local tracking only');state.td.appendChild(edit);}
+      if(state.field==='entry'&&item.manual_fill_allowed&&entry.present){const edit=button(item.manual_fill_price?'Correct MT5 fill':'Record MT5 fill',()=>openLocalFillCell(entry,state));edit.setAttribute('aria-label','Record or correct actual MT5 fill (local tracking only)');state.td.appendChild(edit);}
       return;
     }
     const p=entry.item.price_edit,value=p?.levels?.[state.field]??(state.field==='entry'?(entry.item.entry_price||entry.item.order_price):entry.item[state.field]);
@@ -554,7 +561,8 @@
         draft.conflict=true;throw new Error('Local save acknowledgement did not match this row. Draft retained; Reload before saving.');
       }
       // A delayed earlier publication/acknowledgment cannot replace newer metadata.
-      if(Number(data.version)>=Number(entry.item.classification_version||0))entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};
+      if(Number(data.version)>=Number(entry.item.classification_version||0))entry.item=preferNewerLocalFill(
+        {...entry.item,...data.item,classification_values:data.values,classification_version:data.version},entry.item);
       state.draft=null;state.valueButton=null;state.savedUntil=Date.now()+2500;
       const updated=(window.__openOrdersItems||[]).map(item=>classificationKey(item)===entry.key?entry.item:item);
       render(updated,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);

@@ -150,6 +150,14 @@ def test_pepperstone_mt5_reference_calculate_without_oanda(monkeypatch, tmp_path
 
 
 def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=False)
+
+
+def test_pepperstone_limit_fill_on_calculator_dashboard(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=True)
+
+
+def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill):
     """Actual isolated pages/HTTP/production handlers; no production service or broker."""
     import http.server
     import threading
@@ -159,6 +167,9 @@ def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatc
     import websocket
     service=master_service
     events=[];failures=[];downloads=[];cancelled_reads=[]
+    hold_fill_ack=threading.Event()
+    release_fill_ack=threading.Event()
+    reject_fill=threading.Event()
     assert service._pepperstone_local_tracker_rows()==[]
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version='HTTP/1.1'
@@ -204,9 +215,19 @@ def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatc
                     sys.audit('ltt.browser_output',str(download_dir/filename))
                     downloads.append((value,filename));mime='text/plain';headers['Content-Disposition']='attachment; filename="'+filename+'"'
                 elif path=='/api/open-orders/classification':value=asyncio.run(service.save_open_order_classification(payload))
+                elif path=='/api/open-orders/local-tracking/fill' and limit_fill:
+                    if reject_fill.is_set():
+                        raw=b'{"detail":"Fixture storage failure"}'
+                        self.send_response(500);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+                        return
+                    value=json.loads(asyncio.run(service.record_pepperstone_local_fill(payload)).body)
+                    if hold_fill_ack.is_set():
+                        assert release_fill_ack.wait(10), 'Fixture fill acknowledgement was not released'
                 elif path.startswith('/api/open-orders'):
-                    rows=service._pepperstone_local_tracker_rows();revision=sum(r['classification_version'] for r in rows)
-                    value=dict(items=rows,errors=[],warnings=[],version=1,progress_revision=revision,coverage=dict(empty_confirmed=not rows))
+                    rows=service._pepperstone_local_tracker_rows()
+                    revision=sum(r['classification_version']+r['manual_fill_revision'] for r in rows)
+                    value=dict(items=rows,errors=[],warnings=[],version=1,progress_revision=revision,
+                               core_complete=True,empty_confirmed=not rows)
                 else:value={}
                 raw=value.encode('utf-8') if isinstance(value,str) else json.dumps(value).encode('utf-8')
                 if path=='/api/calculator/quote':print('FIXTURE_HTTP_RESPONSE_READY',time.monotonic()-received,len(raw),type(value).__name__)
@@ -268,6 +289,9 @@ def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatc
                 call('Input.dispatchMouseEvent',dict(type='mousePressed',button='left',clickCount=1,**rect))
                 call('Input.dispatchMouseEvent',dict(type='mouseReleased',button='left',clickCount=1,**rect))
             call('Page.setDownloadBehavior',dict(behavior='allow',downloadPath=str(download_dir)))
+            if limit_fill:
+                call('Page.navigate',dict(url=origin+'/orders'))
+                wait_for("window.__openOrdersCoverage?.empty_confirmed===true && window.__openOrdersItems?.length===0")
             call('Page.navigate',dict(url=origin+'/calculator'));wait_for("!!document.querySelector('#setup-toggle button')")
             evaluate("""(()=>{
                 const click=(id,v)=>document.querySelector('#'+id+' [data-v="'+v+'"]').click();
@@ -275,12 +299,31 @@ def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatc
                 for(const [id,val] of Object.entries({'calc-symbol':'USD_JPY','calc-risk':'10','calc-sl-ticks':'108','calc-rr':'2.5'})){
                     const el=document.getElementById(id);el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));}
             })()""")
+            if limit_fill:
+                evaluate("""(()=>{
+                    document.querySelector('#order-toggle [data-v="limit"]').click();
+                    for(const [id,val] of Object.entries({'calc-limit':'159.360','calc-sl-ticks':'60'})){
+                        const el=document.getElementById(id);el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));}
+                    document.querySelector('#timeframe-toggle [data-v="5m"]').click();
+                    document.querySelector('#setup-toggle [data-v="Pullback"]').click();
+                })()""")
             wait_for("document.getElementById('calc-canonical-symbol').textContent.includes('USD_JPY')")
             click('calc-quote')
             wait_for("document.getElementById('calc-pepperstone-set').disabled===false")
             rows=service._pepperstone_local_tracker_rows();assert len(rows)==1 and not rows[0]['execution_verified'];identity=rows[0]['id']
             assert downloads==[]
             assert evaluate("document.getElementById('calc-results').textContent.includes('2026-11-20T21:59:58Z')")
+            if limit_fill:
+                _exercise_limit_fill_editor(call, evaluate, wait_for, origin, service, identity,
+                                            hold_fill_ack, release_fill_ack, reject_fill)
+                assert not failures,failures
+                assert pepperstone_weekend_reference[1]==[]
+                assert [path for method,path in events if method=='POST' and not path.endswith('/prewarm-account')]==[
+                    '/api/calculator/quote','/api/open-orders/local-tracking/fill',
+                    '/api/open-orders/classification','/api/open-orders/local-tracking/fill',
+                    '/api/open-orders/local-tracking/fill']
+                print('NATIVE_LIMIT_FILL', json.dumps(dict(row_id=identity, requests=events)))
+                return
             click('calc-pepperstone-set')
             wait_for("document.getElementById('calc-success').textContent.includes('.set downloaded')")
             assert len(downloads)==1 and 'UseDesktopTraderControls=true' in downloads[0][0]
@@ -301,12 +344,83 @@ def test_pepperstone_weekend_calculator_page_and_local_classification(monkeypatc
             assert pepperstone_weekend_reference[1]==[]
             print('NATIVE_PAGE_REAL_FIXTURE_HANDLERS',json.dumps(dict(row_id=identity,requests=events,preset=downloads[0][1],download_bytes=downloaded.stat().st_size,cancelled_instrument_reads=cancelled_reads,quote_time='2026-11-20T21:59:58Z')))
         finally:
+            release_fill_ack.set()
             if ws is not None:
                 try:ws.send(json.dumps(dict(id=999999,method='Browser.close')))
                 finally:ws.close()
             if process is not None:
                 code=process.wait(timeout=20);print('PRIVATE_EDGE_ACTUAL_EXIT',code);assert code==0
             server.shutdown();server.server_close();worker.join(timeout=10);assert not worker.is_alive()
+
+
+def _exercise_limit_fill_editor(call, evaluate, wait_for, origin, service, identity,
+                                hold_fill_ack, release_fill_ack, reject_fill):
+    from decimal import Decimal as D
+    call('Page.navigate',dict(url=origin+'/orders'))
+    row_selector = '#open-orders-table tbody tr'
+    wait_for("document.querySelectorAll('#open-orders-table tbody tr').length===1")
+    def cell(column):
+        return ("document.querySelector("+json.dumps(row_selector)+").children["
+                "[...document.querySelectorAll('#open-orders-table thead th')].findIndex("
+                f"e=>e.textContent.trim()==={json.dumps(column)})]")
+    entry=cell('Entry / Order')
+    def press(selector,label):
+        evaluate(f"[...({selector}).querySelectorAll('button')].find(b=>b.textContent==={json.dumps(label)}).click()")
+    def type_fill(value):
+        evaluate(f"(()=>{{const input=({entry}).querySelector('input');input.value={json.dumps(value)};"
+                 "input.dispatchEvent(new Event('input',{bubbles:true}));})()")
+    def assert_prices(price):
+        assert D(evaluate(f"({cell('Planned Entry')}).textContent"))==D('159.360')
+        assert D(evaluate(f"({cell('Planned Stop')}).textContent"))==D('159.300')
+        assert D(evaluate(f"({cell('Planned Target')}).textContent"))==D('159.510')
+        visible = evaluate(f"({entry}).querySelector('span').textContent")
+        actual_value, actual_label = visible.split(' ', 1)
+        expected_value, expected_label = price.split(' ', 1)
+        assert (D(actual_value), actual_label) == (D(expected_value), expected_label), visible
+        assert evaluate(f"({cell('Timeframe')}).textContent.includes('5MIN')")
+        assert evaluate(f"({cell('Setup')}).textContent.includes('Pullback')")
+    assert_prices('159.360 (planned)')
+    press(entry,'Record MT5 fill');type_fill('159.357');press(entry,'Discard draft')
+    assert_prices('159.360 (planned)')
+    # Let the fill commit, then edit EMA before the older fill reply reaches the page.
+    hold_fill_ack.set()
+    press(entry,'Record MT5 fill');type_fill('159.358');press(entry,'Save MT5 fill')
+    try:
+        deadline=time.monotonic()+5
+        while service._pepperstone_local_tracker_rows()[0]['manual_fill_revision']!=1:
+            assert time.monotonic()<deadline
+            time.sleep(.03)
+        ema=cell('EMA')
+        evaluate(f"(()=>{{const td={ema};td.querySelector('button').click();const s=td.querySelector('select');"
+                 "s.value='20';s.dispatchEvent(new Event('change'));[...td.querySelectorAll('button')].find(b=>b.textContent==='Save').click();})()")
+        wait_for(f"({ema}).textContent.includes('Saved')")
+    finally:
+        hold_fill_ack.clear()
+        release_fill_ack.set()
+    wait_for(f"({entry}).textContent.includes('Correct MT5 fill')")
+    assert_prices('159.358 (manual MT5 fill)')
+    assert evaluate(f"({ema}).textContent.includes('20')")
+    press(entry,'Correct MT5 fill');type_fill('159.357')
+    reject_fill.set()
+    press(entry,'Save MT5 fill')
+    wait_for(f"({entry}).textContent.includes('Fixture storage failure')")
+    assert service._pepperstone_local_tracker_rows()[0]['manual_fill_price']=='159.358'
+    reject_fill.clear()
+    press(entry,'Save MT5 fill')
+    wait_for(f"({entry}).textContent.includes('159.357 (manual MT5 fill)')")
+    evaluate("document.getElementById('refresh-btn').click()")
+    wait_for("document.getElementById('open-orders-status').textContent==='Updated'")
+    wait_for(f"({entry}).textContent.includes('159.357 (manual MT5 fill)')")
+    call('Page.reload')
+    wait_for(f"!!document.querySelector({json.dumps(row_selector)}) && ({entry}).textContent.includes('159.357 (manual MT5 fill)')")
+    assert_prices('159.357 (manual MT5 fill)')
+    service._TRADE_CONTEXTS_CACHE.clear()
+    rows=service._pepperstone_local_tracker_rows()
+    assert len(rows)==1 and rows[0]['id']==identity
+    row=rows[0]
+    assert row['manual_fill_revision']==2 and not row['execution_verified']
+    assert row['classification_values']['ema']=='20' and row['risk_value']=='10' and row['risk_reward']=='2.5'
+    assert (D(row['stop_loss']),D(row['take_profit']))==(D('159.300'),D('159.510'))
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
