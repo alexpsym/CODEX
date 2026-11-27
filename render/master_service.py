@@ -29970,7 +29970,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       </div>
     </div>
   </div>
-  <script src="{{CALCULATOR_JS_URL}}"></script>
+  <script src="{{CALCULATOR_JS_URL}}" data-pepperstone-presets="{{PEPPERSTONE_PRESETS_FOLDER}}"></script>
 </body>
 </html>"""
 
@@ -29979,6 +29979,8 @@ CALCULATOR_TEMPLATE = """<!doctype html>
 async def merged_calculator_page() -> HTMLResponse:
     calc_js_version = quote(_calculator_js_fingerprint()["sha12"], safe="")
     page = CALCULATOR_TEMPLATE.replace("{{CALCULATOR_JS_URL}}", f"/static/calculator.js?v={calc_js_version}")
+    folder = str(_PEPPERSTONE_PRESETS_FOLDER) if APP_PROFILE == "local" and os.name == "nt" else ""
+    page = page.replace("{{PEPPERSTONE_PRESETS_FOLDER}}", folder)
     return HTMLResponse(page)
 
 
@@ -32142,6 +32144,83 @@ async def calculator_pepperstone_set(payload: Dict[str, object] = Body(default={
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+_PEPPERSTONE_PRESETS_FOLDER = Path(
+    r"C:\Users\User\AppData\Roaming\MetaQuotes\Terminal\73B7A2420D6397DFF9014A20F1201F97\MQL5\Presets"
+)
+
+
+def _publish_pepperstone_preset(folder: Path, filename: str, content: bytes) -> Path:
+    # On Windows rename is atomic in the same directory and fails if the target exists.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".ltt-preset-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        stem = Path(filename).stem
+        for index in range(1000):
+            destination = folder / (filename if index == 0 else f"{stem}_{index + 1}.set")
+            try:
+                temporary.rename(destination)
+            except FileExistsError:
+                continue
+            temporary = None
+            return destination
+        raise FileExistsError("No free preset filename remains for this timestamp.")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+@app.post("/api/calculator/pepperstone-set/local")
+def calculator_pepperstone_set_local(request: Request, payload: Dict[str, object] = Body(...)) -> JSONResponse:
+    if (
+        APP_PROFILE != "local" or os.name != "nt"
+        or not request.client or request.client.host not in {"127.0.0.1", "::1"}
+        or request.url.hostname not in {"127.0.0.1", "::1", "localhost"}
+        or request.headers.get("origin", str(request.base_url).rstrip("/")) != str(request.base_url).rstrip("/")
+    ):
+        raise HTTPException(status_code=403, detail="Saving to MT5 Presets requires the local Windows calculator.")
+
+    folder = _PEPPERSTONE_PRESETS_FOLDER
+    context_id = str(payload.get("calculation_context_id") or "").strip()
+    publication_id = payload.get("publication_id")
+    try:
+        with _PEPPERSTONE_QUOTE_SNAPSHOTS_LOCK:
+            _get_pepperstone_quote_snapshot(context_id)
+            snapshot = _PEPPERSTONE_QUOTE_SNAPSHOTS[context_id]
+            prepared = snapshot.get("local_preset")
+            if publication_id is None:
+                if prepared is None:
+                    content, filename = _build_pepperstone_trader_set(payload)
+                    prepared = {
+                        "id": uuid4().hex, "payload": dict(payload),
+                        "filename": filename, "content": content.encode("utf-8"),
+                    }
+                    snapshot["local_preset"] = prepared
+                elif prepared["payload"] != payload:
+                    raise HTTPException(status_code=409, detail="Preset inputs changed. Calculate again.")
+                result = {"publication_id": prepared["id"]}
+            else:
+                if prepared is None or publication_id != prepared["id"]:
+                    raise HTTPException(status_code=409, detail="Prepared preset expired. Calculate again.")
+                if "saved_filename" not in prepared:
+                    path = _publish_pepperstone_preset(folder, prepared["filename"], prepared["content"])
+                    prepared["saved_filename"] = path.name
+                else:
+                    path = folder / prepared["saved_filename"]
+                    with path.open("rb") as stream:
+                        if stream.read(len(prepared["content"]) + 1) != prepared["content"]:
+                            raise HTTPException(status_code=409, detail="The saved preset was changed. Calculate again.")
+                result = {"filename": prepared["saved_filename"], "folder": str(folder)}
+    except HTTPException as exc:
+        raise HTTPException(status_code=exc.status_code, detail=f"{folder}: {exc.detail}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save in {folder}: {exc}") from exc
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/calculator/quote")

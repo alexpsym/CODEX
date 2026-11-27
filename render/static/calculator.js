@@ -48,6 +48,7 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  const pepperstonePresetsFolder = document.currentScript?.dataset.pepperstonePresets || '';
   const razorEstimateEnabled=()=>isPepperstoneFx() && state.pepperstone_account_type==='razor';
   const escapeHtml = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -1914,6 +1915,20 @@
     try {
       if (!requestedPreset) throw new Error('Calculate a Pepperstone FX order first.');
       pepperstoneSetBtn.disabled = true;
+      if (pepperstonePresetsFolder) {
+        const endpoint = '/api/calculator/pepperstone-set/local';
+        const prepared = await post(endpoint, requestedPreset);
+        // A superseded quote cannot authorize publication of prepared bytes.
+        if (requestedPreset !== state.pepperstoneSetPayload) return;
+        const saved = await post(endpoint, {
+          calculation_context_id: requestedPreset.calculation_context_id,
+          publication_id: prepared.publication_id,
+        });
+        if (requestedPreset === state.pepperstoneSetPayload) {
+          okEl.textContent = 'Saved ' + saved.filename + ' in ' + saved.folder;
+        }
+        return;
+      }
       const res = await fetch('/api/calculator/pepperstone-set', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1930,7 +1945,9 @@
       okEl.textContent = `${downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`} ${journalHint}`;
     } catch (err) {
       if (requestedPreset !== state.pepperstoneSetPayload) return;
-      errorEl.textContent = String(err?.message || err);
+      const reason = String(err?.message || err);
+      errorEl.textContent = pepperstonePresetsFolder && !reason.includes(pepperstonePresetsFolder)
+        ? pepperstonePresetsFolder + ': ' + reason : reason;
       renderErrorDebug(err.detail || (err.debug ? { debug: err.debug } : null));
     } finally {
       if (requestedPreset === state.pepperstoneSetPayload) pepperstoneSetBtn.disabled = !requestedPreset;

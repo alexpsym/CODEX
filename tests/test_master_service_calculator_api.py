@@ -157,7 +157,7 @@ def test_pepperstone_limit_fill_on_calculator_dashboard(monkeypatch, tmp_path, p
     _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=True)
 
 
-def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill, market_downloads=None):
+def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill, market_downloads=None, local_preset_save=None):
     """Actual isolated pages/HTTP/production handlers; no production service or broker."""
     import http.server
     import threading
@@ -191,7 +191,9 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
             try:
                 mime='application/json';headers={}
                 if path=='/calculator':
-                    value=service.CALCULATOR_TEMPLATE.replace('{{CALCULATOR_JS_URL}}','/static/calculator.js');mime='text/html'
+                    value=service.CALCULATOR_TEMPLATE.replace('{{CALCULATOR_JS_URL}}','/static/calculator.js')
+                    value=value.replace('{{PEPPERSTONE_PRESETS_FOLDER}}', str(service._PEPPERSTONE_PRESETS_FOLDER) if local_preset_save else '')
+                    mime='text/html'
                 elif path=='/orders':
                     value=service.OPEN_ORDERS_TEMPLATE.replace('{{OPEN_ORDERS_JS_URL}}','/static/open_orders.js');mime='text/html'
                 elif path in ('/static/calculator.js','/static/open_orders.js'):
@@ -207,6 +209,17 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                     try:value=json.loads(asyncio.run(service.calculator_quote(payload)).body)
                     finally:watchdog.cancel();watchdog.join(timeout=2)
                     print('FIXTURE_QUOTE_DONE',time.monotonic()-started,value.get('timings_ms'))
+                elif path=='/api/calculator/pepperstone-set/local' and local_preset_save:
+                    request=service.Request(dict(type='http', scheme='http', path=path,
+                        headers=[(k.lower().encode(),v.encode()) for k,v in self.headers.items()],
+                        client=self.client_address, server=self.server.server_address))
+                    try:
+                        value=json.loads(service.calculator_pepperstone_set_local(request,payload).body)
+                    except service.HTTPException as exc:
+                        raw=json.dumps(dict(detail=exc.detail)).encode()
+                        self.send_response(exc.status_code);self.send_header('Content-Length',str(len(raw)))
+                        self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(raw)
+                        return
                 elif path=='/api/calculator/pepperstone-set':
                     # Durable local row must exist BEFORE any download request.
                     rows=service._pepperstone_local_tracker_rows()
@@ -255,9 +268,14 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                 '--disable-background-networking','--disable-component-update','--disable-sync','--remote-debugging-port=0',
                 '--user-data-dir='+str(profile),'about:blank'],stdout=log,stderr=subprocess.STDOUT,creationflags=subprocess.CREATE_NO_WINDOW)
             deadline=time.monotonic()+30
-            while not (profile/'DevToolsActivePort').is_file():
-                assert process.poll() is None and time.monotonic()<deadline;time.sleep(.05)
-            port=int((profile/'DevToolsActivePort').read_text().splitlines()[0])
+            while True:
+                # Edge can create the file before releasing its exclusive write handle.
+                try:
+                    port=int((profile/'DevToolsActivePort').read_text().partition('\n')[0])
+                    break
+                except (FileNotFoundError, PermissionError, ValueError):
+                    assert process.poll() is None and time.monotonic()<deadline, 'Private Edge DevTools port unavailable'
+                    time.sleep(.05)
             with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list',timeout=5) as response:target=next(t for t in json.load(response) if t['type']=='page')
             ws=websocket.create_connection(target['webSocketDebuggerUrl'],timeout=20,suppress_origin=True);sequence=0
             def call(method,params=None):
@@ -294,6 +312,12 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                 call('Page.navigate',dict(url=origin+'/orders'))
                 wait_for("window.__openOrdersCoverage?.empty_confirmed===true && window.__openOrdersItems?.length===0")
             call('Page.navigate',dict(url=origin+'/calculator'));wait_for("!!document.querySelector('#setup-toggle button')")
+            if local_preset_save is not None:
+                local_preset_save(evaluate, click, wait_for, download_dir)
+                assert not failures, failures
+                assert all(path in {'/api/calculator/quote', '/api/calculator/pepperstone-set/local',
+                                    '/api/calculator/prewarm-account'} for method,path in events if method=='POST')
+                return
             if market_downloads is not None:
                 market_downloads(call, evaluate, click, wait_for, downloads, download_dir)
                 assert not failures, failures
@@ -6105,3 +6129,120 @@ def _market_controls_cases(cases, numeric, booleans):
         if(lastResult.outcome!="blocked" || requests.size()!=1)throw std::runtime_error("invalid stop sent");
         """)
     return 'int main(){try{marketCase=true;'+''.join(body)+'return 0;}catch(const std::exception&e){std::cerr<<e.what();return 1;}}'
+
+
+def test_pepperstone_local_preset_save_in_edge(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    service=master_service
+    folder=tmp_path/'Presets'
+    monkeypatch.setattr(service, '_PEPPERSTONE_PRESETS_FOLDER', folder)
+    original=service._build_pepperstone_trader_set
+    built=[]
+
+    def build(payload):
+        content,filename=original(payload)
+        built.append((content.encode('utf-8'),filename))
+        return content,filename
+
+    monkeypatch.setattr(service, '_build_pepperstone_trader_set', build)
+
+    for scheme_host, client, origin in [
+        ('127.0.0.1', '192.0.2.1', 'http://127.0.0.1'),
+        ('127.0.0.1', '127.0.0.1', 'https://example.test'),
+        ('example.test', '127.0.0.1', 'http://example.test'),
+    ]:
+        request=service.Request(dict(type='http', scheme='http', path='/api/calculator/pepperstone-set/local',
+            headers=[(b'host',scheme_host.encode()),(b'origin',origin.encode())], client=(client,1234)))
+        with pytest.raises(service.HTTPException) as denied:
+            service.calculator_pepperstone_set_local(request,{})
+        assert denied.value.status_code==403
+    assert not built and not folder.exists()
+
+    def exercise(evaluate, click, wait_for, downloads):
+        def select(group,value):
+            evaluate(f"document.querySelector('#{group} [data-v={json.dumps(value)}]').click()")
+
+        def field(element,value):
+            evaluate(f"(()=>{{const el=document.getElementById('{element}');el.value={json.dumps(value)};"
+                     "el.dispatchEvent(new Event('input',{bubbles:true}));})()")
+
+        def calculate():
+            click('calc-quote')
+            wait_for("!document.getElementById('calc-pepperstone-set').disabled")
+
+        ready="document.getElementById('calc-success').textContent.includes('Saved Pepperstone_Trader_')"
+        select('asset-toggle','fx')
+        select('broker-toggle','pepperstone')
+        select('account-toggle','demo')
+        select('risk-toggle','fixed_aud')
+        select('pepperstone-account-type-toggle','razor')
+        for name,value in [('calc-symbol','USD_JPY'),('calc-sl-ticks','60'),('calc-risk','10'),('calc-rr','2.5')]:
+            field(name,value)
+        wait_for("document.getElementById('calc-canonical-symbol').textContent.includes('USD_JPY')")
+        calculate()
+
+        # Hold the prepare response across a real profile change. Even with a writable
+        # directory, the obsolete Razor result must never publish.
+        folder.mkdir()
+        evaluate("""window.originalFetch=window.fetch;
+          window.fetch=async(...args)=>{
+            const response=await window.originalFetch(...args);
+            if(args[0]==='/api/calculator/pepperstone-set/local') await new Promise(resolve=>window.releasePreset=resolve);
+            return response;
+          }""")
+        click('calc-pepperstone-set')
+        wait_for("typeof window.releasePreset==='function'")
+        assert list(folder.iterdir())==[] and len(built)==1
+        select('pepperstone-account-type-toggle','standard')
+        evaluate("""(async()=>{window.fetch=window.originalFetch;window.releasePreset();
+          await new Promise(resolve=>setTimeout(resolve,250));})()""")
+        assert list(folder.iterdir())==[] and not evaluate(ready)
+        select('pepperstone-account-type-toggle','razor')
+        calculate()
+
+        # A genuine missing-directory failure leaves the quote reusable and preserves
+        # the prepared token. A pre-existing collision must then survive both saves.
+        folder.rmdir()
+        click('calc-pepperstone-set')
+        wait_for("document.getElementById('calc-error').textContent.includes('Could not save in')")
+        error=evaluate("document.getElementById('calc-error').textContent")
+        assert str(folder) in error and ('No such file' in error or 'cannot find' in error)
+        assert len(built)==2
+        folder.mkdir()
+        content,filename=built[1]
+        collision=folder/filename
+        collision.write_bytes(b'existing preset')
+        click('calc-pepperstone-set')
+        wait_for(ready)
+        saved=folder/(collision.stem+'_2.set')
+        assert saved.read_bytes()==content and collision.read_bytes()==b'existing preset'
+        assert str(folder) in evaluate("document.getElementById('calc-success').textContent")
+        assert saved.name in evaluate("document.getElementById('calc-success').textContent")
+        assert _parse_set_file(content.decode())['StandardMarketExecutionToken'].startswith('mkt_')
+        assert Decimal(_parse_set_file(content.decode())['CommissionPerLotPerSide'])>0
+        click('calc-pepperstone-set')
+        wait_for(ready)
+        assert len(built)==2 and sorted(folder.iterdir())==sorted([collision,saved])
+
+        saved.write_bytes(b'externally changed preset')
+        click('calc-pepperstone-set')
+        wait_for("document.getElementById('calc-error').textContent.includes('The saved preset was changed')")
+        assert saved.read_bytes()==b'externally changed preset' and len(built)==2
+
+        select('pepperstone-account-type-toggle','standard')
+        select('order-toggle','limit')
+        field('calc-limit','159.360')
+        calculate()
+        click('calc-pepperstone-set')
+        wait_for(ready)
+        content,filename=built[2]
+        assert (folder/filename).read_bytes()==content
+        preset=_parse_set_file(content.decode())
+        assert preset['PresetAccountType']=='standard' and Decimal(preset['CommissionPerLotPerSide'])==0
+        assert preset['SL_PriceDistance']=='0.06' and preset['TP_PriceDistance']=='0.15'
+        assert Decimal(preset['StandardLimitEntryPrice'])==Decimal('159.360')
+        assert 'StandardMarketExecutionToken' not in preset
+        assert sorted(folder.iterdir())==sorted([collision,saved,folder/filename])
+        assert list(downloads.iterdir())==[]
+
+    _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference,
+                                         limit_fill=False, local_preset_save=exercise)
