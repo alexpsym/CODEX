@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.54"
+#property version   "2.55"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -176,7 +176,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.54";
+string EA_VERSION = "2.55";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -528,7 +528,7 @@ bool ResolveStandardFXPreset(bool &standardFx,string &why)
 }
 
 bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD, double riskBufferedAUD,
-                         double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
+                         double &tpOut, int &tpPointsOut, double &effNetRR, string &why, bool market=false)
 {
    if(vol <= 0){ why="Invalid volume for AutoTP."; return false; }
    if(NetRR_Target <= 0){ why="NetRR_Target must be > 0."; return false; }
@@ -590,14 +590,15 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    if(AutoTP_SafetyPoints != 0)
    { why="Automatic TP padding is not supported for nominal Net R."; return false; }
    ENUM_ORDER_TYPE ot = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double testPrice = isBuy ? (entry + _Point) : (entry - _Point);
-   double p1 = 0.0;
-   if(!OrderCalcProfit(ot, _Symbol, vol, entry, testPrice, p1))
-   { why="OrderCalcProfit failed while estimating profit-per-point."; return false; }
-   double profitPerPoint = MathAbs(p1);
-   if(!MathIsValidNumber(profitPerPoint) || profitPerPoint <= 0)
-   { why="Profit-per-point is zero/invalid."; return false; }
-   double rawDistance = requiredGrossProfit / profitPerPoint * _Point;
+   // A full stop-sized favourable move avoids magnifying cent rounding on one point.
+   bool portableMarketFX = market && UsePriceDistanceInputs && IsPortableFXDistanceSymbol();
+   double sampleDistance = portableMarketFX ? SL_PriceDistance : _Point;
+   double testPrice = NormalizePrice(isBuy ? entry+sampleDistance : entry-sampleDistance);
+   double sampleProfit = 0.0;
+   if(testPrice<=0.0 || !OrderCalcProfit(ot,_Symbol,vol,entry,testPrice,sampleProfit) ||
+      !MathIsValidNumber(sampleProfit) || sampleProfit<=0.0)
+   { why="Cannot value the favourable TP reference move at "+DoubleToString(testPrice,_Digits); return false; }
+   double rawDistance = requiredGrossProfit / sampleProfit * MathAbs(testPrice-entry);
    double tradeTick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    // Preserve fractional point/trade-tick ratios before normalizing final symbol digits.
    double scale = 100000000.0;
@@ -627,9 +628,14 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    double netAtTP=grossAtTP-commissionRT;
    long netAtTPCents=0;
    if(!AutoTPAUDCents(netAtTP,netAtTPCents,why)) return false;
-   if(netAtTPCents!=requiredNetCents)
+   if(!portableMarketFX && netAtTPCents!=requiredNetCents)
    { why="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids."; return false; }
-   effNetRR=((double)requiredNetCents/100.0)/rBase;
+   if(netAtTPCents<=0)
+   { why="TP net estimate after commission is "+DoubleToString(netAtTP,2)+" AUD."; return false; }
+   effNetRR=netAtTP/rBase;
+   if(portableMarketFX)
+      Print(EA_COMMENT,": TP ",DoubleToString(tp,_Digits)," estimated net AUD ",DoubleToString(netAtTP,2),
+            ", requested AUD ",DoubleToString(requiredNetProfit,2),", commission AUD ",DoubleToString(commissionRT,2));
 
    tpOut = tp;
    tpPointsOut = pts;
@@ -752,7 +758,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    if(count < first || count > last || vol < vmin || vol > vmax ||
       MathAbs(vol - count * step) > 1e-10 || riskTotal < riskMin || riskTotal > riskMax ||
       (count > first && previousVol >= vmin && previousRisk >= riskMin))
-   { why="No broker lot fits the nominal target floor and RiskAUD_Max."; return false; }
+   { why=StringFormat("No fitting lot: %.8f lots, nominal %.4f AUD, band %.4f to %.4f AUD, volume %.8f to %.8f.",vol,riskTotal,riskMin,riskMax,vmin,vmax); return false; }
 
    outVol = vol;
    outRiskRoundedAUD = riskTotal;
@@ -957,16 +963,16 @@ bool ValidateMarketStopsAtLiveQuote(const bool isBuy,
    if(isBuy)
    {
       if(!(sl < closeSideAnchor && tp > closeSideAnchor))
-      { why = "Buy SL/TP are on an invalid side of the live Bid."; return false; }
+      { why = StringFormat("Buy SL/TP are on an invalid side of the live Bid. Quote %.*f, SL %.*f, TP %.*f, minimum %d points.",_Digits,closeSideAnchor,_Digits,sl,_Digits,tp,(int)requiredPoints); return false; }
       if(requiredPoints > 0 && (!BrokerDistanceAtLeast(closeSideAnchor-sl, requiredPoints) || !BrokerDistanceAtLeast(tp-closeSideAnchor, requiredPoints)))
-      { why = "Buy SL/TP violate the broker stop/freeze distance at the live Bid."; return false; }
+      { why = StringFormat("Buy SL/TP violate the broker stop/freeze distance at the live Bid. Quote %.*f, SL %.*f, TP %.*f, minimum %d points.",_Digits,closeSideAnchor,_Digits,sl,_Digits,tp,(int)requiredPoints); return false; }
    }
    else
    {
       if(!(sl > closeSideAnchor && tp < closeSideAnchor))
-      { why = "Sell SL/TP are on an invalid side of the live Ask."; return false; }
+      { why = StringFormat("Sell SL/TP are on an invalid side of the live Ask. Quote %.*f, SL %.*f, TP %.*f, minimum %d points.",_Digits,closeSideAnchor,_Digits,sl,_Digits,tp,(int)requiredPoints); return false; }
       if(requiredPoints > 0 && (!BrokerDistanceAtLeast(sl-closeSideAnchor, requiredPoints) || !BrokerDistanceAtLeast(closeSideAnchor-tp, requiredPoints)))
-      { why = "Sell SL/TP violate the broker stop/freeze distance at the live Ask."; return false; }
+      { why = StringFormat("Sell SL/TP violate the broker stop/freeze distance at the live Ask. Quote %.*f, SL %.*f, TP %.*f, minimum %d points.",_Digits,closeSideAnchor,_Digits,sl,_Digits,tp,(int)requiredPoints); return false; }
    }
    why = "";
    return true;
@@ -1160,7 +1166,7 @@ bool ExecuteStandardMarketOnce()
    double effectiveNetRR = 0.0;
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, riskBuffered, tp, autoTpPts, effectiveNetRR, why))
+      if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, riskBuffered, tp, autoTpPts, effectiveNetRR, why, true))
       {
          LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
          return false;
@@ -3157,7 +3163,7 @@ void ExecuteDesktopMarket(const string commandId, DesktopTraderResult &result)
    if(AutoTP_NetRR_Enabled)
    {
       if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, riskBuffered,
-                             tp, autoTpPts, effectiveNetRR, why))
+                             tp, autoTpPts, effectiveNetRR, why, true))
       { SetDesktopResult(result, "blocked", why); return; }
    }
    else if(!BuildTPManualFromDistance(entry, isBuy, tp, why))

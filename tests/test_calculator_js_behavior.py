@@ -14,20 +14,20 @@ def test_pepperstone_automatic_buffer_requires_no_user_input() -> None:
 const fs=require('fs'),vm=require('vm'),assert=require('assert');const source=fs.readFileSync(process.argv[1],'utf8');
 class B { constructor(v){this.dataset={v};this.listeners={};this.disabled=false;this.attrs={};this.classList={toggle(){},add(){},remove(){}};} addEventListener(e,f){this.listeners[e]=f;} click(){return this.listeners.click&&this.listeners.click();} setAttribute(k,v){this.attrs[k]=String(v);} getAttribute(k){return this.attrs[k];} removeAttribute(k){delete this.attrs[k];} }
 class E extends B { constructor(id){super('');this.id=id;this.value='';this.textContent='';this.style={};this._html='';this.buttons=[];this.checked=false;} set innerHTML(v){this._html=String(v||'');this.buttons=[...this._html.matchAll(/data-v="([^"]*)"/g)].map(m=>new B(m[1]));} get innerHTML(){return this._html;} querySelectorAll(s){return s==='button'?this.buttons:[];} }
-const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-pepperstone-risk-preflight','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','setup-toggle','pattern-toggle','ema-toggle','vwap-toggle','aths-atls-toggle','round-number-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle','trendline-plans-panel','trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-1-utc','trendline-anchor-2-time','trendline-anchor-2-price','trendline-anchor-2-utc','trendline-trigger-mode','trendline-cross-direction','trendline-price-basis','trendline-tolerance-ticks','trendline-right-extension','trendline-expiry','trendline-save','trendline-reset','trendline-refresh','trendline-plan-status','trendline-plan-list','trendline-monitor-start','trendline-monitor-stop','trendline-monitor-status'];
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-pepperstone-risk-preflight','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','setup-toggle','pattern-toggle','ema-toggle','vwap-toggle','aths-atls-toggle','round-number-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle','trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-1-utc','trendline-anchor-2-time','trendline-anchor-2-price','trendline-anchor-2-utc','trendline-trigger-mode','trendline-cross-direction','trendline-price-basis','trendline-tolerance-ticks','trendline-right-extension','trendline-expiry','trendline-save','trendline-reset','trendline-refresh','trendline-plan-status','trendline-plan-list','trendline-monitor-start','trendline-monitor-stop','trendline-monitor-status'];
 const el=Object.fromEntries(ids.map(i=>[i,new E(i)]));for(const [id,vals] of Object.entries({'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']}))el[id].buttons=vals.map(v=>new B(v));
 Object.assign(el['calc-symbol'],{value:'USD_JPY'});el['calc-sl-ticks'].value='43';el['calc-rr'].value='2';el['calc-risk'].value='10';
 const calls=[];const reply=data=>({ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});const fetch=async(url,opts={})=>{const body=opts.body?JSON.parse(opts.body):null;calls.push({url,body});if(url==='/api/calculator/bootstrap')return reply({app_profile:'local',trendline_plans_available:false,webhook:{available:true}});if(url.startsWith('/api/calculator/instrument'))return reply({asset:'fx',broker:'pepperstone',symbol:'USD_JPY'});if(url==='/api/calculator/quote')return reply({asset:'fx',broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'USD_JPY',tick_size:'0.001',entry_price:'150',stop_price:'149.957',target_price:'150.086',quantity:'1',estimated_total_loss_aud:'10',estimated_total_loss:'10',pepperstone_mt5_export_status:{ready:true,code:null,reason:''},pepperstone_risk_buffer_preflight:{stop_points:43,preferred_maximum_buffer_points:50,minimum_automatic_buffer_points:10,conservative_max_buffer_points:14,planned_buffer_points:14,minimum_compatible_stop_points:30,compatible:true}});if(url.startsWith('/api/calculator/journal-summary')||url.startsWith('/api/instrument-specs'))return reply({status:'no_data'});return reply({status:'no_data'});};
-const context={document:{getElementById:id=>el[id]},fetch,navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,URL,URLSearchParams,AbortController};vm.runInNewContext(source,context);const flush=()=>new Promise(r=>setImmediate(r));
-(async()=>{await flush();await flush();el['asset-toggle'].buttons.find(b=>b.dataset.v==='fx').click();await flush();await flush();el['broker-toggle'].buttons.find(b=>b.dataset.v==='pepperstone').click();await flush();await flush();await el['calc-quote'].listeners.click();console.log(JSON.stringify({message:el['calc-pepperstone-risk-preflight'].textContent,visible:el['calc-pepperstone-set'].style.display!== 'none',enabled:!el['calc-pepperstone-set'].disabled,quotePayload:calls.find(c=>c.url==='/api/calculator/quote').body}));})().catch(e=>{console.error(e);process.exitCode=1;});
+const context={document:{getElementById:id=>el[id]},fetch,navigator:{clipboard:{writeText:async()=>{}}},setTimeout:(fn,ms)=>{if(ms===250)fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,URL,URLSearchParams,AbortController};vm.runInNewContext(source,context);const flush=()=>new Promise(r=>setImmediate(r));
+(async()=>{await flush();await flush();el['asset-toggle'].buttons.find(b=>b.dataset.v==='fx').click();await flush();await flush();el['broker-toggle'].buttons.find(b=>b.dataset.v==='pepperstone').click();await flush();await flush();await el['calc-quote'].listeners.click();console.log(JSON.stringify({message:el['calc-quote-status'].textContent,visible:el['calc-pepperstone-set'].style.display!== 'none',enabled:!el['calc-pepperstone-set'].disabled,quotePayload:calls.find(c=>c.url==='/api/calculator/quote').body}));})().catch(e=>{console.error(e);process.exitCode=1;});
 '''
-    result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout.strip().splitlines()[-1])
     assert "calc-pepperstone-risk-buffer" not in JS_PATH.read_text(encoding="utf-8")
     assert "risk_slippage_buffer_points" not in JS_PATH.read_text(encoding="utf-8")
     assert data["visible"] is True and data["enabled"] is True
-    assert "Position-size estimate ready. .set file prepared" in data["message"]
-    assert "final broker checks run in Trader" in data["message"]
+    assert data["message"] == "USD/JPY \u00b7 Razor \u00b7 Preset ready"
     assert "risk_slippage_buffer_points" not in data["quotePayload"]
 
 
@@ -104,8 +104,8 @@ console.log(JSON.stringify({guidanceChecks,netPayload,manualPayload,visibleAfter
     assert "2300" in data["resultHtml"] and "0.00043 price" in data["resultHtml"] and "0.00025 price" in data["resultHtml"]
     assert data["autoStep"] == "0.00001" and "Pepperstone GBPUSD TradingView chart" in data["autoSource"]
     assert "broker point count pending in Trader" in data["resultHtml"]
-    assert "Quote ready" in data["quoteStatus"] and "prepared" in data["quoteStatus"] and "Quote failed" not in data["quoteStatus"]
-    assert data["preflightMessage"] == "Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader."
+    assert data["quoteStatus"] == "GBP/USD \u00b7 Razor \u00b7 Preset ready"
+    assert data["preflightMessage"] == ""
     assert data["exportCalls"] == 0 and data["submitCalls"] == 0
 
 
@@ -401,13 +401,14 @@ el['calc-risk'].value='10';
   global.fetch=async (url,opts={})=>{
     requests.push(url);
   if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({app_profile:'local',calculator_js_sha256_12:'abc123def456',render_calculator_base_url_configured:true,webhook:{available:true}})};
+  if(url.includes('/api/calculator/instrument?'))return {ok:true,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({asset:'fx',broker:'pepperstone',symbol:'EUR_USD'})};
   if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({asset:'fx',broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20',pepperstone_mt5_export_status:{file_ready:true,broker_check_state:'pending',reason:'Broker point, grid, and risk checks run in Trader.'},pepperstone_risk_buffer_preflight:{state:'pending',stop_points:35,preferred_maximum_buffer_points:50,minimum_automatic_buffer_points:10,conservative_max_buffer_points:11,planned_buffer_points:11,minimum_compatible_stop_points:30,compatible:null,explanation:'Broker checks are pending in Trader.'}})}; }
   if(url.includes('/api/calculator/pepperstone-set')){ setPayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:(k)=>k==='content-disposition'?'attachment; filename="Pepperstone_Trader_EUR_USD_BUY_MARKET_x.set"':'text/plain'},text:async()=> 'Strategy=3\nStandardMarketSide=0\nStandardMarketExecutionToken=mkt_test\n'}; }
   return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};
 };
 global.document={getElementById:(id)=>el[id],createElement:(tag)=>({tag,style:{},click(){downloads.push({tag,filename:this.download});}})};
 global.navigator={clipboard:{writeText:async()=>{}}};
-global.setTimeout=(fn)=>{ fn(); return 1; };
+global.setTimeout=(fn,ms)=>{ if(ms===250)fn(); return 1; };
 global.clearTimeout=()=>{};
 global.setInterval=()=>1;
 global.clearInterval=()=>{};
@@ -422,7 +423,7 @@ eval(source);
   const setReady = el['calc-pepperstone-set'].style.display === '' && el['calc-pepperstone-set'].disabled === false;
   if (!setReady) throw new Error('Pepperstone .set button was not ready after a compatible quote.');
   const submitAfterQuote = el['calc-submit'].style.display;
-  const preflightAfterQuote = el['calc-pepperstone-risk-preflight'].textContent;
+  const preflightAfterQuote = el['calc-results'].innerHTML;
   const automaticSetRequests = requests.filter((url)=>url.includes('/api/calculator/pepperstone-set')).length;
   const automaticOrderRequests = requests.filter((url)=>url.includes('/submit')).length;
   const automaticDownloads = downloads.length;
@@ -435,7 +436,9 @@ eval(source);
   console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setReady,setPayload,automaticSetRequests,automaticOrderRequests,automaticDownloads,explicitSetRequests,downloadsAfterExplicitClick,invalidatedAfterEdit,setButton:el['calc-pepperstone-set'].style.display,submitAfterQuote,submitDisabledAfterEdit:el['calc-submit'].disabled,preflightAfterQuote,summary:el['calc-request-summary'].innerHTML}));
 })();
 '''
-    out = subprocess.check_output([node, "-e", harness, str(JS_PATH)], text=True)
+    run = subprocess.run([node, "-e", harness, str(JS_PATH)], capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, run.stderr
+    out = run.stdout
     data = json.loads(out.strip().splitlines()[-1])
     assert data["hiddenOnCrypto"] is True
     assert data["visibleOnFx"] is True
@@ -447,15 +450,15 @@ eval(source);
     assert data["explicitSetRequests"] == 1
     assert data["downloadsAfterExplicitClick"] == 1
     assert data["invalidatedAfterEdit"] is True
-    assert "broker=pepperstone" in data["summary"]
+    assert "<dt>broker</dt><dd>pepperstone</dd>" in data["summary"]
     assert data["setPayload"]["order_type"] == "market"
     assert "entry_price" not in data["setPayload"]
     assert data["setButton"] == "none"
     assert data["submitAfterQuote"] == "none"
     assert data["submitDisabledAfterEdit"] is True
-    assert "broker point, grid, and risk checks run in Trader" in data["preflightAfterQuote"]
-    assert "broker=pepperstone" in data["summary"]
-    assert "venue=Pepperstone" in data["summary"]
+    assert "File ready; final broker checks" in data["preflightAfterQuote"]
+    assert "<dt>broker</dt><dd>pepperstone</dd>" in data["summary"]
+    assert "<dt>venue</dt><dd>Pepperstone</dd>" in data["summary"]
 
 
 def test_submit_visibility_tracks_quote_validity_and_webhook_mode() -> None:
@@ -1530,8 +1533,8 @@ console.log(JSON.stringify({checks,netPayload,manualPayload,visibleAfterModeChan
     assert "2300" in data["resultHtml"] and "0.00043 price" in data["resultHtml"] and "0.00025 price" in data["resultHtml"]
     assert data["autoStep"] == "0.00001" and "Pepperstone GBPUSD TradingView chart" in data["autoSource"]
     assert "broker point count pending in Trader" in data["resultHtml"]
-    assert "Quote ready" in data["quoteStatus"] and "prepared" in data["quoteStatus"] and "Quote failed" not in data["quoteStatus"]
-    assert data["preflightMessage"] == "Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader."
+    assert data["quoteStatus"] == "GBP/USD \u00b7 Razor \u00b7 Preset ready"
+    assert data["preflightMessage"] == ""
     assert data["exportCalls"] == 0 and data["submitCalls"] == 0
 
 

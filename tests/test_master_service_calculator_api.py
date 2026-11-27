@@ -45,7 +45,7 @@ def pepperstone_weekend_reference(monkeypatch, tmp_path, pepperstone_account_fix
     def write(**changes):
         data = dict(version=1, broker='pepperstone', generated_at='2026-11-21T08:00:00Z',
                     account=dict(mode=changes.pop('mode', 'demo'), currency=changes.pop('currency', 'AUD')),
-                    symbols=[dict(item, **changes)])
+                    symbols=changes.pop('symbols', None) or [dict(item, **changes)])
         path.write_text(json.dumps(data), encoding='utf-8')
     write()
     master_service._save_calculator_trade_contexts([])
@@ -157,7 +157,7 @@ def test_pepperstone_limit_fill_on_calculator_dashboard(monkeypatch, tmp_path, p
     _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=True)
 
 
-def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill):
+def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill, market_downloads=None):
     """Actual isolated pages/HTTP/production handlers; no production service or broker."""
     import http.server
     import threading
@@ -210,9 +210,10 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                 elif path=='/api/calculator/pepperstone-set':
                     # Durable local row must exist BEFORE any download request.
                     rows=service._pepperstone_local_tracker_rows()
-                    assert len(rows)==1 and rows[0]['calculation_context_id']==payload['calculation_context_id']
+                    assert sum(row['calculation_context_id']==payload['calculation_context_id'] for row in rows)==1
                     value,filename=service._build_pepperstone_trader_set(payload)
-                    sys.audit('ltt.browser_output',str(download_dir/filename))
+                    actual_dir = download_dir if market_downloads is None else download_dir/(payload['symbol'].replace('_','')+'-'+payload['pepperstone_account_type'])
+                    sys.audit('ltt.browser_output',str(actual_dir/filename))
                     downloads.append((value,filename));mime='text/plain';headers['Content-Disposition']='attachment; filename="'+filename+'"'
                 elif path=='/api/open-orders/classification':value=asyncio.run(service.save_open_order_classification(payload))
                 elif path=='/api/open-orders/local-tracking/fill' and limit_fill:
@@ -293,6 +294,12 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                 call('Page.navigate',dict(url=origin+'/orders'))
                 wait_for("window.__openOrdersCoverage?.empty_confirmed===true && window.__openOrdersItems?.length===0")
             call('Page.navigate',dict(url=origin+'/calculator'));wait_for("!!document.querySelector('#setup-toggle button')")
+            if market_downloads is not None:
+                market_downloads(call, evaluate, click, wait_for, downloads, download_dir)
+                assert not failures, failures
+                assert all(path in {'/api/calculator/quote', '/api/calculator/pepperstone-set',
+                                    '/api/calculator/prewarm-account'} for method,path in events if method=='POST')
+                return
             evaluate("""(()=>{
                 const click=(id,v)=>document.querySelector('#'+id+' [data-v="'+v+'"]').click();
                 click('asset-toggle','fx');click('broker-toggle','pepperstone');click('account-toggle','demo');click('pepperstone-account-type-toggle','standard');click('risk-toggle','fixed_aud');
@@ -5139,7 +5146,7 @@ def test_pepperstone_executable_price_rr_does_not_double_count_spread(monkeypatc
     def write_snapshot(**changes):
         export_path.write_text(json.dumps(dict(version=1, broker="pepperstone", generated_at=stamp,
             account=dict(mode=changes.pop("mode", "demo"), currency=changes.pop("currency", "AUD")),
-            symbols=[dict(item, **changes)])), encoding="utf-8")
+            symbols=changes.pop('symbols', None) or [dict(item, **changes)])), encoding="utf-8")
     request = _pepperstone_quote_payload(symbol="USDJPY", side="buy", account="demo",
         pepperstone_account_type="standard", stop_loss_ticks="10", chart_tick_size="0.001",
         target_mode="rr", risk_reward="2", risk_mode="fixed_aud", risk_value="10")
@@ -5773,6 +5780,12 @@ def test_pepperstone_standard_limit_controls_preserve_ticket_prices(monkeypatch,
     assert forged.value.status_code==400
     assert preset['AutoTP_NetRR_Enabled']=='true' and Decimal(preset['NetRR_Target'])==Decimal('2.5')
     (tmp_path/'ticket.set').write_text(preset_text)
+    _run_trader_controls_host(tmp_path, preset)
+
+
+def _run_trader_controls_host(tmp_path, preset, market_cases=()):
+    import os
+    import subprocess
     source=(Path(__file__).resolve().parents[1]/'mt5-clone/MQL5/Experts/Trader.mq5').read_text(encoding='utf-8')
     def extract(name, text=source):
         match=re.search(r'\b(?:bool|void|double|string)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',text)
@@ -5788,11 +5801,15 @@ def test_pepperstone_standard_limit_controls_preserve_ticket_prices(monkeypatch,
         'BuildSLFromDistance','BuildTPManualFromDistance','IsPortableFXDistanceSymbol','ResolveStandardFXPreset','AutoTPDecimalParts','AutoTPAUDCents','ComputeAutoTP_NetRR',
         'IsLimitPriceValid','CalcBufferedRiskForVolume','ComputeVolumeFromRisk','ValidateVolumeForBroker',
         'PlaceOrReplacePendingLimitAtEntry','ConsumeDesktopTraderCommand','SetDesktopResult','ExecuteDesktopPendingAtEntry',
-        'ExecuteDesktopLimit','HandleDesktopTraderCommand']
+        'ExecuteDesktopLimit','ValidateMarketStopsAtLiveQuote','ExecuteDesktopMarket','HandleDesktopTraderCommand']
     functions=[extract(name) for name in names]
     historical=subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show','5ffe30f0673d651bddc7164172af534afc4cf075:mt5-clone/MQL5/Experts/Trader.mq5'],cwd=Path(__file__).resolve().parents[1]).decode('utf-8-sig')
     legacy=extract('ComputeAutoTP_NetRR',historical).replace('bool ComputeAutoTP_NetRR(', 'bool LegacyComputeAutoTP_NetRR(',1)
     functions=[f.replace('bool ComputeAutoTP_NetRR(', 'bool CurrentComputeAutoTP_NetRR(',1) for f in functions]+[legacy]
+    if market_cases:
+        delivered=subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show',
+            'ae4679275788bf416aa2230ddbb28b5dddfd9908:mt5-clone/MQL5/Experts/Trader.mq5'],cwd=ROOT).decode('utf-8-sig')
+        functions.append(extract('ComputeAutoTP_NetRR',delivered).replace('bool ComputeAutoTP_NetRR(', 'bool Replay254AutoTP(',1))
     def adapt(text):
         for old,new in [('ulong','uint64_t'),('uint','uint32_t'),('ushort','uint16_t'),('datetime','int64_t'),('long','int64_t')]:
             text=re.sub(r'\b'+old+r'\b',new,text)
@@ -5818,7 +5835,8 @@ const int SYMBOL_DIGITS=1,SYMBOL_TRADE_STOPS_LEVEL=2,SYMBOL_TRADE_FREEZE_LEVEL=3
 string _Symbol="USDJPY.a",EA_COMMENT="offline",g_traderControlInstanceId="offline";int _Digits=3,TRADER_CONTROL_PROTOCOL_VERSION=1;
 double _Point=.001,volumeMax=100,minimumLot=.01,volumeStep=.01,tickValue=.93796296296296296;
 int64_t stopLevel=0,freezeLevel=0;bool readiness=true,busyPosition=false,persistence=true;
-bool replay253=false,razorControl=false;int64_t calculationMode=SYMBOL_CALC_MODE_CFD;
+double bid=159.500,ask=159.501,tradeTick=.001; bool marketCase=false; int StandardMarketSide=0; const int STD_MARKET_BUY=0;
+bool replay254=false,replay253=false,razorControl=false;int64_t calculationMode=SYMBOL_CALC_MODE_CFD;
 int p1Calls=0,fullCalls=0;double pointValuation=.166,fullValuation=25.32;
 uint64_t g_ticket=0;int64_t g_armStartTime=0,g_expireAt=0;
 bool g_lastPendingFailureStructural=false,g_lastPendingAcceptanceMismatch=false,g_lastPendingBrokerAttempted=false;
@@ -5830,6 +5848,10 @@ struct DesktopTraderResult{string commandId,action,outcome,reason;uint32_t retco
 DesktopTraderCommand incoming;DesktopTraderResult lastResult;std::set<string> markers;
 struct Request{double volume,entry,sl,tp;string symbol;};std::vector<Request> requests;
 struct FakeTrade{
+ bool marketBuy=false;
+ bool Buy(double v,string symbol,double price,double sl,double tp,string){if(price!=0)throw std::runtime_error("not at market");marketBuy=true;requests.push_back({v,ask,sl,tp,symbol});return true;}
+ bool Sell(double v,string symbol,double price,double sl,double tp,string){if(price!=0)throw std::runtime_error("not at market");marketBuy=false;requests.push_back({v,bid,sl,tp,symbol});return true;}
+ uint64_t ResultDeal(){return 0;}
  bool BuyLimit(double volume,double entry,string symbol,double sl,double tp,int,int64_t,string){requests.push_back({volume,entry,sl,tp,symbol});return true;}
  bool SellLimit(double,double,string,double,double,int,int64_t,string){throw std::runtime_error("unexpected sell");}
  uint32_t ResultRetcode(){return 10009;}uint64_t ResultOrder(){return requests.empty()?0:100;}
@@ -5849,14 +5871,15 @@ void StringTrimLeft(string&s){s.erase(0,s.find_first_not_of(" \t\r\n"));}void St
 uint16_t StringGetCharacter(string s,int i){return (unsigned char)s.at(i);}double StringToDouble(string s){return std::stod(s);}int64_t StringToInteger(string s){return std::stoll(s);}
 template<class...A> string StringFormat(string fmt,A...args){char b[200];std::snprintf(b,sizeof b,fmt.c_str(),args...);return b;}
 template<class...A> void Print(A...args){}
-int64_t SymbolInfoInteger(string,int prop){if(prop==SYMBOL_DIGITS)return 3;if(prop==SYMBOL_TRADE_STOPS_LEVEL)return stopLevel;if(prop==SYMBOL_TRADE_FREEZE_LEVEL)return freezeLevel;if(prop==SYMBOL_TRADE_CALC_MODE)return calculationMode;throw std::runtime_error("unhandled integer symbol property");}
+int64_t SymbolInfoInteger(string,int prop){if(prop==SYMBOL_DIGITS)return _Digits;if(prop==SYMBOL_TRADE_STOPS_LEVEL)return stopLevel;if(prop==SYMBOL_TRADE_FREEZE_LEVEL)return freezeLevel;if(prop==SYMBOL_TRADE_CALC_MODE)return calculationMode;throw std::runtime_error("unhandled integer symbol property");}
 bool SymbolInfoInteger(string s,int prop,int64_t &out){out=SymbolInfoInteger(s,prop);return true;}
-double SymbolInfoDouble(string,int prop){if(prop==SYMBOL_TRADE_TICK_SIZE)return .001;if(prop==SYMBOL_TRADE_TICK_VALUE)return tickValue;
+double SymbolInfoDouble(string,int prop){if(prop==SYMBOL_TRADE_TICK_SIZE)return tradeTick;if(prop==SYMBOL_TRADE_TICK_VALUE)return tickValue;
  if(prop==SYMBOL_VOLUME_MIN)return minimumLot;if(prop==SYMBOL_VOLUME_MAX)return volumeMax;if(prop==SYMBOL_VOLUME_STEP)return volumeStep;
- if(prop==102)return _Point;if(prop==100)return 159.501;if(prop==101)return 159.500;throw std::runtime_error("unknown property");}
+ if(prop==102)return _Point;if(prop==100)return ask;if(prop==101)return bid;throw std::runtime_error("unknown property");}
 const int SYMBOL_ASK=100,SYMBOL_BID=101,SYMBOL_POINT=102;
-bool SymbolInfoTick(string,MqlTick&t){t={159.500,159.501};return true;}
-bool OrderCalcProfit(int,string,double volume,double entry,double target,double &out){
+bool SymbolInfoTick(string,MqlTick&t){t={bid,ask};return true;}
+bool OrderCalcProfit(int direction,string,double volume,double entry,double target,double &out){
+ if(marketCase){out=NormalizeDouble((direction==ORDER_TYPE_BUY?target-entry:entry-target)/tradeTick*tickValue*volume,2);return true;}
  if(std::abs(std::abs(target-entry)-.001)<1e-8){p1Calls++;out=pointValuation;}
  else {fullCalls++;if(std::abs(volume-(razorControl?.16:.18))>1e-8||std::abs(entry-159.360)>1e-8||(!replay253&&!razorControl&&std::abs(target-159.510)>1e-8))throw std::runtime_error("wrong full valuation operands");out=fullValuation;}return true;}
 bool ValidateTradingReadiness(bool,string &why){why=readiness?"":"offline margin/readiness blocked";return readiness;}
@@ -5872,10 +5895,10 @@ bool AcquireDesktopCommandGate(int &gate,string&){gate=1;return true;}void FileC
 string TraderControlConsumedFile(string id){return "offline/"+id;}bool FileIsExist(string path,int){return markers.count(path)>0;}
 bool WriteVerifiedCommonText(string path,string,string&why){if(!persistence){why="offline persistence failure";return false;}markers.insert(path);return true;}
 bool ReadDesktopTraderCommand(DesktopTraderCommand &out,string&){out=incoming;return true;}
-bool IsDesktopCommandIdValid(string id){return !id.empty();}bool IsDesktopActionAllowed(string action){return action=="limit";}
+bool IsDesktopCommandIdValid(string id){return !id.empty();}bool IsDesktopActionAllowed(string action){return action=="limit"||action=="market";}
 bool WriteDesktopTraderResult(const DesktopTraderResult &r){lastResult=r;return true;}
 string ShortStableFingerprint(string s){return s;}
-void ExecuteDesktopMarket(string,DesktopTraderResult&){throw std::runtime_error("wrong action");}
+
 void ExecuteDesktopTrendline(DesktopTraderResult&){throw std::runtime_error("wrong action");}
 void ExecuteDesktopEmaBounce(DesktopTraderResult&){throw std::runtime_error("wrong action");}
 """
@@ -5884,10 +5907,10 @@ void ExecuteDesktopEmaBounce(DesktopTraderResult&){throw std::runtime_error("wro
     booleans=['IncludeCommissionInRisk','AutoFitRiskSlippageBuffer','UsePriceDistanceInputs','AutoTP_NetRR_Enabled','OrdersEnabled','UseDesktopTraderControls']
     config='\n'.join('double '+k+'='+preset.get(k,'0')+';' for k in numeric)+'\n'
     config+='\n'.join('bool '+k+'='+preset[k]+';' for k in booleans)+'\nstring DistanceSymbol='+json.dumps(preset['DistanceSymbol'])+';\nstring PresetAccountType='+json.dumps(preset['PresetAccountType'])+';\n'
-    definitions=[];prototypes=['bool ComputeAutoTP_NetRR(double,bool,double,double,double,double&,int&,double&,string&);']
+    definitions=[];prototypes=['bool ComputeAutoTP_NetRR(double,bool,double,double,double,double&,int&,double&,string&,bool market=false);']
     for function in functions:
         function=adapt(function);at=function.index('{');signature=function[:at].strip();prototypes.append(signature+';')
-        signature=re.sub(r'=\s*0\b','',signature);definitions.append(signature+'\n'+function[at:])
+        signature=re.sub(r'=\s*(?:0|false)\b','',signature);definitions.append(signature+'\n'+function[at:])
     main=r"""
 void check(bool ok,const char*why){if(!ok)throw std::runtime_error(why);}
 const double fixtureEntry=StandardLimitEntryPrice,fixtureSL=SL_PriceDistance,fixtureR=NetRR_Target,fixtureCap=RiskAUD_Max;
@@ -5923,8 +5946,12 @@ int main(){try{
  std::cout<<"old253_cash_rejection_reproduced; fixed_legacy_and_identified_CFD; razor_control_retained; executed_extracted_production_controls: USDJPY.a buy_limit volume=0.18 entry=159.360 sl=159.300 tp=159.510 full_valuation=25.32 requested_estimate=25.33 p1_calls=0; duplicate/invalid/margin/readiness/persistence guards PASS\n";
  return 0;}catch(const std::exception&e){std::cerr<<e.what()<<"\n";return 1;}}
 """
+    if market_cases:
+        main = _market_controls_cases(market_cases, numeric, booleans)
     cpp=tmp_path/'limit-host.cpp';exe=tmp_path/'limit-host.exe';obj=tmp_path/'limit-host.obj'
-    wrapper='bool ComputeAutoTP_NetRR(double entry,bool buy,double vol,double nominal,double buffered,double &tp,int &points,double &rr,string &why){return replay253?LegacyComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why):CurrentComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why);}\n'
+    wrapper='bool ComputeAutoTP_NetRR(double entry,bool buy,double vol,double nominal,double buffered,double &tp,int &points,double &rr,string &why,bool market){return replay253?LegacyComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why):CurrentComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why,market);}\n'
+    if market_cases:
+        wrapper=wrapper.replace('return replay253?', 'if(replay254)return Replay254AutoTP(entry,buy,vol,nominal,buffered,tp,points,rr,why);return replay253?')
     cpp.write_text(header+config+'\n'.join(prototypes)+'\n'+'\n'.join(definitions)+wrapper+main)
     exe.write_bytes(b'');obj.write_bytes(b'') # manifest precreation audit covers native outputs
     vc=Path(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.43.34808')
@@ -5937,5 +5964,144 @@ int main(){try{
     assert built.returncode==0,built.stdout+built.stderr
     ran=subprocess.run([str(exe)],cwd=tmp_path,env=env,capture_output=True,text=True,timeout=30)
     assert ran.returncode==0,ran.stdout+ran.stderr
-    assert 'entry=159.360 sl=159.300 tp=159.510' in ran.stdout
+    if not market_cases:
+        assert 'entry=159.360 sl=159.300 tp=159.510' in ran.stdout
     print(ran.stdout.strip())
+
+
+def test_pepperstone_market_download_prepares_fx_orders(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    """Download through the actual calculator. Replay the downloaded inputs with no broker transport."""
+    import os
+    from decimal import Decimal as D
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50")
+    write, _ = pepperstone_weekend_reference
+    # symbol, Bid, Ask, point, trade tick, volume step, AUD per trade tick/lot, side, pricing
+    cases = [
+        ('EURUSD','1.08500','1.08512','.00001','.00001','.01','1.155172414','buy','razor'),
+        ('EURUSD','1.08500','1.08512','.00001','.00001','.01','1.155172414','buy','standard'),
+        ('GBPUSD','1.27000','1.27014','.00001','.00002','.02','2.25','sell','standard'),
+        ('USDCHF','.88100','.88112','.00001','.00001','.05','2.065','buy','standard'),
+        ('USDJPY','159.400','159.412','.001','.001','.01','1.03','sell','standard'),
+    ]
+    symbols={}
+    for symbol,bid,ask,point,tick,step,value,side,profile in cases:
+        symbols[symbol]=dict(symbol=symbol, mt5_symbol=symbol+'.a', point=point, trade_tick_size=tick,
+            quote_timestamp='2026-11-21T07:59:59Z', timestamp='2026-11-21T07:59:59Z', bid=bid, ask=ask,
+            minimum_lot=step, volume_step=step, maximum_lot='100', tick_value=value, available=True,
+            stops_level=0, freeze_level=0)
+    write(symbols=list(symbols.values()))
+    prepared = []
+    def download(call, evaluate, click, wait_for, downloads, directory):
+        def select(group, value):
+            evaluate(f"document.querySelector('#{group} [data-v={json.dumps(value)}]').click()")
+        def field(element, value):
+            evaluate(f"(()=>{{const e=document.getElementById('{element}');e.value={json.dumps(value)};"
+                     "e.dispatchEvent(new Event('input',{bubbles:true}));})()")
+        select('asset-toggle','fx')
+        select('broker-toggle','pepperstone')
+        select('account-toggle','demo')
+        select('risk-toggle','fixed_aud')
+        select('timeframe-toggle','15m')
+        for case in cases:
+            symbol,bid,ask,point,tick,step,value,side,profile=case
+            select('pepperstone-account-type-toggle',profile)
+            select('side-toggle',side)
+            field('calc-symbol',symbol)
+            field('calc-risk','10')
+            field('calc-rr','6')
+            field('calc-sl-ticks','58')
+            assert evaluate("document.getElementById('calc-pepperstone-set').disabled")
+            canonical=symbol[:3]+'_'+symbol[3:]
+            wait_for(f"document.getElementById('calc-canonical-symbol').textContent.includes('{canonical}')")
+            click('calc-quote')
+            wait_for("!document.getElementById('calc-pepperstone-set').disabled")
+            assert evaluate("document.getElementById('calc-quote-status').textContent")==f"{canonical.replace('_','/')} \u00b7 {profile.title()} \u00b7 Preset ready"
+            details=evaluate("document.getElementById('calc-results').textContent")
+            assert 'Request deviation' in details and 'cushion' in details
+            case_dir=directory/(symbol+'-'+profile)
+            case_dir.mkdir()
+            call('Page.setDownloadBehavior',dict(behavior='allow', downloadPath=str(case_dir)))
+            click('calc-pepperstone-set')
+            wait_for("document.getElementById('calc-success').textContent.includes('.set downloaded')")
+            deadline=time.monotonic()+10
+            while not (files:=list(case_dir.glob('*.set'))):
+                assert time.monotonic()<deadline, 'Downloaded file missing'
+                time.sleep(.05)
+            downloaded,=files
+            assert downloaded.read_bytes()==downloads[-1][0].encode()
+            preset=_parse_set_file(downloaded.read_text())
+            assert preset['PresetAccountType']==profile and D(preset['CommissionPerLotPerSide'])==(D('3.5') if profile=='razor' else 0)
+            assert preset['DistanceSymbol']==canonical and D(preset['SL_PriceDistance'])==58*D(point)
+            assert preset['AutoTP_SafetyPoints']=='0' and D(preset['NetRR_Target'])==6
+            prepared.append((case,preset))
+            if profile=='razor':
+                # Delay a real export response until after the visible pricing profile changes.
+                evaluate("""window.originalFetch=window.fetch;window.fetch=async(...args)=>{
+                  const response=await window.originalFetch(...args);
+                  if(args[0]==='/api/calculator/pepperstone-set')await new Promise(resolve=>window.releasePreset=resolve);
+                  return response}""")
+                click('calc-pepperstone-set')
+                wait_for("typeof window.releasePreset==='function'")
+                select('pepperstone-account-type-toggle','standard')
+                evaluate("window.fetch=window.originalFetch;window.releasePreset()")
+                wait_for("document.getElementById('calc-pepperstone-set').disabled")
+                assert not evaluate("document.getElementById('calc-success').textContent.includes('.set downloaded')")
+        assert len(list(directory.glob('*/*.set')))==len(cases)
+    _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=False, market_downloads=download)
+    original=os.environ.get('LTT_FIXTURE_INCIDENT_PRESET')
+    if original:
+        import hashlib
+        raw=Path(original).read_bytes()
+        assert hashlib.sha256(raw).hexdigest()=='9f081cce207ae53b3e6a0517815f400d822e5a7f3542d988e82972831da00eb3'
+        prepared.append((cases[0],_parse_set_file(raw.decode())))
+    _run_trader_controls_host(tmp_path, prepared[0][1], prepared)
+
+
+def _market_controls_cases(cases, numeric, booleans):
+    from decimal import Decimal as D, ROUND_CEILING, ROUND_HALF_UP
+    body=[]
+    for index,(case,preset) in enumerate(cases):
+        symbol,bid,ask,point,tick,step,value,side,profile=case
+        entry=D(ask if side=='buy' else bid)
+        sign=1 if side=='buy' else -1
+        stop=D(preset['SL_PriceDistance'])
+        commission=2*D(preset['CommissionPerLotPerSide'])
+        per_lot=stop/D(tick)*D(value)+commission
+        volume=(D(10)/(per_lot*D(step))).to_integral_value(rounding=ROUND_CEILING)*D(step)
+        nominal=per_lot*volume
+        assert (volume-D(step))*per_lot<10<=nominal<=12
+        money=lambda x:x.quantize(D('.01'),rounding=ROUND_HALF_UP)
+        reward=money(money(nominal)*D(preset['NetRR_Target']))
+        gross=reward+commission*volume
+        distance=stop*6 if not commission else (gross/money(stop/D(tick)*D(value)*volume)*stop/D(tick)).to_integral_value(rounding=ROUND_HALF_UP)*D(tick)
+        sl=entry-sign*stop
+        tp=entry+sign*distance
+        settings=''.join(f'{key}={preset.get(key,"0")};\n' for key in numeric+booleans)
+        id=f'market-{index}-'+__import__('uuid').uuid4().hex
+        old_check = ""
+        if profile=="razor":
+            old_check = f'''replay254=true; incoming={{"{id}-254","market"}}; requests.clear();HandleDesktopTraderCommand();
+            if(lastResult.outcome!="blocked" || lastResult.reason!="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids." || !requests.empty())
+               throw std::runtime_error("old-case reason: "+lastResult.reason);
+            replay254=false;'''
+        body.append(f"""
+        {settings}
+        DistanceSymbol={json.dumps(preset['DistanceSymbol'])}; PresetAccountType="{profile}";
+        _Symbol="{symbol}.a"; _Point={point}; tradeTick={tick}; _Digits={-D(point).as_tuple().exponent};
+        minimumLot=volumeStep={step}; tickValue={value}; ask={ask}; bid={bid}; stopLevel=0;
+        StandardMarketSide={int(preset['StandardMarketSide'])};
+        {old_check}
+        incoming={{"{id}","market"}}; requests.clear(); HandleDesktopTraderCommand();
+        if(requests.size()!=1 || lastResult.outcome!="accepted") throw std::runtime_error("market blocked: "+lastResult.reason);
+        {{const auto &p=requests[0];
+          if(p.symbol!=_Symbol || trade.marketBuy!={str(side=='buy').lower()} || std::abs(p.volume-{volume})>1e-9 ||
+             std::abs(p.entry-{entry})>1e-9 || std::abs(p.sl-{sl})>1e-9 || std::abs(p.tp-{tp})>1e-9)
+             throw std::runtime_error("incorrect market parameters");
+          std::cout<<_Symbol<<" {profile} {side} "<<p.volume<<" "<<std::fixed<<std::setprecision(_Digits)
+                   <<p.entry<<" "<<p.sl<<" "<<p.tp<<" nominal={nominal:.4f} estimated_reward={reward}"<<std::endl;}}
+        HandleDesktopTraderCommand();
+        if(requests.size()!=1)throw std::runtime_error("duplicate sent");
+        stopLevel=100; incoming={{"{id}-invalid","market"}}; HandleDesktopTraderCommand();
+        if(lastResult.outcome!="blocked" || requests.size()!=1)throw std::runtime_error("invalid stop sent");
+        """)
+    return 'int main(){try{marketCase=true;'+''.join(body)+'return 0;}catch(const std::exception&e){std::cerr<<e.what();return 1;}}'

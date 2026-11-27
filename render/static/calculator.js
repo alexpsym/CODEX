@@ -307,21 +307,6 @@
     }
   }
 
-  function renderPepperstoneRiskPreflight(preflight, exportStatus) {
-    if (!pepperstoneRiskPreflightEl) return false;
-    const fileReady=!!exportStatus && (exportStatus.file_ready===true || exportStatus.ready===true);
-    pepperstoneRiskPreflightEl.style.display='';
-    if(!fileReady){pepperstoneRiskPreflightEl.textContent='Position-size estimate ready. MT5 download unavailable: '+String(exportStatus?.reason||'quote is not ready for export');return false;}
-    if(!preflight || preflight.state==='pending' || exportStatus.broker_check_state==='pending'){
-      pepperstoneRiskPreflightEl.textContent='Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader.';return true;
-    }
-    if(preflight.modeled_lot_buffer){
-      pepperstoneRiskPreflightEl.textContent=`Position-size estimate ready. .set file prepared. Modeled automatic cushion: ${preflight.planned_buffer_points} MT5 points${preflight.planned_buffer_points===0?' (zero)':''}; Trader rechecks live lots and risk. Request deviation remains ${preflight.request_deviation_points} MT5 points.`;return true;
-    }
-    pepperstoneRiskPreflightEl.textContent=`Position-size estimate ready. .set file prepared. Distance-only buffer preview: ${preflight.planned_buffer_points} MT5 points maximum${preflight.planned_buffer_points===0?' (zero)':''}; Trader fits actual rounded-lot/commission risk headroom. Request deviation remains ${preflight.request_deviation_points} MT5 points.`;
-    return true;
-  }
-
   function clearSubmitStateResetTimer() {
     if (!submitStateResetTimer) return;
     clearTimeout(submitStateResetTimer);
@@ -641,6 +626,11 @@
         }
         if(lot.source)rows.push(['Lot estimate source',`${lot.source}; ${lot.mt5_symbol}; ${lot.account_mode}; quote age ${lot.quote_age_seconds==null?'unknown':Number(lot.quote_age_seconds).toFixed(1)+'s'}`]);
       }
+      const preflight = q.pepperstone_risk_buffer_preflight;
+      if (preflight?.planned_buffer_points != null && !preflight.modeled_lot_buffer)
+        rows.push(['Automatic cushion upper bound (MT5 points)', String(preflight.planned_buffer_points)]);
+      if (preflight?.request_deviation_points != null)
+        rows.push(['Request deviation (MT5 points)', String(preflight.request_deviation_points)]);
       rows.push(['Estimated round-trip commission (AUD)', q.estimated_commission_aud]);
       rows.push(['Estimated reference spread (AUD)', q.estimated_spread_aud]);
       rows.push(['Spread estimate limitation', q.spread_estimate_note]);
@@ -1854,7 +1844,7 @@
       setQuoteStatus('Quote ready.');
       if (isPepperstoneFx()) {
         const exportStatus = quote.pepperstone_mt5_export_status;
-        const preflightPassed = renderPepperstoneRiskPreflight(quote.pepperstone_risk_buffer_preflight, exportStatus);
+        const preflightPassed = exportStatus?.file_ready === true || exportStatus?.ready === true;
         state.pepperstoneSetPayload = preflightPassed ? buildPepperstoneSetPayload(quote) : null;
         const exportReason = String(exportStatus?.reason || 'quote is not ready for export');
         setPepperstoneSetButton({
@@ -1865,9 +1855,9 @@
             : exportReason,
         });
         setSubmitState({ visible: false, enabled: false, reason: 'Pepperstone uses MT5 .set export.', stateName: 'ready' });
-        setQuoteStatus(preflightPassed
-          ? 'Quote ready. Position-size estimate complete; portable .set prepared. Final broker checks run in Trader.'
-          : `Quote ready. Position-size estimate ready; MT5 download unavailable: ${exportReason}`);
+        const pair = state.resolvedSymbol.replace('_', '/');
+        const profile = (quote.pepperstone_account_type || state.pepperstone_account_type) === 'standard' ? 'Standard' : 'Razor';
+        setQuoteStatus(`${pair} \u00b7 ${profile} \u00b7 ${preflightPassed ? 'Preset ready' : exportReason}`);
       } else {
         clearPepperstoneSetDownload();
         setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
@@ -1920,15 +1910,17 @@
 
   if (pepperstoneSetBtn) pepperstoneSetBtn.addEventListener('click', async () => {
     clearMessages();
+    const requestedPreset = state.pepperstoneSetPayload;
     try {
-      if (!state.pepperstoneSetPayload) throw new Error('Calculate a Pepperstone FX order first.');
+      if (!requestedPreset) throw new Error('Calculate a Pepperstone FX order first.');
       pepperstoneSetBtn.disabled = true;
       const res = await fetch('/api/calculator/pepperstone-set', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(state.pepperstoneSetPayload),
+        body: JSON.stringify(requestedPreset),
       });
       const bodyText = await res.text();
+      if (requestedPreset !== state.pepperstoneSetPayload) return;
       let bodyJson = null;
       try { bodyJson = bodyText && /^[\[{]/.test(bodyText.trim()) ? JSON.parse(bodyText) : null; } catch (_err) { bodyJson = null; }
       if (!res.ok) throw buildFetchError('/api/calculator/pepperstone-set', 'POST', res.status, res.statusText, bodyText, bodyJson);
@@ -1937,10 +1929,11 @@
       const journalHint = 'Load only in the updated Trader EA. Loading the preset does not submit an order. Trader Controls checks current broker conditions when you explicitly request execution.';
       okEl.textContent = `${downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`} ${journalHint}`;
     } catch (err) {
+      if (requestedPreset !== state.pepperstoneSetPayload) return;
       errorEl.textContent = String(err?.message || err);
       renderErrorDebug(err.detail || (err.debug ? { debug: err.debug } : null));
     } finally {
-      pepperstoneSetBtn.disabled = false;
+      if (requestedPreset === state.pepperstoneSetPayload) pepperstoneSetBtn.disabled = !requestedPreset;
     }
   });
 
