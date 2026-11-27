@@ -16,7 +16,11 @@ def _load_module():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(PYTHON_SOURCE.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -394,11 +398,11 @@ def test_auto_start_is_minimized_and_reinitialization_keeps_one_owner_window(tmp
     next_cleanup_guard.release()
 
     mql = MQL_SOURCE.read_text(encoding="utf-8")
-    assert '#property version   "1.14"' in mql
+    assert '#property version   "1.15"' in mql
     assert '\\"version\\": \\"1.10\\"' in mql
     assert "TerminalInfoString(TERMINAL_DATA_PATH)" in mql
     assert "(string)ChartID()" in mql
-    assert '" --owner-id " + QuoteArg(SpreadWindowOwnerId())' in mql
+    assert '" --owner-id " + QuoteArg(g_window_owner_id)' in mql
     assert '" --auto-start"' in mql
     assert "pythonw.exe" in mql
     assert "SW_SHOWMINNOACTIVE = 7" in mql
@@ -557,6 +561,7 @@ def test_spread_window_closes_only_when_verified_owning_terminal_exits(tmp_path:
         window.process_monitor = spread.TerminalProcessMonitor.open(identity, process_api)
         window.owner_monitor_error = None
         window._feed_status_text = "Feed file missing; retrying slowly"
+        window.ownership = None
         window.status_var = Status()
         window.on_close = lambda: None
         return window, root
@@ -763,7 +768,7 @@ def test_spread_window_closes_only_when_verified_owning_terminal_exits(tmp_path:
     assert parent_library.ShowWindow.calls == [(parent_hwnd, 7)]
 
     mql = MQL_SOURCE.read_text(encoding="utf-8")
-    assert '#property version   "1.13"' in mql
+    assert '#property version   "1.15"' in mql
     assert '\\"version\\": \\"1.10\\"' in mql
     assert "uint GetCurrentProcessId();" in mql
     assert "bool GetProcessTimes(long process_handle" in mql
@@ -780,3 +785,77 @@ def test_spread_window_closes_only_when_verified_owning_terminal_exits(tmp_path:
     )
     assert "DirectoryName(script), SW_SHOWMINNOACTIVE" in launch
     assert not process_api.open_handles
+
+
+def test_account_switch_closes_only_obsolete_spread_windows(tmp_path):
+    import ctypes
+    import sys
+    from dataclasses import replace
+    import pytest
+
+    if sys.platform != "win32":
+        pytest.skip("uses native Windows taskbar windows")
+    spread = _load_module()
+    user32 = ctypes.windll.user32
+    root = spread.tk.Tk()
+    root.withdraw()
+    args = spread.parse_args(["--file", str(tmp_path / "feed.json")])
+    config = spread.SpreadWindowConfig.from_args(args)
+
+    class OpenTerminal:
+        def exited(self):
+            return False
+
+        def close(self):
+            pass
+
+    def launch(ident, token, minimized):
+        ownership = spread.SpreadWindowOwnership.claim_or_handoff(tmp_path, ident, config, attachment_id=token)
+        assert ownership is not None
+        top = spread.tk.Toplevel(root)
+        view = spread.SpreadPercentWindow(top, args, ownership.release, ownership, OpenTerminal())
+        top.update_idletasks()
+        hwnd = user32.GetParent(top.winfo_id()) or top.winfo_id()
+        if minimized:
+            spread.show_minimized_no_activate(top)
+        assert bool(user32.IsIconic(hwnd)) == minimized
+        return view, hwnd
+
+    def observation(login, server, stamp, tool="trader"):
+        path = tmp_path / f"MT5DesktopAccount.11.22.{tool}.json"
+        spread.atomic_write_json(path, dict(login=login, server=server, observed_ms=stamp))
+
+    def check(view):
+        view.root.after_cancel(view._owner_after_id)
+        view._check_owner_process()
+
+    a = spread.SpreadOwnerIdentity("a-chart", 11, 22, 101, "Demo", 100)
+    a2 = replace(a, owner_id="a-chart-2")
+    other = replace(a, terminal_pid=55)
+    b = replace(a, owner_id="b-chart", account_login=102, account_observed=200)
+    views = []
+    try:
+        for ident, minimized in ((a, True), (a2, False), (other, True), (b, False)):
+            views.append(launch(ident, "first", minimized))
+        observation(101, "Demo", 150)
+        check(views[0][0])
+        assert user32.IsWindow(views[0][1])
+        observation(102, "Demo", 201)
+        for view, hwnd in views:
+            check(view)
+        assert [bool(user32.IsWindow(hwnd)) for view, hwnd in views] == [False, False, True, True]
+
+        reopened = replace(a, account_observed=300)
+        new_a, hwnd = launch(reopened, "new", True)
+        views.append((new_a, hwnd))
+        observation(101, "Demo", 301, "spread")
+        observation(102, "Demo", 202)
+        new_a.ownership.detach_signal_path("first").write_text("first", encoding="ascii")
+        check(views[3][0])
+        check(new_a)
+        assert not user32.IsWindow(views[3][1]) and user32.IsIconic(hwnd)
+        assert not list(tmp_path.glob("*.command.json"))
+    finally:
+        for view, hwnd in views:
+            view._close()
+        root.destroy()

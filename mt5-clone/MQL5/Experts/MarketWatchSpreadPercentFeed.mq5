@@ -1,6 +1,6 @@
 #property strict
 #property description "Feed selected Market Watch symbol spread percentages to a FILE_COMMON JSON file and optionally launch the desktop pop-out. Display-only; no trading."
-#property version   "1.14"
+#property version   "1.15"
 
 #import "shell32.dll"
 long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
@@ -36,6 +36,12 @@ const uint   INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint   FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
 
 string g_attachment_id = "";
+string g_window_owner_id = "";
+uint g_terminal_pid = 0;
+long g_terminal_created = 0;
+ulong g_account_observed = 0;
+long g_account_login = 0;
+string g_account_server = "";
 
 string SpreadAttachmentId()
 {
@@ -51,7 +57,7 @@ string SpreadDetachSignalPath(const uint terminal_pid,
                               const long terminal_creation_time)
 {
    return "SpreadPercentWindow.detach."
-          + SpreadWindowOwnerId() + "." + (string)terminal_pid + "."
+          + g_window_owner_id + "." + (string)terminal_pid + "."
           + (string)terminal_creation_time + "." + g_attachment_id + ".signal";
 }
 
@@ -142,7 +148,8 @@ string ShortStableFingerprint(const string value)
 
 string SpreadWindowOwnerId()
 {
-   string identity = TerminalInfoString(TERMINAL_DATA_PATH) + "|" + (string)ChartID();
+   string identity = TerminalInfoString(TERMINAL_DATA_PATH) + "|" + (string)ChartID() + "|" +
+                     g_account_server + "|" + (string)g_account_login;
    return ShortStableFingerprint(identity);
 }
 
@@ -309,7 +316,10 @@ bool LaunchWindow()
                  + " --file " + QuoteArg(CommonFeedPath())
                  + " --refresh-ms " + IntegerToString(SafeDesktopWindowRefreshMs())
                  + " --decimals " + IntegerToString(SafeDesktopWindowDecimals())
-                 + " --owner-id " + QuoteArg(SpreadWindowOwnerId())
+                 + " --owner-id " + QuoteArg(g_window_owner_id)
+                 + " --account-login " + (string)g_account_login
+                 + " --account-server " + QuoteArg(g_account_server)
+                 + " --account-observed " + (string)g_account_observed
                  + " --attachment-id " + QuoteArg(g_attachment_id)
                  + " --runtime-dir " + QuoteArg(runtime_dir)
                  + " --terminal-pid " + (string)terminal_pid
@@ -454,9 +464,45 @@ bool ExportSpreadFeed()
    return true;
 }
 
+
+// Keep a terminal-wide observation independent of chart or desktop-launch settings.
+void PublishDesktopAccount(const bool force=false)
+{
+   if(g_terminal_pid == 0 || g_terminal_created <= 0) return;
+   static ulong lastPublished = 0;
+   ulong observed = GetTickCount64();
+   if(!force && lastPublished != 0 && observed-lastPublished < 1000) return;
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   string server = AccountInfoString(ACCOUNT_SERVER);
+   if(login <= 0 || server == "" || login != AccountInfoInteger(ACCOUNT_LOGIN) ||
+      server != AccountInfoString(ACCOUNT_SERVER)) return;
+
+   string path = "MT5DesktopAccount." + (string)g_terminal_pid + "." + (string)g_terminal_created + ".spread.json";
+   string pending = path + "." + (string)ChartID() + "." + (string)observed + ".tmp";
+   int file = FileOpen(pending, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON, 0, CP_UTF8);
+   if(file == INVALID_HANDLE) return;
+   string payload = "{\"login\":" + (string)login + ",\"server\":\"" + JsonEscape(server) +
+                    "\",\"observed_ms\":" + (string)observed + "}";
+   uint written = FileWriteString(file,payload);
+   FileFlush(file);
+   FileClose(file);
+   if(written > 0 && FileMove(pending,FILE_COMMON,path,FILE_COMMON | FILE_REWRITE))
+      lastPublished = observed;
+   else
+      FileDelete(pending,FILE_COMMON);
+}
+
 int OnInit()
 {
+   g_account_observed = GetTickCount64();
+   g_account_login = AccountInfoInteger(ACCOUNT_LOGIN);
+   g_account_server = AccountInfoString(ACCOUNT_SERVER);
+   g_window_owner_id = SpreadWindowOwnerId();
    g_attachment_id = SpreadAttachmentId();
+   string why = "";
+   if(MQLInfoInteger(MQL_DLLS_ALLOWED) &&
+      TerminalProcessIdentity(g_terminal_pid,g_terminal_created,why))
+      PublishDesktopAccount(true);
    EventSetMillisecondTimer(SafeUpdateInterval());
    ExportSpreadFeed();
    LaunchWindow();
@@ -466,12 +512,16 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(reason == REASON_ACCOUNT &&
+      (g_account_login != AccountInfoInteger(ACCOUNT_LOGIN) || g_account_server != AccountInfoString(ACCOUNT_SERVER)))
+      PublishDesktopAccount(true);
    if(reason == REASON_REMOVE)
       NotifySpreadWindowRemoved();
 }
 
 void OnTimer()
 {
+   PublishDesktopAccount();
    ExportSpreadFeed();
 }
 

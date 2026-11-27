@@ -14,6 +14,8 @@ from typing import Any, Callable
 import tkinter as tk
 from tkinter import ttk
 
+from desktop_account import account_switched
+
 
 PROTOCOL_VERSION = 1
 ACTIONS = ("market", "limit", "trendline", "ema_bounce")
@@ -54,6 +56,8 @@ class InstanceIdentity:
     owner_id: str = ""
     terminal_pid: int = 0
     terminal_creation_time: int = 0
+    attachment_id: str = ""
+    account_observed: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,10 +128,19 @@ class TraderControlProtocol:
             return JsonRead(None, "non_object")
         return JsonRead(payload)
 
+    def account_switched(self) -> bool:
+        ident = self.identity
+        return account_switched(self.common_dir, ident.terminal_pid, ident.terminal_creation_time,
+                                ident.account_login, ident.account_server, ident.account_observed)
+
+    def _attachment_matches(self, payload: dict[str, Any]) -> bool:
+        return not self.identity.attachment_id or payload.get("attachment_id") == self.identity.attachment_id
+
     def _identity_matches(self, payload: dict[str, Any]) -> bool:
         return (
             payload.get("protocol_version") == PROTOCOL_VERSION
             and payload.get("instance_id") == self.identity.instance_id
+            and self._attachment_matches(payload)
             and payload.get("account_login") == self.identity.account_login
             and payload.get("account_server") == self.identity.account_server
             and payload.get("chart_id") == self.identity.chart_id
@@ -158,6 +171,7 @@ class TraderControlProtocol:
         if (
             command.get("protocol_version") != PROTOCOL_VERSION
             or command.get("instance_id") != self.identity.instance_id
+            or not self._attachment_matches(command)
             or command.get("action") not in ACTIONS
             or not isinstance(command_id, str)
             or not isinstance(created_at, int)
@@ -165,7 +179,8 @@ class TraderControlProtocol:
         ):
             return None
         result = self._read_json(self.result_path).payload
-        if result and result.get("instance_id") == self.identity.instance_id and result.get("command_id") == command_id:
+        if (result and result.get("instance_id") == self.identity.instance_id
+                and self._attachment_matches(result) and result.get("command_id") == command_id):
             return None
         return command_id
 
@@ -185,6 +200,8 @@ class TraderControlProtocol:
 
     def state(self, now: float | None = None) -> ControlState:
         current = time.time() if now is None else now
+        if self.account_switched():
+            return ControlState(False, False, "The owning MT5 terminal switched accounts.", None, None, None)
         status_read = self._read_json(self.status_path)
         status = status_read.payload
         result = self._read_json(self.result_path).payload
@@ -231,6 +248,8 @@ class TraderControlProtocol:
             "action": action,
             "created_at": int(current),
         }
+        if self.identity.attachment_id:
+            command["attachment_id"] = self.identity.attachment_id
         atomic_write_json(self.command_path, command)
         return command
 
@@ -414,6 +433,8 @@ def _identity_payload(identity: InstanceIdentity) -> dict[str, Any]:
         "ea_version": identity.ea_version,
         "terminal_pid": identity.terminal_pid,
         "terminal_creation_time": identity.terminal_creation_time,
+        "attachment_id": identity.attachment_id,
+        "account_observed": identity.account_observed,
     }
 
 
@@ -431,6 +452,8 @@ def _identity_from_payload(payload: dict[str, Any], owner_id: str) -> InstanceId
         or not isinstance(payload.get("ea_version"), str)
         or not isinstance(payload.get("terminal_pid"), int)
         or not isinstance(payload.get("terminal_creation_time"), int)
+        or not isinstance(payload.get("attachment_id", ""), str)
+        or type(payload.get("account_observed", 0)) is not int
     ):
         return None
     return InstanceIdentity(
@@ -444,6 +467,8 @@ def _identity_from_payload(payload: dict[str, Any], owner_id: str) -> InstanceId
         owner_id=payload["owner_id"],
         terminal_pid=payload["terminal_pid"],
         terminal_creation_time=payload["terminal_creation_time"],
+        attachment_id=payload.get("attachment_id", ""),
+        account_observed=payload.get("account_observed", 0),
     )
 
 
@@ -547,7 +572,9 @@ class WindowOwnership:
         if requested is None:
             return None
         if (
-            requested.terminal_pid != self.identity.terminal_pid
+            (requested.account_login, requested.account_server) != (self.identity.account_login, self.identity.account_server)
+            or requested.account_observed < self.identity.account_observed
+            or requested.terminal_pid != self.identity.terminal_pid
             or requested.terminal_creation_time
             != self.identity.terminal_creation_time
         ):
@@ -717,6 +744,9 @@ class TraderControlWindow:
             return
         self._refresh_after_id = None
         self._accept_handoff()
+        if isinstance(self.protocol, TraderControlProtocol) and self.protocol.account_switched():
+            self._close()
+            return
         state = self.protocol.state()
         status_text = "Connected" if state.connected else "Disconnected"
         orders = "enabled" if state.status and state.status.get("orders_enabled") else "disabled"
@@ -735,7 +765,9 @@ class TraderControlWindow:
             button.state(button_state)
 
         result = state.result
-        if result and result.get("instance_id") == self.protocol.identity.instance_id:
+        if (result and result.get("instance_id") == self.protocol.identity.instance_id
+                and (not getattr(self.protocol.identity, "attachment_id", "")
+                     or result.get("attachment_id") == self.protocol.identity.attachment_id)):
             command_id = result.get("command_id")
             if (
                 isinstance(command_id, str)
@@ -822,6 +854,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ea-version", required=True)
     parser.add_argument("--terminal-pid", required=True, type=int)
     parser.add_argument("--terminal-created", required=True, type=int)
+    parser.add_argument("--attachment-id", default="")
+    parser.add_argument("--account-observed", type=int, default=0)
     parser.add_argument("--refresh-ms", type=int, default=250)
     return parser.parse_args()
 
@@ -839,6 +873,8 @@ def main() -> None:
         owner_id=args.owner_id,
         terminal_pid=args.terminal_pid,
         terminal_creation_time=args.terminal_created,
+        attachment_id=args.attachment_id,
+        account_observed=args.account_observed,
     )
     common_dir = Path(args.common_dir)
     process_monitor = TerminalProcessMonitor.open(
@@ -848,6 +884,8 @@ def main() -> None:
     ownership: WindowOwnership | None = None
     control: TraderControlWindow | None = None
     try:
+        if TraderControlProtocol(common_dir, identity).account_switched():
+            return
         ownership = WindowOwnership.claim_or_handoff(
             common_dir,
             identity,

@@ -36,7 +36,11 @@ def _window_module():
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(WINDOW.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -190,7 +194,7 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
         launch = _function(trader, "bool LaunchDesktopTraderControls")
         owner = _function(trader, "string TraderControlOwnerId")
         executable = _function(trader, "string TraderControlLaunchExecutable")
-        assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
+        assert '#property version   "2.56"' in trader and 'EA_VERSION = "2.56"' in trader
         assert 'const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;' in trader
         assert '" --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId)' in launch
         assert "TRADER_CONTROL_SW_SHOWMINNOACTIVE" in launch
@@ -450,6 +454,8 @@ def test_controls_close_only_when_verified_owning_terminal_exits(
         ea_version=startup.ea_version,
         terminal_pid=startup.terminal_pid,
         terminal_created=startup.terminal_creation_time,
+        attachment_id="",
+        account_observed=0,
         refresh_ms=250,
     )
     monkeypatch.setattr(window, "parse_args", lambda: args)
@@ -472,7 +478,7 @@ def test_controls_close_only_when_verified_owning_terminal_exits(
     process_identity = _function(trader, "bool TraderControlTerminalProcessIdentity")
     launch = _function(trader, "bool LaunchDesktopTraderControls")
     status = _function(trader, "bool WriteDesktopTraderStatus")
-    assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
+    assert '#property version   "2.56"' in trader and 'EA_VERSION = "2.56"' in trader
     assert "GetCurrentProcessId()" in process_identity
     assert "GetCurrentProcess()" in process_identity
     assert "GetProcessTimes(processHandle" in process_identity
@@ -696,6 +702,8 @@ def test_ea_validates_scope_freshness_consumes_before_dispatch_and_reports_struc
     assert "payload != canonical" in read
     assert "command.protocolVersion != TRADER_CONTROL_PROTOCOL_VERSION" in read
     assert "command.instanceId != g_traderControlInstanceId" in read
+    assert "attachment != g_traderControlAttachment" in read
+    assert "!TraderControlAccountMatches()" in read
     assert "IsDesktopCommandIdValid(command.commandId)" in read
     assert "IsDesktopActionAllowed(command.action)" in read
     assert "TRADER_CONTROL_COMMAND_MAX_AGE_SECONDS" in read
@@ -940,3 +948,77 @@ def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_toke
     assert r'\"orders_enabled\":' in status
     assert "UseDesktopTraderControls" in trader and "if(!OrdersEnabled) return false;" in trader
     assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="uses native Windows taskbar windows")
+def test_account_switch_closes_only_obsolete_trader_windows(tmp_path):
+    import ctypes
+    from dataclasses import replace
+
+    window = _window_module()
+    user32 = ctypes.windll.user32
+    root = window.tk.Tk()
+    root.withdraw()
+
+    def launch(ident, minimized):
+        ownership = window.WindowOwnership.claim_or_handoff(
+            tmp_path, ident, lifetime_id=window._terminal_lifetime_id(ident))
+        assert ownership is not None
+        top = window.tk.Toplevel(root)
+        view = window.TraderControlWindow(
+            top, window.TraderControlProtocol(tmp_path, ident), 5000, ownership.release, ownership)
+        top.update_idletasks()
+        hwnd = user32.GetParent(top.winfo_id()) or top.winfo_id()
+        if minimized:
+            window.show_minimized_no_activate(top)
+        assert bool(user32.IsIconic(hwnd)) == minimized
+        return view, hwnd
+
+    def observation(pid, created, login, server, stamp, tool="spread"):
+        path = tmp_path / f"MT5DesktopAccount.{pid}.{created}.{tool}.json"
+        window.atomic_write_json(path, dict(login=login, server=server, observed_ms=stamp))
+
+    def refresh(view):
+        view._cancel_after(view._refresh_after_id)
+        view._refresh()
+
+    a = window.InstanceIdentity("a", 101, "Demo", 1, "EURUSD", 9, "2.56", "owner-a", 11, 22, "att-a", 100)
+    a2 = replace(a, owner_id="owner-a2", chart_id=2, instance_id="a2", attachment_id="att-a2")
+    other = replace(a, terminal_creation_time=33)
+    b = replace(a, owner_id="owner-b", chart_id=7, instance_id="b", account_server="Live", attachment_id="att-b", account_observed=200)
+    reopened = replace(a, account_observed=300, attachment_id="att-new")
+    views = []
+    try:
+        for ident, minimized in ((a, True), (a2, False), (other, True), (b, False)):
+            views.append(launch(ident, minimized))
+        observation(11, 22, 101, "Demo", 150)
+        refresh(views[0][0])
+        assert user32.IsWindow(views[0][1])
+        observation(11, 22, 101, "Live", 201)
+        # Even a stale enabled status or click cannot write an old-account command.
+        with pytest.raises(window.ProtocolError, match="switched accounts"):
+            views[0][0].protocol.issue_command("market")
+        for view, hwnd in views:
+            refresh(view)
+        assert [bool(user32.IsWindow(hwnd)) for view, hwnd in views] == [False, False, True, True]
+
+        new_a, hwnd = launch(reopened, True)
+        views.append((new_a, hwnd))
+        observation(11, 22, 101, "Demo", 301, "trader")
+        observation(11, 22, 101, "Live", 202)  # Delayed older observation.
+        refresh(views[3][0])
+        refresh(new_a)
+        assert not user32.IsWindow(views[3][1]) and user32.IsIconic(hwnd)
+        status = window._identity_payload(a)
+        status.update(connected=True, orders_enabled=True, control_ready=True,
+                      updated_at=int(time.time()), fresh_for_seconds=10)
+        window.atomic_write_json(new_a.protocol.status_path, status)
+        assert not new_a.protocol.state().buttons_enabled
+        status.update(attachment_id=reopened.attachment_id)
+        window.atomic_write_json(new_a.protocol.status_path, status)
+        assert new_a.protocol.state().buttons_enabled
+        assert not list(tmp_path.glob("*.command.json"))
+    finally:
+        for view, hwnd in views:
+            view._close()
+        root.destroy()

@@ -15,6 +15,8 @@ from typing import Any, Callable, Sequence
 import tkinter as tk
 from tkinter import ttk
 
+from desktop_account import account_switched
+
 
 DEFAULT_FEED_NAME = "MarketWatchSpreadPercentFeed.json"
 HANDOFF_FRESH_SECONDS = 30
@@ -55,6 +57,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--runtime-dir", default="", help=argparse.SUPPRESS)
     parser.add_argument("--terminal-pid", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--terminal-created", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--account-login", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--account-server", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--account-observed", type=int, default=0, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -109,6 +114,9 @@ class SpreadOwnerIdentity:
     owner_id: str
     terminal_pid: int
     terminal_creation_time: int
+    account_login: int = 0
+    account_server: str = ""
+    account_observed: int = 0
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "SpreadOwnerIdentity":
@@ -116,6 +124,9 @@ class SpreadOwnerIdentity:
             owner_id=str(args.owner_id),
             terminal_pid=int(args.terminal_pid),
             terminal_creation_time=int(args.terminal_created),
+            account_login=getattr(args, "account_login", 0),
+            account_server=getattr(args, "account_server", ""),
+            account_observed=getattr(args, "account_observed", 0),
         )
         if (
             not identity.owner_id
@@ -126,6 +137,10 @@ class SpreadOwnerIdentity:
                 "Automatic Spread startup requires a valid owning MT5 PID and creation time."
             )
         return identity
+
+    def account_switched(self, runtime_dir: Path) -> bool:
+        return account_switched(runtime_dir, self.terminal_pid, self.terminal_creation_time,
+                                self.account_login, self.account_server, self.account_observed)
 
     @property
     def lifetime_id(self) -> str:
@@ -210,6 +225,9 @@ class SpreadHandoffMailbox:
                 "requested_at": int(time.time() if now is None else now),
                 "request_id": str(uuid.uuid4()),
                 "attachment_id": attachment_id,
+                "account_login": self.identity.account_login,
+                "account_server": self.identity.account_server,
+                "account_observed": self.identity.account_observed,
             }
         )
         atomic_write_json(self.path, payload)
@@ -233,7 +251,16 @@ class SpreadHandoffMailbox:
             or current - requested_at > HANDOFF_FRESH_SECONDS
         ):
             return None
+        if (payload.get("account_login", 0) != self.identity.account_login
+                or payload.get("account_server", "") != self.identity.account_server
+                or type(payload.get("account_observed", 0)) is not int
+                or payload.get("account_observed", 0) < self.identity.account_observed):
+            return None
         self.attachment_id = str(payload.get("attachment_id") or "")
+        self.identity = SpreadOwnerIdentity(
+            self.identity.owner_id, self.identity.terminal_pid, self.identity.terminal_creation_time,
+            self.identity.account_login, self.identity.account_server, payload.get("account_observed", 0),
+        )
         return SpreadWindowConfig.from_payload(payload)
 
     def clear(self) -> None:
@@ -283,6 +310,7 @@ class SpreadWindowOwnership:
         if config is not None:
             self.mailbox.clear()
             self.attachment_id = self.mailbox.attachment_id
+            self.identity = self.mailbox.identity
         return config
 
     def detach_signal_path(self, attachment_id: str | None = None) -> Path:
@@ -719,9 +747,12 @@ class SpreadPercentWindow:
             if self._feed_status_text:
                 self._set_feed_status(self._feed_status_text)
         if not self._closed:
-            if self.ownership is not None and self.ownership.detached():
-                self._close()
-                return
+            if self.ownership is not None:
+                self._accept_handoff()
+                if (self.ownership.identity.account_switched(self.ownership.mailbox.path.parent)
+                        or self.ownership.detached()):
+                    self._close()
+                    return
             self._owner_after_id = self.root.after(
                 OWNER_PROCESS_CHECK_MS,
                 self._check_owner_process,
@@ -871,6 +902,8 @@ def run_window(
         )
     try:
         if identity is not None:
+            if identity.account_switched(runtime_dir):
+                return "obsolete"
             ownership = SpreadWindowOwnership.claim_or_handoff(
                 runtime_dir,
                 identity,

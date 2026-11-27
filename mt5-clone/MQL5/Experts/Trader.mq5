@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.55"
+#property version   "2.56"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -137,6 +137,10 @@ string   g_trendlineLifecycleStatus = "";
 bool     g_trendlineTrackingFailed = false;
 string   g_traderControlInstanceId = "";
 string   g_traderControlOwnerId = "";
+string   g_traderControlAttachment = "";
+ulong    g_traderControlAccountObserved = 0;
+long     g_traderControlAccountLogin = 0;
+string   g_traderControlAccountServer = "";
 uint     g_traderControlTerminalPid = 0;
 long     g_traderControlTerminalCreationTime = 0;
 bool     g_traderControlReady = false;
@@ -176,7 +180,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.55";
+string EA_VERSION = "2.56";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2896,16 +2900,51 @@ void ReportDesktopStatusPublication(const bool succeeded, const string why)
    lastFailure = why;
 }
 
+
+// Keep a terminal-wide observation independent of chart or desktop-launch settings.
+void PublishDesktopAccount(const bool force=false)
+{
+   if(g_traderControlTerminalPid == 0 || g_traderControlTerminalCreationTime <= 0) return;
+   static ulong lastPublished = 0;
+   ulong observed = GetTickCount64();
+   if(!force && lastPublished != 0 && observed-lastPublished < 1000) return;
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   string server = AccountInfoString(ACCOUNT_SERVER);
+   if(login <= 0 || server == "" || login != AccountInfoInteger(ACCOUNT_LOGIN) ||
+      server != AccountInfoString(ACCOUNT_SERVER)) return;
+
+   string path = "MT5DesktopAccount." + (string)g_traderControlTerminalPid + "." + (string)g_traderControlTerminalCreationTime + ".trader.json";
+   string pending = path + "." + (string)ChartID() + "." + (string)observed + ".tmp";
+   int file = FileOpen(pending, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON, 0, CP_UTF8);
+   if(file == INVALID_HANDLE) return;
+   string payload = "{\"login\":" + (string)login + ",\"server\":\"" + JsonEscape(server) +
+                    "\",\"observed_ms\":" + (string)observed + "}";
+   uint written = FileWriteString(file,payload);
+   FileFlush(file);
+   FileClose(file);
+   if(written > 0 && FileMove(pending,FILE_COMMON,path,FILE_COMMON | FILE_REWRITE))
+      lastPublished = observed;
+   else
+      FileDelete(pending,FILE_COMMON);
+}
+
+bool TraderControlAccountMatches()
+{
+   return g_traderControlAccountLogin == AccountInfoInteger(ACCOUNT_LOGIN) &&
+          g_traderControlAccountServer == AccountInfoString(ACCOUNT_SERVER);
+}
+
 bool WriteDesktopTraderStatus()
 {
    if(!UseDesktopTraderControls || g_traderControlInstanceId == "") return true;
    datetime now = TimeGMT();
    string payload = "{";
-   payload += "\"account_login\":" + (string)AccountInfoInteger(ACCOUNT_LOGIN) + ",";
-   payload += "\"account_server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
+   payload += "\"attachment_id\":\"" + g_traderControlAttachment + "\",";
+   payload += "\"account_login\":" + (string)g_traderControlAccountLogin + ",";
+   payload += "\"account_server\":\"" + JsonEscape(g_traderControlAccountServer) + "\",";
    payload += "\"chart_id\":" + (string)ChartID() + ",";
    payload += "\"connected\":" + (TerminalInfoInteger(TERMINAL_CONNECTED) ? "true" : "false") + ",";
-   payload += "\"control_ready\":" + (g_traderControlReady ? "true" : "false") + ",";
+   payload += "\"control_ready\":" + (g_traderControlReady && TraderControlAccountMatches() ? "true" : "false") + ",";
    payload += "\"ea_version\":\"" + EA_VERSION + "\",";
    payload += "\"fresh_for_seconds\":" + IntegerToString(TRADER_CONTROL_STATUS_FRESH_SECONDS) + ",";
    payload += "\"instance_id\":\"" + g_traderControlInstanceId + "\",";
@@ -2951,8 +2990,10 @@ bool LaunchDesktopTraderControls(string &why)
                    " --common-dir " + TraderControlQuoteArg(common) +
                    " --instance-id " + TraderControlQuoteArg(g_traderControlInstanceId) +
                    " --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId) +
-                   " --account-login " + (string)AccountInfoInteger(ACCOUNT_LOGIN) +
-                   " --account-server " + TraderControlQuoteArg(AccountInfoString(ACCOUNT_SERVER)) +
+                   " --attachment-id " + TraderControlQuoteArg(g_traderControlAttachment) +
+                   " --account-observed " + (string)g_traderControlAccountObserved +
+                   " --account-login " + (string)g_traderControlAccountLogin +
+                   " --account-server " + TraderControlQuoteArg(g_traderControlAccountServer) +
                    " --chart-id " + (string)ChartID() +
                    " --symbol " + TraderControlQuoteArg(_Symbol) +
                    " --magic " + IntegerToString(MagicNumber) +
@@ -3025,6 +3066,7 @@ bool IsDesktopActionAllowed(const string action)
 
 bool ReadDesktopTraderCommand(DesktopTraderCommand &command, string &why)
 {
+   if(!TraderControlAccountMatches()) { why = ""; return false; }
    int handle = FileOpen(TraderControlCommandFile(),
                          FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
    if(handle == INVALID_HANDLE){ why = ""; return false; }
@@ -3033,13 +3075,15 @@ bool ReadDesktopTraderCommand(DesktopTraderCommand &command, string &why)
    FileClose(handle);
 
    long protocol=0, created=0;
-   if(!ReadDesktopJsonString(payload, "action", command.action) ||
+   string attachment = "";
+   if(!ReadDesktopJsonString(payload, "attachment_id", attachment) ||
+      !ReadDesktopJsonString(payload, "action", command.action) ||
       !ReadDesktopJsonString(payload, "command_id", command.commandId) ||
       !ReadDesktopJsonLong(payload, "created_at", created) ||
       !ReadDesktopJsonString(payload, "instance_id", command.instanceId) ||
       !ReadDesktopJsonLong(payload, "protocol_version", protocol))
    { why = "Malformed desktop command JSON."; return false; }
-   string canonical = "{\"action\":\"" + command.action + "\",\"command_id\":\"" +
+   string canonical = "{\"action\":\"" + command.action + "\",\"attachment_id\":\"" + attachment + "\",\"command_id\":\"" +
                       command.commandId + "\",\"created_at\":" + (string)created +
                       ",\"instance_id\":\"" + command.instanceId +
                       "\",\"protocol_version\":" + (string)protocol + "}";
@@ -3049,6 +3093,8 @@ bool ReadDesktopTraderCommand(DesktopTraderCommand &command, string &why)
    command.createdAt = (datetime)created;
    if(command.protocolVersion != TRADER_CONTROL_PROTOCOL_VERSION)
    { why = "Desktop command protocol version mismatch."; return false; }
+   if(attachment != g_traderControlAttachment)
+   { why = "Desktop command does not belong to the current EA attachment."; return false; }
    if(command.instanceId != g_traderControlInstanceId)
    { why = "Desktop command instance identity mismatch."; return false; }
    if(!IsDesktopCommandIdValid(command.commandId))
@@ -3107,6 +3153,7 @@ bool WriteDesktopTraderResult(const DesktopTraderResult &result)
    string payload = "{";
    payload += "\"action\":\"" + result.action + "\",";
    payload += "\"command_id\":\"" + result.commandId + "\",";
+   payload += "\"attachment_id\":\"" + g_traderControlAttachment + "\",";
    payload += "\"instance_id\":\"" + g_traderControlInstanceId + "\",";
    payload += "\"outcome\":\"" + result.outcome + "\",";
    payload += "\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + ",";
@@ -3686,6 +3733,14 @@ int OnInit()
 {
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber(MagicNumber);
+   g_traderControlAccountObserved = GetTickCount64();
+   g_traderControlAccountLogin = AccountInfoInteger(ACCOUNT_LOGIN);
+   g_traderControlAccountServer = AccountInfoString(ACCOUNT_SERVER);
+   // The instance namespace stays stable for durable state; commands bind to this initialization.
+   string attachmentKey = "TCA." + TraderControlOwnerId();
+   double generation = GlobalVariableGet(attachmentKey) + 1.0;
+   GlobalVariableSet(attachmentKey,generation);
+   g_traderControlAttachment = (string)g_traderControlAccountObserved + "-" + DoubleToString(generation,0);
    g_traderControlInstanceId = TraderControlInstanceId();
    g_traderControlOwnerId = TraderControlOwnerId();
    string terminalProcessWhy = "";
@@ -3693,6 +3748,7 @@ int OnInit()
                                             g_traderControlTerminalCreationTime,
                                             terminalProcessWhy))
       Print(EA_COMMENT, ": ", terminalProcessWhy);
+   PublishDesktopAccount(true);
    g_portablePresetInitializedAt = TimeGMT();
    g_portablePresetActionActivated = false;
 
@@ -3801,6 +3857,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   if(reason == REASON_ACCOUNT && !TraderControlAccountMatches()) PublishDesktopAccount(true);
    if(UseDesktopTraderControls)
    {
       g_traderControlReady = false;
@@ -3885,6 +3942,7 @@ void OnTick()
 
 void OnTimer()
 {
+   PublishDesktopAccount();
    MaybeExportPepperstoneSpreads();
    if(UsePriceDistanceInputs && !UseDesktopTraderControls) return;
 
