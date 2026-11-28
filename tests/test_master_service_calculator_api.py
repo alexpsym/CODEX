@@ -5807,10 +5807,51 @@ def test_pepperstone_standard_limit_controls_preserve_ticket_prices(monkeypatch,
     _run_trader_controls_host(tmp_path, preset)
 
 
-def _run_trader_controls_host(tmp_path, preset, market_cases=()):
+def test_pepperstone_nzdusd_limit_placement(monkeypatch, tmp_path, pepperstone_account_fixture):
+    """Real quote/export; host runs both EA revisions against identical synthetic broker data."""
+    from datetime import datetime, timezone
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", pepperstone_account_fixture)
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50")
+    stamp = datetime.now(timezone.utc).isoformat()
+    symbol = dict(symbol="NZDUSD", mt5_symbol="NZDUSD.a", point=".00001", trade_tick_size=".00001",
+                  minimum_lot=".01", volume_step=".01", maximum_lot="100", tick_value="1.51",
+                  bid=".55435", ask=".55447", stops_level=10, freeze_level=30,
+                  available=True, timestamp=stamp, quote_timestamp=stamp)
+    export = tmp_path / "spread.json"
+    export.write_text(json.dumps(dict(version=1, broker="pepperstone", generated_at=stamp,
+                                     account=dict(mode="demo", currency="AUD"), symbols=[symbol])))
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export))
+    presets = {}
+    for profile in ("standard", "razor"):
+        request = _pepperstone_quote_payload(symbol="NZDUSD", side="buy", account="demo", order_type="limit",
+            pepperstone_account_type=profile, estimate_razor_from_standard=profile=="razor", entry_price="0.55387",
+            stop_loss_ticks="16", chart_tick_size="0.00001", target_mode="rr", risk_reward="3.5",
+            risk_mode="fixed_aud", risk_value="10")
+        quote = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+        guidance = quote["pepperstone_stop_guidance"]
+        assert (guidance["state"], guidance["limit_entry_state"], guidance["minimum_ticks"]) == ("ready", "valid", 10)
+        assert Decimal(quote["stop_price"]) == Decimal(".55371")
+        text, _ = master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(request, quote))
+        presets[profile] = _parse_set_file(text)
+        assert presets[profile]["PresetAccountType"] == profile
+        assert Decimal(presets[profile]["SL_PriceDistance"]) == Decimal(".00016")
+        assert Decimal(presets[profile]["CommissionPerLotPerSide"]) == (0 if profile == "standard" else Decimal("3.5"))
+        if profile == "standard":
+            assert Decimal(quote["target_price"]) == Decimal(".55443")
+    for baseline in (True, False):
+        work = tmp_path / ("before" if baseline else "after")
+        work.mkdir()
+        _run_trader_controls_host(work, presets["standard"], limit_cases=presets, baseline=baseline)
+
+
+def _run_trader_controls_host(tmp_path, preset, market_cases=(), *, limit_cases=None, baseline=False):
     import os
     import subprocess
     source=(Path(__file__).resolve().parents[1]/'mt5-clone/MQL5/Experts/Trader.mq5').read_text(encoding='utf-8')
+    if baseline:
+        source = subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show',
+            '6665477e83cee6915d63550bcdf7bffe2bf693de:mt5-clone/MQL5/Experts/Trader.mq5'], cwd=ROOT).decode("utf-8-sig")
     def extract(name, text=source):
         match=re.search(r'\b(?:bool|void|double|string)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',text)
         assert match,name
@@ -5859,7 +5900,7 @@ const int SYMBOL_DIGITS=1,SYMBOL_TRADE_STOPS_LEVEL=2,SYMBOL_TRADE_FREEZE_LEVEL=3
 string _Symbol="USDJPY.a",EA_COMMENT="offline",g_traderControlInstanceId="offline";int _Digits=3,TRADER_CONTROL_PROTOCOL_VERSION=1;
 double _Point=.001,volumeMax=100,minimumLot=.01,volumeStep=.01,tickValue=.93796296296296296;
 int64_t stopLevel=0,freezeLevel=0;bool readiness=true,busyPosition=false,persistence=true;
-double bid=159.500,ask=159.501,tradeTick=.001; bool marketCase=false; int StandardMarketSide=0; const int STD_MARKET_BUY=0;
+double bid=159.500,ask=159.501,tradeTick=.001; bool linearValuation=false; int StandardMarketSide=0; const int STD_MARKET_BUY=0;
 bool replay254=false,replay253=false,razorControl=false;int64_t calculationMode=SYMBOL_CALC_MODE_CFD;
 int p1Calls=0,fullCalls=0;double pointValuation=.166,fullValuation=25.32;
 uint64_t g_ticket=0;int64_t g_armStartTime=0,g_expireAt=0;
@@ -5903,7 +5944,7 @@ double SymbolInfoDouble(string,int prop){if(prop==SYMBOL_TRADE_TICK_SIZE)return 
 const int SYMBOL_ASK=100,SYMBOL_BID=101,SYMBOL_POINT=102;
 bool SymbolInfoTick(string,MqlTick&t){t={bid,ask};return true;}
 bool OrderCalcProfit(int direction,string,double volume,double entry,double target,double &out){
- if(marketCase){out=NormalizeDouble((direction==ORDER_TYPE_BUY?target-entry:entry-target)/tradeTick*tickValue*volume,2);return true;}
+ if(linearValuation){out=NormalizeDouble((direction==ORDER_TYPE_BUY?target-entry:entry-target)/tradeTick*tickValue*volume,2);return true;}
  if(std::abs(std::abs(target-entry)-.001)<1e-8){p1Calls++;out=pointValuation;}
  else {fullCalls++;if(std::abs(volume-(razorControl?.16:.18))>1e-8||std::abs(entry-159.360)>1e-8||(!replay253&&!razorControl&&std::abs(target-159.510)>1e-8))throw std::runtime_error("wrong full valuation operands");out=fullValuation;}return true;}
 bool ValidateTradingReadiness(bool,string &why){why=readiness?"":"offline margin/readiness blocked";return readiness;}
@@ -5963,7 +6004,7 @@ int main(){try{
   run("fault-"+std::to_string(fault));check(lastResult.outcome=="blocked"&&requests.empty(),"protection bypass");
   if(fault==8||fault==9)check(lastResult.reason.find("Conflicting Standard FX preset")!=string::npos,"contradictory fields not reported");
  }
- reset();PresetAccountType="razor";CommissionPerLotPerSide=3.5;razorControl=true;run("razor-control");
+ reset();PresetAccountType="razor";CommissionPerLotPerSide=3.5;razorControl=true;UsePriceDistanceInputs=false;SL_DistancePoints=60;run("nonportable-razor-control");
  check(lastResult.outcome=="blocked"&&requests.empty()&&p1Calls==1&&fullCalls==1,"Razor commission path was bypassed");
  check(lastResult.reason=="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids.","Razor outcome not from original cash path");
  reset();busyPosition=true;run("position-busy");check(lastResult.outcome=="blocked"&&requests.empty(),"position block bypass");
@@ -5976,6 +6017,11 @@ int main(){try{
     wrapper='bool ComputeAutoTP_NetRR(double entry,bool buy,double vol,double nominal,double buffered,double &tp,int &points,double &rr,string &why,bool market){return replay253?LegacyComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why):CurrentComputeAutoTP_NetRR(entry,buy,vol,nominal,buffered,tp,points,rr,why,market);}\n'
     if market_cases:
         wrapper=wrapper.replace('return replay253?', 'if(replay254)return Replay254AutoTP(entry,buy,vol,nominal,buffered,tp,points,rr,why);return replay253?')
+    if not baseline:
+        prototypes[0] = prototypes[0].replace("bool market=false)", "bool market=false,bool initialLimit=false)")
+        wrapper = wrapper.replace("bool market){", "bool market,bool initialLimit){").replace("why,market);", "why,market,initialLimit);")
+    if limit_cases:
+        main = _nzd_limit_host_cases(limit_cases, numeric, booleans, baseline)
     cpp.write_text(header+config+'\n'.join(prototypes)+'\n'+'\n'.join(definitions)+wrapper+main)
     exe.write_bytes(b'');obj.write_bytes(b'') # manifest precreation audit covers native outputs
     vc=Path(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.43.34808')
@@ -5988,9 +6034,53 @@ int main(){try{
     assert built.returncode==0,built.stdout+built.stderr
     ran=subprocess.run([str(exe)],cwd=tmp_path,env=env,capture_output=True,text=True,timeout=30)
     assert ran.returncode==0,ran.stdout+ran.stderr
-    if not market_cases:
+    if not market_cases and not limit_cases:
         assert 'entry=159.360 sl=159.300 tp=159.510' in ran.stdout
     print(ran.stdout.strip())
+
+
+def _nzd_limit_host_cases(presets, numeric, booleans, baseline):
+    body = []
+    for profile, preset in presets.items():
+        settings = "\n".join(f"{key}={preset.get(key, '0')};" for key in numeric + booleans)
+        # AUD 1.51/point/lot. Standard: ceil(10/24.16) on .01 steps = .42 lots.
+        # Razor: .33*(24.16+7) = 10.2828, requested net 35.98, commission 2.31.
+        # Nearest legal gross target is 77 points, net 36.06 at the fixture valuation.
+        for stops, freeze in [(10, 30), (10, 0), (17, 0)]:
+            old_freeze_block = baseline and freeze == 30
+            old_cash_block = baseline and profile == "razor"
+            if stops == 17 or old_freeze_block:
+                reason = "SL too close to entry" if baseline else "SL distance 16.00 points; minimum 17 points."
+            elif old_cash_block:
+                reason = "Final normalized TP cannot satisfy the nominal Net R cash target"
+            else:
+                reason = None
+            command_id = f"nzd-{profile}-{stops}-{freeze}"
+            body.append(f"""
+            {settings}
+            DistanceSymbol={json.dumps(preset["DistanceSymbol"])}; PresetAccountType="{profile}";
+            stopLevel={stops}; freezeLevel={freeze}; g_ticket=0; requests.clear();
+            incoming={{"{command_id}","limit"}}; HandleDesktopTraderCommand();
+            """)
+            if reason:
+                body.append(f"""
+                if(lastResult.outcome!="blocked" || lastResult.reason.find("{reason}")==string::npos || !requests.empty())
+                    throw std::runtime_error("Expected local block; observed "+lastResult.outcome+" "+lastResult.reason);
+                std::cout<<"{command_id} blocked: "<<lastResult.reason<<std::endl;
+                """)
+            else:
+                volume, tp = (".42", ".55443") if profile == "standard" else (".33", ".55464")
+                body.append(f"""
+                if(lastResult.outcome!="accepted" || requests.size()!=1)throw std::runtime_error("Limit blocked: "+lastResult.reason);
+                {{const auto &p=requests.at(0); // SellLimit throws, so this can only be BuyLimit.
+                  if(p.symbol!="NZDUSD.a" || std::abs(p.volume-{volume})>1e-9 || std::abs(p.entry-.55387)>1e-9 ||
+                     std::abs(p.sl-.55371)>1e-9 || std::abs(p.tp-{tp})>1e-9)throw std::runtime_error("Incorrect limit ticket");
+                  std::cout<<"{command_id} "<<p.symbol<<" buy limit "<<p.volume<<" "<<p.entry<<" "<<p.sl<<" "<<p.tp<<std::endl;}}
+                HandleDesktopTraderCommand(); if(requests.size()!=1)throw std::runtime_error("duplicate sent");
+                """)
+    return ('int main(){try{linearValuation=true; _Symbol="NZDUSD.a"; _Point=tradeTick=.00001; _Digits=5;'
+            'tickValue=1.51; bid=.55435; ask=.55447;' + "".join(body) +
+            'return 0;}catch(const std::exception&e){std::cerr<<e.what();return 1;}}')
 
 
 def test_pepperstone_market_download_prepares_fx_orders(monkeypatch, tmp_path, pepperstone_weekend_reference):
@@ -6128,7 +6218,7 @@ def _market_controls_cases(cases, numeric, booleans):
         stopLevel=100; incoming={{"{id}-invalid","market"}}; HandleDesktopTraderCommand();
         if(lastResult.outcome!="blocked" || requests.size()!=1)throw std::runtime_error("invalid stop sent");
         """)
-    return 'int main(){try{marketCase=true;'+''.join(body)+'return 0;}catch(const std::exception&e){std::cerr<<e.what();return 1;}}'
+    return 'int main(){try{linearValuation=true;'+''.join(body)+'return 0;}catch(const std::exception&e){std::cerr<<e.what();return 1;}}'
 
 
 def test_pepperstone_local_preset_save_in_edge(monkeypatch, tmp_path, pepperstone_weekend_reference):

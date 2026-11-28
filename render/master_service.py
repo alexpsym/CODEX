@@ -30331,6 +30331,12 @@ def _pepperstone_razor_estimate(snapshot, *, symbol, account, pip_location, plan
     return adjusted, status
 
 
+def _pepperstone_placement_level(metadata, order_type):
+    stops = metadata["stops_level"]
+    # Freeze restricts later modifications of a working pending order.
+    return stops if order_type == "limit" else max(stops, metadata["freeze_level"])
+
+
 def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", order_type="market",
                               entry_price=None, risk_mode="fixed_aud", risk_value="10", account_type="razor", snapshot=None, snapshot_diagnostics=None, estimate_status=None):
     """Exact whole-TV-tick bounds for a single exported MT5 account; advisory only."""
@@ -30380,7 +30386,6 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
                 return result
         if code != "ready": return result
         trade = number(item["trade_tick_size"])
-        levels = [item["stops_level"], item["freeze_level"]]
         stamp = _pepperstone_parse_snapshot_time(item["quote_timestamp"], "quote")
         bid, ask = number(item.get("bid")), number(item.get("ask"))
         if bid <= 0 or ask < bid: raise ValueError("Valid Bid/Ask required")
@@ -30389,7 +30394,8 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         step = lcm((chart / point).denominator, (chart / trade).denominator)
         result.update(step_ticks=step, valid_for_seconds=max(0, 60-age), quote_timestamp=stamp,
                       source=snap["source_path"], exported_account_mode=snap["exported_account_mode"], limit_entry_state="not_applicable")
-        required = max(levels) * point
+        required_points = _pepperstone_placement_level(item, order_type)
+        required = required_points * point
         broker_floor = required if order_type == "limit" else ask - bid + required
         minimum = max(1, ceil(broker_floor / chart))
         if order_type == "market" and minimum * chart <= ask - bid: minimum += 1
@@ -30406,7 +30412,8 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
                 if risk_cap < maximum: maximum = risk_cap; sources = ["Exported AUD minimum-lot/tick-value risk-band cap"]
         result.update(minimum_ticks=ceil(Fraction(minimum, step))*step, maximum_ticks=maximum//step*step,
                       first_valid_tick=ceil(Fraction(minimum, step))*step, maximum_source="; ".join(sources),
-                      reason="MT5 spread + stops/freeze and strict side/grid checks; LTT automatic cushion adds no stop floor; Trader fits rounded-lot/commission headroom.",
+                      reason=("MT5 placement stops measured from the pending entry." if order_type == "limit" else
+                              "MT5 spread + stops/freeze and strict side/grid checks; LTT automatic cushion adds no stop floor; Trader fits rounded-lot/commission headroom."),
                       broker_minimum_ticks=ceil(broker_floor/chart), broker_minimum_state="ready", state="ready")
         if entry <= 0 or (entry / point).denominator != 1 or (entry / trade).denominator != 1:
             result.update(state="blocked", reason="Entry price is not on both MT5 point and trade tick grids.")
@@ -30414,7 +30421,10 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
             gap = ask-entry if side == "buy" else entry-bid
             valid = gap > 0 and gap >= required
             result["limit_entry_state"] = "valid" if valid else "invalid"
-            if not valid: result.update(state="blocked", reason="Limit entry must be on the valid side and outside the quote stops/freeze distance; SL distance is measured from that entry.")
+            if not valid:
+                reference = "Ask" if side == "buy" else "Bid"
+                result.update(state="blocked", reason=f"Limit entry gap to {reference}: {float(gap / point):g} points; "
+                              f"must be positive and at least {required_points} points.")
         if result["maximum_ticks"] < result["minimum_ticks"]:
             result.update(state="blocked", reason="No stop fits the proven minimum and upper bounds for this context.")
         return result
@@ -33128,7 +33138,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     if (_F(target_distance)/_F(grid)).denominator != 1 or (_F(tp)/_F(grid)).denominator != 1:
                         pepperstone_target_limitation = "Requested Standard FX target is not on the broker price grid."
                     metadata = pepperstone_point_snapshot["distance_metadata"]
-                    minimum = max(Decimal(str(metadata["stops_level"])), Decimal(str(metadata["freeze_level"]))) * point
+                    minimum = _pepperstone_placement_level(metadata, order_type) * point
                     if tp <= 0 or (tp <= entry if side == "buy" else tp >= entry) or target_distance < minimum:
                         pepperstone_target_limitation = "Requested nominal Net R target violates the broker price/stop constraints."
                 reward_home = ((abs(tp - entry) - (Decimal("0") if is_pepperstone else spread_quote)) * gain_factor - commission_per_unit_aud) * units

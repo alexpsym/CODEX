@@ -284,7 +284,7 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert 'while(!portableAutoFit && riskWorst > riskMax' in sizing
     assert 'CalcBufferedRiskForVolume' in sizing and 'candidateRisk <= riskMax' in sizing
     assert 'MathLog10(step)' not in sizing
-    assert '#property version   "2.56"' in trader and 'EA_VERSION = "2.56"' in trader
+    assert '#property version   "2.57"' in trader and 'EA_VERSION = "2.57"' in trader
 
     auto=trader.split('bool ComputeAutoTP_NetRR(',1)[1].split('bool IsLimitPriceValid(',1)[0]
     standard=auto.split('if(standardFx)',1)[1].split('double commissionRT =',1)[0]
@@ -302,7 +302,7 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert 'AutoTPAUDCents(nominalAllInRisk,rBaseCents,why)' in auto and 'rBaseCents*rrNumerator+rrDenominator/2' in auto
     assert 'requiredNetProfit + commissionRT' in auto
     assert 'if(AutoTP_SafetyPoints != 0)' in auto and 'pts += AutoTP_SafetyPoints' not in auto
-    assert '!portableMarketFX && netAtTPCents!=requiredNetCents' in auto and 'effNetRR=netAtTP/rBase' in auto
+    assert '!portableValuation && netAtTPCents!=requiredNetCents' in auto and 'effNetRR=netAtTP/rBase' in auto
     assert 'PriceLevelIsOnTradeGrid' in auto and 'BrokerMinimumDistancePoints' in auto
     assert 'OrderCalcProfit' in auto and 'Final normalized TP cannot satisfy the nominal Net R cash target on broker grids.' in auto
     from decimal import Decimal as D, ROUND_HALF_UP

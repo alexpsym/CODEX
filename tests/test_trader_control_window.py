@@ -194,7 +194,7 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
         launch = _function(trader, "bool LaunchDesktopTraderControls")
         owner = _function(trader, "string TraderControlOwnerId")
         executable = _function(trader, "string TraderControlLaunchExecutable")
-        assert '#property version   "2.56"' in trader and 'EA_VERSION = "2.56"' in trader
+        assert '#property version   "2.57"' in trader and 'EA_VERSION = "2.57"' in trader
         assert 'const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;' in trader
         assert '" --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId)' in launch
         assert "TRADER_CONTROL_SW_SHOWMINNOACTIVE" in launch
@@ -478,7 +478,7 @@ def test_controls_close_only_when_verified_owning_terminal_exits(
     process_identity = _function(trader, "bool TraderControlTerminalProcessIdentity")
     launch = _function(trader, "bool LaunchDesktopTraderControls")
     status = _function(trader, "bool WriteDesktopTraderStatus")
-    assert '#property version   "2.56"' in trader and 'EA_VERSION = "2.56"' in trader
+    assert '#property version   "2.57"' in trader and 'EA_VERSION = "2.57"' in trader
     assert "GetCurrentProcessId()" in process_identity
     assert "GetCurrentProcess()" in process_identity
     assert "GetProcessTimes(processHandle" in process_identity

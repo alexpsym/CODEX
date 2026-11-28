@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.56"
+#property version   "2.57"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -180,7 +180,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.56";
+string EA_VERSION = "2.57";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -344,11 +344,13 @@ bool PriceLevelIsOnTradeGrid(double price, string &why)
    return true;
 }
 
-bool BrokerMinimumDistancePoints(long &points, string &why)
+bool BrokerMinimumDistancePoints(long &points, string &why, bool initialLimit=false)
 {
    long stops=0, freeze=0;
-   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stops) ||
-      !SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL, freeze) || stops<0 || freeze<0)
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stops) || stops<0)
+   { why="Broker stops level unavailable."; return false; }
+   if(initialLimit) { points=stops; return true; }
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL, freeze) || freeze<0)
    { why="Broker stops/freeze metadata unavailable."; return false; }
    points=(stops>freeze ? stops : freeze);
    return true;
@@ -360,7 +362,7 @@ bool BrokerDistanceAtLeast(const double distance, const long points)
    return _Point>0.0 && NormalizeDouble(distance/_Point, 8)>=(double)points;
 }
 
-bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
+bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why, bool initialLimit=false)
 {
    double slDist = 0.0;
    if(UsePriceDistanceInputs)
@@ -385,14 +387,14 @@ bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
    }
 
    long requiredPoints=0;
-   if(!BrokerMinimumDistancePoints(requiredPoints, why)) return false;
+   if(!BrokerMinimumDistancePoints(requiredPoints, why, initialLimit)) return false;
    double pointUnits=0.0;
    if(!PriceLevelIsOnTradeGrid(entry, why) || !PriceLevelIsOnTradeGrid(slOut, why) ||
       !DistanceUnitsAreWhole(slDist, _Point, pointUnits) || pointUnits>2147483647.0 ||
       !(isBuy ? slOut<entry : slOut>entry))
    { why="SL distance/side is invalid on broker point and trade grids."; return false; }
    if(!BrokerDistanceAtLeast(MathAbs(entry-slOut), requiredPoints))
-   { why = "SL too close to entry for broker stops/freeze distance."; return false; }
+   { why = "SL distance "+DoubleToString(MathAbs(entry-slOut)/_Point,2)+" points; minimum "+IntegerToString(requiredPoints)+" points."; return false; }
 
    why = "";
    return true;
@@ -532,7 +534,7 @@ bool ResolveStandardFXPreset(bool &standardFx,string &why)
 }
 
 bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD, double riskBufferedAUD,
-                         double &tpOut, int &tpPointsOut, double &effNetRR, string &why, bool market=false)
+                         double &tpOut, int &tpPointsOut, double &effNetRR, string &why, bool market=false, bool initialLimit=false)
 {
    if(vol <= 0){ why="Invalid volume for AutoTP."; return false; }
    if(NetRR_Target <= 0){ why="NetRR_Target must be > 0."; return false; }
@@ -560,7 +562,7 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
       double tolerance=MathMax(_Point,SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE))*1e-7;
       long minimum=0;
       if(!PriceLevelIsOnTradeGrid(entry,why) || !PriceLevelIsOnTradeGrid(tp,why) ||
-         !BrokerMinimumDistancePoints(minimum,why)) return false;
+         !BrokerMinimumDistancePoints(minimum,why,initialLimit)) return false;
       if((isBuy ? tp<=entry : tp>=entry) || MathAbs(MathAbs(tp-entry)-distance)>tolerance ||
          !BrokerDistanceAtLeast(MathAbs(tp-entry),minimum))
       { why="Standard FX TP violates price direction, distance or broker stops/freeze rules."; return false; }
@@ -595,8 +597,9 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    { why="Automatic TP padding is not supported for nominal Net R."; return false; }
    ENUM_ORDER_TYPE ot = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    // A full stop-sized favourable move avoids magnifying cent rounding on one point.
-   bool portableMarketFX = market && UsePriceDistanceInputs && IsPortableFXDistanceSymbol();
-   double sampleDistance = portableMarketFX ? SL_PriceDistance : _Point;
+   bool portableValuation = (market || (initialLimit && CommissionPerLotPerSide>0.0)) &&
+                            UsePriceDistanceInputs && IsPortableFXDistanceSymbol();
+   double sampleDistance = portableValuation ? SL_PriceDistance : _Point;
    double testPrice = NormalizePrice(isBuy ? entry+sampleDistance : entry-sampleDistance);
    double sampleProfit = 0.0;
    if(testPrice<=0.0 || !OrderCalcProfit(ot,_Symbol,vol,entry,testPrice,sampleProfit) ||
@@ -621,7 +624,7 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    double tp=NormalizePrice(MathRound(rawTP/grid)*grid);
    double points=0.0;
    long stopsLevel=0;
-   if(!PriceLevelIsOnTradeGrid(tp, why) || !BrokerMinimumDistancePoints(stopsLevel, why)) return false;
+   if(!PriceLevelIsOnTradeGrid(tp, why) || !BrokerMinimumDistancePoints(stopsLevel, why, initialLimit)) return false;
    if((isBuy ? tp<=entry : tp>=entry) || !BrokerDistanceAtLeast(MathAbs(tp-entry), stopsLevel) ||
       !DistanceUnitsAreWhole(MathAbs(tp-entry), _Point, points) || points>2147483647.0)
    { why="Requested nominal Net R target violates broker price/stop constraints."; return false; }
@@ -632,12 +635,12 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    double netAtTP=grossAtTP-commissionRT;
    long netAtTPCents=0;
    if(!AutoTPAUDCents(netAtTP,netAtTPCents,why)) return false;
-   if(!portableMarketFX && netAtTPCents!=requiredNetCents)
+   if(!portableValuation && netAtTPCents!=requiredNetCents)
    { why="Final normalized TP cannot satisfy the nominal Net R cash target on broker grids."; return false; }
    if(netAtTPCents<=0)
    { why="TP net estimate after commission is "+DoubleToString(netAtTP,2)+" AUD."; return false; }
    effNetRR=netAtTP/rBase;
-   if(portableMarketFX)
+   if(portableValuation)
       Print(EA_COMMENT,": TP ",DoubleToString(tp,_Digits)," estimated net AUD ",DoubleToString(netAtTP,2),
             ", requested AUD ",DoubleToString(requiredNetProfit,2),", commission AUD ",DoubleToString(commissionRT,2));
 
@@ -647,21 +650,21 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    return true;
 }
 
-bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
+bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why, bool initialLimit=false)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0 || bid <= 0){ why="Bid/Ask not available."; return false; }
 
    long minDistancePoints=0;
-   if(!BrokerMinimumDistancePoints(minDistancePoints, why) || !PriceLevelIsOnTradeGrid(entry, why)) return false;
+   if(!BrokerMinimumDistancePoints(minDistancePoints, why, initialLimit) || !PriceLevelIsOnTradeGrid(entry, why)) return false;
 
    if(isBuyLimit)
    {
       if(!(entry < ask)){ why="Buy Limit entry is not below current Ask."; return false; }
       if(minDistancePoints > 0 && !BrokerDistanceAtLeast(ask-entry, minDistancePoints))
       {
-         why = "Buy Limit entry is too close to current Ask for broker stops/freeze distance.";
+         why = "Buy Limit entry is too close to current Ask: "+DoubleToString((ask-entry)/_Point,2)+" points; minimum "+IntegerToString(minDistancePoints)+".";
          return false;
       }
    }
@@ -670,7 +673,7 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
       if(!(entry > bid)){ why="Sell Limit entry is not above current Bid."; return false; }
       if(minDistancePoints > 0 && !BrokerDistanceAtLeast(entry-bid, minDistancePoints))
       {
-         why = "Sell Limit entry is too close to current Bid for broker stops/freeze distance.";
+         why = "Sell Limit entry is too close to current Bid: "+DoubleToString((entry-bid)/_Point,2)+" points; minimum "+IntegerToString(minDistancePoints)+".";
          return false;
       }
    }
@@ -2268,7 +2271,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       return false;
    }
 
-   if(!IsLimitPriceValid(entry, isBuyLimit, why))
+   if(!IsLimitPriceValid(entry, isBuyLimit, why, !allowReplace))
    {
       g_lastPendingFailureStructural = (why != "Bid/Ask not available.");
       Print(EA_COMMENT, ": Wrong-side/too-close limit price. ", why,
@@ -2276,7 +2279,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       return false;
    }
 
-   if(!BuildSLFromDistance(entry, isBuyLimit, sl, why))
+   if(!BuildSLFromDistance(entry, isBuyLimit, sl, why, !allowReplace))
    {
       g_lastPendingFailureStructural = true;
       Print(EA_COMMENT, ": Failed to build SL. ", why);
@@ -2300,7 +2303,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    double effNetRR=0.0;
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, riskBuffered, tp, autoTpPts, effNetRR, why))
+      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, riskBuffered, tp, autoTpPts, effNetRR, why, false, !allowReplace))
       {
          g_lastPendingFailureStructural = true;
          Print(EA_COMMENT, ": Failed to build AutoTP. ", why);
