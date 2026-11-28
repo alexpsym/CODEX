@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.57"
+#property version   "2.58"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -71,6 +71,7 @@ input group "Trendline strategy (Trendline Limit)"
 enum TL_Direction { TL_BUY_LIMIT=0, TL_SELL_LIMIT=1 };
 input TL_Direction Direction           = TL_BUY_LIMIT;
 input string       TrendlineObjectName = "";     // Named trendline to trade; the object remains unchanged after a cycle.
+input bool         RequireNamedTrendline = false; // Calculator preset: never substitute a selected object.
 input long         TrendlineArmGeneration = 0;    // Set a new positive integer to arm/re-arm this unchanged named trendline once.
 input int          PendingCancelAfterMinutes  = 60;
 
@@ -180,7 +181,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.57";
+string EA_VERSION = "2.58";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -1395,6 +1396,13 @@ bool PlaceMarketEmaBounce()
 
 bool PlacePendingTrendlineGeneration(const long generation)
 {
+   if(UsePriceDistanceInputs && RequireNamedTrendline && !TrendlineExists(g_trendName))
+   {
+      g_lastPendingBrokerAttempted = false;
+      g_lastPendingAcceptanceMismatch = false;
+      Print(EA_COMMENT, ": Named trendline became unavailable before placement: ", g_trendName);
+      return false;
+   }
    bool isBuyLimit = (Direction == TL_BUY_LIMIT);
    datetime barTime = iTime(_Symbol, _Period, 0);
    double entry = GetTrendlinePriceAtTime(g_trendName, barTime);
@@ -3306,6 +3314,27 @@ bool IsValidDesktopTrendline(const string name)
 
 bool ResolveDesktopTrendline(string &name, string &why)
 {
+   if(UsePriceDistanceInputs && RequireNamedTrendline)
+   {
+      if(TrendlineObjectName == "")
+      { why = "This preset requires the exact MT5 trendline object name."; return false; }
+      int count = ObjectsTotal(0, -1, -1);
+      for(int i = 0; i < count; i++)
+      {
+         string candidate = ObjectName(0, i, -1, -1);
+         if(candidate != TrendlineObjectName) continue;
+         if(!TrendlineExists(candidate))
+         { why = "Named object is not an MT5 trendline: " + candidate; return false; }
+         if(!IsValidDesktopTrendline(candidate))
+         { why = "Named trendline has no usable price at the current chart bar: " + candidate; return false; }
+         name = candidate;
+         why = "";
+         return true;
+      }
+      why = "Named trendline is missing or was renamed: " + TrendlineObjectName;
+      return false;
+   }
+
    int total = ObjectsTotal(0, -1, OBJ_TREND);
    int selectedCount = 0;
    string selected = "";
@@ -3732,6 +3761,23 @@ void MaybeExportPepperstoneSpreads(const bool force=false)
    }
 }
 
+int InitializeEmaBounce()
+{
+   if(!ValidateEmaBouncePeriods()) return INIT_PARAMETERS_INCORRECT;
+   if(UseDualEMA)
+   {
+      hFast = iMA(_Symbol, _Period, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      hSlow = iMA(_Symbol, _Period, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE) return INIT_FAILED;
+   }
+   else
+   {
+      hTrend = iMA(_Symbol, _Period, TrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(hTrend == INVALID_HANDLE) return INIT_FAILED;
+   }
+   return INIT_SUCCEEDED;
+}
+
 int OnInit()
 {
    trade.SetDeviationInPoints(SlippagePoints);
@@ -3773,18 +3819,8 @@ int OnInit()
    // Desktop mode exposes EMA Bounce regardless of the legacy Strategy selector.
    if(UseDesktopTraderControls || Strategy == STRAT_EMA_BOUNCE)
    {
-      if(!ValidateEmaBouncePeriods()) return INIT_PARAMETERS_INCORRECT;
-      if(UseDualEMA)
-      {
-         hFast = iMA(_Symbol, _Period, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-         hSlow = iMA(_Symbol, _Period, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-         if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE) return INIT_FAILED;
-      }
-      else
-      {
-         hTrend = iMA(_Symbol, _Period, TrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-         if(hTrend == INVALID_HANDLE) return INIT_FAILED;
-      }
+      int emaStatus = InitializeEmaBounce();
+      if(emaStatus != INIT_SUCCEEDED) return emaStatus;
    }
 
    if(UseDesktopTraderControls)

@@ -29876,8 +29876,11 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr><th>Account</th><td><div class="group toggle" id="account-toggle"><button type="button" data-v="live" class="active">Live</button><button type="button" data-v="demo">Demo</button></div></td></tr>
               <tr><th>Asset</th><td><div class="group toggle" id="asset-toggle"><button type="button" data-v="crypto" class="active">Crypto</button><button type="button" data-v="fx">FX</button></div></td></tr>
               <tr id="broker-toggle-wrap" style="display:none"><th>Broker</th><td><div class="group toggle" id="broker-toggle"><button type="button" data-v="oanda" class="active">OANDA</button><button type="button" data-v="pepperstone">Pepperstone</button></div><span id="pepperstone-account-type-wrap" style="display:none"> <span>Account type</span> <span class="group toggle" id="pepperstone-account-type-toggle" role="group" aria-label="Pepperstone account type"><button type="button" data-v="razor" class="active">Razor</button><button type="button" data-v="standard">Standard</button></span></span></td></tr>
-              <tr><th>Side</th><td><div class="group toggle" id="side-toggle"><button type="button" data-v="buy" class="active">Buy</button><button type="button" data-v="sell">Sell</button></div></td></tr>
-              <tr><th>Order type</th><td><div class="group toggle" id="order-toggle"><button type="button" data-v="market" class="active">Market</button><button type="button" data-v="limit">Limit</button></div></td></tr>
+              <tr><th id="calc-side-heading">Side</th><td><div class="group toggle" id="side-toggle"><button type="button" data-v="buy" class="active">Buy</button><button type="button" data-v="sell">Sell</button></div></td></tr>
+              <tr id="pepperstone-strategy-wrap" style="display:none"><th><label for="calc-pepperstone-strategy">Strategy</label></th><td><select id="calc-pepperstone-strategy"><option value="none">None</option><option value="trendline">Trendline</option><option value="ema_bounce">EMA Bounce</option></select></td></tr>
+              <tr id="pepperstone-trendline-wrap" style="display:none"><th><label for="calc-pepperstone-trendline-name">MT5 chart object name</label></th><td><input id="calc-pepperstone-trendline-name" maxlength="63" type="text"/></td></tr>
+              <tr id="pepperstone-ema-wrap" style="display:none"><th><label for="calc-pepperstone-ema-period">EMA period</label></th><td><input id="calc-pepperstone-ema-period" type="number" min="1" step="1" value="20"/><div class="muted">Trader determines order direction from the last closed candle relative to this EMA.</div></td></tr>
+              <tr id="calc-order-type-wrap"><th>Order type</th><td><div class="group toggle" id="order-toggle"><button type="button" data-v="market" class="active">Market</button><button type="button" data-v="limit">Limit</button></div></td></tr>
               <tr><th><label for="calc-symbol">Symbol</label></th><td><input id="calc-symbol" placeholder="BTC or EUR_USD"/><div class="muted" id="calc-canonical-symbol"></div></td></tr>
               <tr id="limit-wrap" style="display:none"><th><label for="calc-limit">Limit entry</label></th><td><input id="calc-limit" type="number" step="any"/></td></tr>
             </tbody>
@@ -30062,6 +30065,10 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "UseDesktopTraderControls",
     "TrendlineObjectName",
     "TrendlineArmGeneration",
+    "RequireNamedTrendline",
+    "Direction",
+    "UseDualEMA",
+    "TrendEMAPeriod",
     "RiskAUD_Target",
     "RiskAUD_Min",
     "RiskAUD_Max",
@@ -30334,7 +30341,7 @@ def _pepperstone_razor_estimate(snapshot, *, symbol, account, pip_location, plan
 def _pepperstone_placement_level(metadata, order_type):
     stops = metadata["stops_level"]
     # Freeze restricts later modifications of a working pending order.
-    return stops if order_type == "limit" else max(stops, metadata["freeze_level"])
+    return max(stops, metadata["freeze_level"]) if order_type == "market" else stops
 
 
 def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", order_type="market",
@@ -30389,19 +30396,19 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
         stamp = _pepperstone_parse_snapshot_time(item["quote_timestamp"], "quote")
         bid, ask = number(item.get("bid")), number(item.get("ask"))
         if bid <= 0 or ask < bid: raise ValueError("Valid Bid/Ask required")
-        if side not in {"buy", "sell"} or order_type not in {"market", "limit"}: raise ValueError("Invalid order context")
+        if side not in {"buy", "sell"} or order_type not in {"market", "limit", "chart_entry"}: raise ValueError("Invalid order context")
         entry = number(entry_price) if order_type == "limit" else ask if side == "buy" else bid
         step = lcm((chart / point).denominator, (chart / trade).denominator)
         result.update(step_ticks=step, valid_for_seconds=max(0, 60-age), quote_timestamp=stamp,
                       source=snap["source_path"], exported_account_mode=snap["exported_account_mode"], limit_entry_state="not_applicable")
         required_points = _pepperstone_placement_level(item, order_type)
         required = required_points * point
-        broker_floor = required if order_type == "limit" else ask - bid + required
+        broker_floor = ask - bid + required if order_type == "market" else required
         minimum = max(1, ceil(broker_floor / chart))
         if order_type == "market" and minimum * chart <= ask - bid: minimum += 1
         maximum = int(Fraction(_MQL_INT_MAX) * point / chart)
         sources = ["Trader representable MT5 point distance"]
-        if side == "buy":
+        if side == "buy" and order_type != "chart_entry":
             price_maximum = ceil(entry / chart)-1
             if price_maximum < maximum: maximum = price_maximum; sources = ["Strict positive SL price"]
         if risk_mode == "fixed_aud" and snap.get("exported_account_currency") == "AUD":
@@ -30412,10 +30419,10 @@ def _pepperstone_stop_guidance(*, symbol, account, chart_tick_size, side="buy", 
                 if risk_cap < maximum: maximum = risk_cap; sources = ["Exported AUD minimum-lot/tick-value risk-band cap"]
         result.update(minimum_ticks=ceil(Fraction(minimum, step))*step, maximum_ticks=maximum//step*step,
                       first_valid_tick=ceil(Fraction(minimum, step))*step, maximum_source="; ".join(sources),
-                      reason=("MT5 placement stops measured from the pending entry." if order_type == "limit" else
+                      reason=("MT5 placement stops measured from the pending entry." if order_type != "market" else
                               "MT5 spread + stops/freeze and strict side/grid checks; LTT automatic cushion adds no stop floor; Trader fits rounded-lot/commission headroom."),
                       broker_minimum_ticks=ceil(broker_floor/chart), broker_minimum_state="ready", state="ready")
-        if entry <= 0 or (entry / point).denominator != 1 or (entry / trade).denominator != 1:
+        if order_type != "chart_entry" and (entry <= 0 or (entry / point).denominator != 1 or (entry / trade).denominator != 1):
             result.update(state="blocked", reason="Entry price is not on both MT5 point and trade tick grids.")
         if order_type == "limit":
             gap = ask-entry if side == "buy" else entry-bid
@@ -30733,6 +30740,25 @@ def _pepperstone_commission_rate(value=None) -> Decimal:
         raise HTTPException(status_code=400, detail="Pepperstone commission must be finite nonnegative AUD per lot per side.") from exc
 
 
+def _pepperstone_strategy_inputs(payload: Dict[str, object]) -> Dict[str, object]:
+    strategy = payload.get("pepperstone_strategy", "none")
+    if not isinstance(strategy, str) or strategy not in ("none", "trendline", "ema_bounce"):
+        raise HTTPException(status_code=400, detail="Pepperstone strategy must be None, Trendline or EMA Bounce.")
+    inputs = {"pepperstone_strategy": strategy}
+    if strategy == "trendline":
+        name = payload.get("pepperstone_trendline_name")
+        if (not isinstance(name, str) or not name.strip() or len(name) > 63
+                or name.splitlines() != [name] or "\x00" in name):
+            raise HTTPException(status_code=400, detail="Enter the exact MT5 object name (1-63 characters, on one line).")
+        inputs["pepperstone_trendline_name"] = name
+    elif strategy == "ema_bounce":
+        period = _dec(payload.get("pepperstone_ema_period"), "EMA period")
+        if not period.is_finite() or not 1 <= period <= _MQL_INT_MAX or period != period.to_integral_value():
+            raise HTTPException(status_code=400, detail="EMA period must be a positive whole number in the MT5 integer range.")
+        inputs["pepperstone_ema_period"] = int(period)
+    return inputs
+
+
 def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]:
     asset = str(payload.get("asset") or "").strip().lower()
     broker = str(payload.get("broker") or "").strip().lower()
@@ -30746,6 +30772,10 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     account_type = _pepperstone_account_type(payload)
     if account_type != _pepperstone_account_type(quote_snapshot):
         raise HTTPException(status_code=409, detail="Pepperstone account type changed. Recalculate before downloading.")
+    strategy_inputs = _pepperstone_strategy_inputs(payload)
+    if strategy_inputs != _pepperstone_strategy_inputs(quote_snapshot):
+        raise HTTPException(status_code=409, detail="Pepperstone strategy inputs changed. Recalculate before downloading.")
+    strategy = strategy_inputs["pepperstone_strategy"]
     commission_rate = _pepperstone_commission_rate(quote_snapshot.get("commission_per_lot_per_side_aud", "3.50"))
     if account_type == "standard":
         commission_rate = Decimal("0")
@@ -30860,11 +30890,12 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
     risk_min, risk_target, risk_max = _pepperstone_risk_band(risk_target)
     values = {
-        "Strategy": "2" if order_type == "limit" else "3",
+        "Strategy": {"trendline": "0", "ema_bounce": "1", "none": "2" if order_type == "limit" else "3"}[strategy],
         "OrdersEnabled": _pepperstone_trader_set_bool(True),
         "UseDesktopTraderControls": _pepperstone_trader_set_bool(True),
         "TrendlineObjectName": "",
         "TrendlineArmGeneration": "0",
+        "RequireNamedTrendline": _pepperstone_trader_set_bool(strategy == "trendline"),
         "RiskAUD_Target": _pepperstone_set_decimal(risk_target),
         "RiskAUD_Min": _pepperstone_set_decimal(risk_min),
         "RiskAUD_Max": _pepperstone_set_decimal(risk_max, places="0.01"),
@@ -30887,7 +30918,12 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     }
     if target_mode == "rr":
         values["NetRR_Target"] = _pepperstone_set_decimal(rr or Decimal("0"))
-    if order_type == "limit":
+    if strategy == "trendline":
+        values.update(TrendlineObjectName=strategy_inputs["pepperstone_trendline_name"],
+                      Direction="0" if side == "buy" else "1")
+    elif strategy == "ema_bounce":
+        values.update(UseDualEMA="false", TrendEMAPeriod=str(strategy_inputs["pepperstone_ema_period"]))
+    elif order_type == "limit":
         values.update(
             {
                 "StandardLimitSide": "0" if side == "buy" else "1",
@@ -30909,7 +30945,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     symbol = str(payload.get("symbol") or "FX").strip().upper().replace("/", "_")
     symbol = re.sub(r"[^A-Z0-9_]+", "_", symbol).strip("_") or "FX"
     side_label = "BUY" if side == "buy" else "SELL"
-    order_label = "LIMIT" if order_type == "limit" else "MARKET"
+    order_label = strategy.upper() if strategy != "none" else order_type.upper()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"Pepperstone_Trader_{symbol}_{side_label}_{order_label}_{stamp}.set"
     return content, filename
@@ -32336,6 +32372,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
         elif asset == "crypto":
             broker = "bybit"
 
+        strategy_inputs = _pepperstone_strategy_inputs(payload) if asset == "fx" and broker == "pepperstone" else {}
+        chart_entry = strategy_inputs.get("pepperstone_strategy", "none") != "none"
+        if chart_entry:
+            # Trader reads the executable entry from the attached chart on the explicit click.
+            order_type = "market"
         stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
         if asset == "fx" and broker == "pepperstone":
             stop_ticks = Decimal(_pepperstone_positive_tick_count(payload.get("stop_loss_ticks"), "stop_loss_ticks"))
@@ -33176,7 +33217,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     if (_F(target_distance)/_F(grid)).denominator != 1 or (_F(tp)/_F(grid)).denominator != 1:
                         pepperstone_target_limitation = "Requested Standard FX target is not on the broker price grid."
                     metadata = pepperstone_point_snapshot["distance_metadata"]
-                    minimum = _pepperstone_placement_level(metadata, order_type) * point
+                    minimum = _pepperstone_placement_level(metadata, "limit" if chart_entry else order_type) * point
                     if tp <= 0 or (tp <= entry if side == "buy" else tp >= entry) or target_distance < minimum:
                         pepperstone_target_limitation = "Requested nominal Net R target violates the broker price/stop constraints."
                 reward_home = ((abs(tp - entry) - (Decimal("0") if is_pepperstone else spread_quote)) * gain_factor - commission_per_unit_aud) * units
@@ -33303,9 +33344,10 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             if broker == "pepperstone":
                 response_payload["pepperstone_stop_guidance"] = _pepperstone_stop_guidance(
                     symbol=symbol, account=account, chart_tick_size=pepperstone_chart_tick_size, side=side,
-                    order_type=order_type, entry_price=payload.get("entry_price"), risk_mode=risk_mode,
+                    order_type="chart_entry" if chart_entry else order_type, entry_price=payload.get("entry_price"), risk_mode=risk_mode,
                     risk_value=risk_val, account_type=account_type, snapshot=pepperstone_point_snapshot, snapshot_diagnostics=pepperstone_snapshot_diagnostics, estimate_status=estimate_status)
                 response_payload.update({
+                    **strategy_inputs,
                     "pepperstone_account_type": account_type,
                     "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),
                     "commission_currency": "AUD",
@@ -33405,6 +33447,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     response_payload["market_data_source"] = "Estimated Razor from Standard; " + response_payload["market_data_source"]
                 if source["planning"] and response_payload["pepperstone_mt5_export_status"].get("file_ready"):
                     response_payload["pepperstone_mt5_export_status"].update(broker_check_state="pending", reason="Planning preset; a current broker quote is required for explicit execution.")
+            if chart_entry:
+                reference = "the named trendline" if strategy_inputs["pepperstone_strategy"] == "trendline" else "the selected EMA"
+                response_payload["position_size_estimate_note"] = (
+                    f"Market-reference estimate. Trader uses {reference} on the attached MT5 chart for the actual pending entry."
+                )
             if pepperstone_target_limitation:
                 response_payload["pepperstone_mt5_export_status"].update(ready=False, file_ready=False, broker_check_state="incompatible", code="PEPPERSTONE_NOMINAL_R_UNREPRESENTABLE", reason=pepperstone_target_limitation)
             calculation_context_id = (
@@ -33415,6 +33462,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             response_payload["quote_created_at_ms"] = int(time.time() * 1000)
             if is_pepperstone:
                 quote_snapshot = {
+                        **strategy_inputs,
                         "pepperstone_account_type": account_type,
                         "commission_per_lot_per_side_aud": _fmt_dec(commission_rate),
                         "commission_currency": "AUD",
@@ -33508,7 +33556,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                             "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
                             "venue": "Pepperstone",
                             "execution_status": "Awaiting MT5 fill price" if order_type == "market" else "Pending limit; execution unverified",
-                        } if is_pepperstone and (
+                        } if is_pepperstone and not chart_entry and (
                             response_payload.get("pepperstone_mt5_export_status", {}).get("file_ready") is True
                             or response_payload.get("pepperstone_mt5_export_status", {}).get("ready") is True
                         ) else {}),

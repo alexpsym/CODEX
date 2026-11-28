@@ -55,7 +55,8 @@ def test_single_ema_mode_period_validation_version_and_execution_paths_are_prese
     selector = _function(trader, "double SelectEmaBounceReference")
     validation = _function(trader, "bool ValidateEmaBouncePeriods")
     signal = _function(trader, "bool GetEmaBounceSignal")
-    init = _function(trader, "int OnInit")
+    init = _function(trader, "int InitializeEmaBounce")
+    assert "InitializeEmaBounce()" in _function(trader, "int OnInit")
     tick = _function(trader, "void OnTick")
     placement = _function(trader, "bool PlaceMarketEmaBounce")
 
@@ -78,8 +79,8 @@ def test_single_ema_mode_period_validation_version_and_execution_paths_are_prese
     )
     assert "return INIT_PARAMETERS_INCORRECT" in init
 
-    assert '#property version   "2.37"' in trader
-    assert 'string EA_VERSION = "2.37";' in trader
+    assert '#property version   "2.58"' in trader
+    assert 'string EA_VERSION = "2.58";' in trader
     assert 'MaintainTrendlineLifecycle("OnTick")' in tick
     assert 'MaintainStandardLimit("OnTick")' in tick
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in tick

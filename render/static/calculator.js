@@ -282,7 +282,35 @@
     if (automatic) automatic.dataset.profileId = String(payload?.chart_tick_profile_id || '');
   }
 
+  const pepperstoneStrategy = () => isPepperstoneFx() ? $('calc-pepperstone-strategy')?.value || 'none' : 'none';
+  const usesChartEntry = () => pepperstoneStrategy() !== 'none';
+
+  function presetStrategyInputs() {
+    const strategy = pepperstoneStrategy();
+    const inputs = { pepperstone_strategy: strategy };
+    if (strategy === 'trendline') inputs.pepperstone_trendline_name = $('calc-pepperstone-trendline-name').value;
+    if (strategy === 'ema_bounce') inputs.pepperstone_ema_period = $('calc-pepperstone-ema-period').value;
+    return inputs;
+  }
+
+  function syncPepperstoneStrategyUi() {
+    const heading = $('calc-side-heading');
+    if (heading) heading.textContent = pepperstoneStrategy() === 'ema_bounce' ? 'Estimate side' : 'Side';
+    const visibility = {
+      'pepperstone-strategy-wrap': isPepperstoneFx(),
+      'pepperstone-trendline-wrap': pepperstoneStrategy() === 'trendline',
+      'pepperstone-ema-wrap': pepperstoneStrategy() === 'ema_bounce',
+      'calc-order-type-wrap': !usesChartEntry(),
+      'limit-wrap': !usesChartEntry() && state.order_type === 'limit',
+    };
+    for (const [id, visible] of Object.entries(visibility)) {
+      const row = $(id);
+      if (row) row.style.display = visible ? '' : 'none';
+    }
+  }
+
   function syncTargetUi() {
+    syncPepperstoneStrategyUi();
     const mode = $('calc-target-mode')?.value || 'rr';
     const rrWrap = $('rr-wrap');
     const tpTicksWrap = $('tp-ticks-wrap');
@@ -352,11 +380,11 @@
       asset: state.asset,
       account: state.account,
       side: state.side,
-      order_type: state.order_type,
+      order_type: usesChartEntry() ? 'market' : state.order_type,
       risk_mode: state.risk_mode,
       symbol: currentSymbolInput(),
       broker: state.asset === 'crypto' ? 'bybit' : state.broker,
-      entry_price: $('calc-limit').value,
+      entry_price: usesChartEntry() ? '' : $('calc-limit').value,
       stop_loss_ticks: $('calc-sl-ticks').value,
       target_mode: $('calc-target-mode')?.value || 'rr',
       risk_value: $('calc-risk').value,
@@ -364,6 +392,7 @@
     if (inputs.target_mode === 'ticks') inputs.take_profit_ticks = $('calc-tp-ticks')?.value || '';
     else inputs.risk_reward = $('calc-rr').value;
     if (isPepperstoneFx()) {
+      Object.assign(inputs, presetStrategyInputs());
       inputs.pepperstone_account_type = state.pepperstone_account_type;
       inputs.estimate_razor_from_standard = razorEstimateEnabled();
       if ($('calc-chart-tick-size-override-enabled')?.checked) {
@@ -857,7 +886,8 @@
       account: state.account,
       symbol: quote?.symbol || state.resolvedSymbol || $('calc-symbol').value,
       side: state.side,
-      order_type: state.order_type,
+      ...presetStrategyInputs(),
+      order_type: usesChartEntry() ? 'market' : state.order_type,
       stop_loss_ticks: $('calc-sl-ticks').value,
       target_mode: $('calc-target-mode')?.value || 'rr',
       chart_tick_size_override: $('calc-chart-tick-size-override-enabled')?.checked ? ($('calc-chart-tick-size')?.value || '') : '',
@@ -871,7 +901,7 @@
     };
     if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
     else payload.risk_reward = $('calc-rr').value;
-    if (state.order_type === 'limit') payload.entry_price = quote?.entry_price || $('calc-limit').value;
+    if (payload.order_type === 'limit') payload.entry_price = quote?.entry_price || $('calc-limit').value;
     return payload;
   }
 
@@ -1526,7 +1556,7 @@
         }
         syncToggleState(id, key);
         invalidateQuote({ status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
-        if (key === 'order_type') $('limit-wrap').style.display = state.order_type === 'limit' ? '' : 'none';
+        if (key === 'order_type') syncPepperstoneStrategyUi();
         if (key === 'webhook_mode' && state.webhook_mode !== 'yes') {
           toggleWebhookPanel(false);
           cleanupPendingWebhook();
@@ -1622,7 +1652,7 @@
   }
 
   let stopGuidance=null, stopGuidanceKey='', stopGuidanceReceived=0, stopRefreshTimer=null, guidanceController=null;
-  const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,razorEstimateEnabled(),state.side,state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
+  const stopContext=()=>JSON.stringify([state.asset,state.broker,state.account,currentSymbolInput(),state.pepperstone_account_type,razorEstimateEnabled(),state.side,usesChartEntry(),state.order_type,$('calc-limit')?.value,state.risk_mode,$('calc-risk')?.value,$('calc-chart-tick-size-override-enabled')?.checked,$('calc-chart-tick-size')?.value]);
   function renderStopGuidance() {
     const el=$('calc-stop-guidance');if(!el)return;
     el.style.display=isPepperstoneFx()?'':'none';if(!isPepperstoneFx())return;
@@ -1675,7 +1705,7 @@
     const timeout=guidanceOnly?setTimeout(()=>controller.abort(),5000):null;
     try {
       const requestedBroker = state.asset === 'fx' ? state.broker : 'bybit';
-      const guidanceParams=new URLSearchParams({side:state.side,order_type:state.order_type,entry_price:$('calc-limit')?.value||'',risk_mode:state.risk_mode,risk_value:$('calc-risk')?.value||'',pepperstone_account_type:state.pepperstone_account_type||'razor',estimate_razor_from_standard:String(razorEstimateEnabled()),chart_tick_size:$('calc-chart-tick-size-override-enabled')?.checked?$('calc-chart-tick-size')?.value||'':''});
+      const guidanceParams=new URLSearchParams({side:state.side,order_type:usesChartEntry()?'chart_entry':state.order_type,entry_price:$('calc-limit')?.value||'',risk_mode:state.risk_mode,risk_value:$('calc-risk')?.value||'',pepperstone_account_type:state.pepperstone_account_type||'razor',estimate_razor_from_standard:String(razorEstimateEnabled()),chart_tick_size:$('calc-chart-tick-size-override-enabled')?.checked?$('calc-chart-tick-size')?.value||'':''});
       const lookup = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}&${guidanceParams}`, { signal: controller.signal });
       if(!guidanceOnly)resolveInFlight=lookup;
       const instrument = await lookup;
@@ -1810,6 +1840,19 @@
     invalidateQuote({ clearResults: false });
     refreshStopContext();
   });
+  for (const [id, event] of [
+    ['calc-pepperstone-strategy', 'change'],
+    ['calc-pepperstone-trendline-name', 'input'],
+    ['calc-pepperstone-ema-period', 'input'],
+  ]) {
+    $(id)?.addEventListener(event, () => {
+      invalidateQuote();
+      if (id === 'calc-pepperstone-strategy') {
+        syncPepperstoneStrategyUi();
+        refreshStopContext();
+      }
+    });
+  }
   $('calc-rr')?.addEventListener('blur', () => {
     commissionPreviewActive = true;
     if (!state.quote && state.quoteStatus !== 'calculating') scheduleCommissionPreview(0);

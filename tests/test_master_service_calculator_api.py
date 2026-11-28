@@ -5923,7 +5923,7 @@ def test_pepperstone_nzdusd_limit_placement(monkeypatch, tmp_path, pepperstone_a
         _run_trader_controls_host(work, presets["standard"], limit_cases=presets, baseline=baseline)
 
 
-def _run_trader_controls_host(tmp_path, preset, market_cases=(), *, limit_cases=None, baseline=False):
+def _run_trader_controls_host(tmp_path, preset, market_cases=(), *, limit_cases=None, baseline=False, strategy_cases=None):
     import os
     import subprocess
     source=(Path(__file__).resolve().parents[1]/'mt5-clone/MQL5/Experts/Trader.mq5').read_text(encoding='utf-8')
@@ -5931,7 +5931,7 @@ def _run_trader_controls_host(tmp_path, preset, market_cases=(), *, limit_cases=
         source = subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show',
             '6665477e83cee6915d63550bcdf7bffe2bf693de:mt5-clone/MQL5/Experts/Trader.mq5'], cwd=ROOT).decode("utf-8-sig")
     def extract(name, text=source):
-        match=re.search(r'\b(?:bool|void|double|string)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',text)
+        match=re.search(r'\b(?:bool|void|double|string|int)\s+'+re.escape(name)+r'\s*\([^;{]*\)\s*\{',text)
         assert match,name
         # Mask strings/comments for brace accounting, preserving source positions.
         masked=re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',lambda m:' '*len(m.group()),text)
@@ -5945,6 +5945,11 @@ def _run_trader_controls_host(tmp_path, preset, market_cases=(), *, limit_cases=
         'IsLimitPriceValid','CalcBufferedRiskForVolume','ComputeVolumeFromRisk','ValidateVolumeForBroker',
         'PlaceOrReplacePendingLimitAtEntry','ConsumeDesktopTraderCommand','SetDesktopResult','ExecuteDesktopPendingAtEntry',
         'ExecuteDesktopLimit','ValidateMarketStopsAtLiveQuote','ExecuteDesktopMarket','HandleDesktopTraderCommand']
+    if strategy_cases:
+        names.extend(["TrendlineExists", "GetTrendlinePriceAtTime", "IsValidDesktopTrendline",
+                      "ResolveDesktopTrendline", "SaveDesktopActiveTrendline", "ExecuteDesktopTrendline",
+                      "PlacePendingTrendlineGeneration", "SelectEmaBounceReference", "ValidateEmaBouncePeriods",
+                      "InitializeEmaBounce", "PricesMateriallyDiffer", "ExecuteDesktopEmaBounce"])
     functions=[extract(name) for name in names]
     historical=subprocess.check_output([r'C:\Program Files\Git\cmd\git.exe','show','5ffe30f0673d651bddc7164172af534afc4cf075:mt5-clone/MQL5/Experts/Trader.mq5'],cwd=Path(__file__).resolve().parents[1]).decode('utf-8-sig')
     legacy=extract('ComputeAutoTP_NetRR',historical).replace('bool ComputeAutoTP_NetRR(', 'bool LegacyComputeAutoTP_NetRR(',1)
@@ -6037,8 +6042,8 @@ void FindMatchingPendingLimit(bool,double,string,uint64_t&t){t=requests.empty()?
 bool AcquireDesktopCommandGate(int &gate,string&){gate=1;return true;}void FileClose(int){}
 string TraderControlConsumedFile(string id){return "offline/"+id;}bool FileIsExist(string path,int){return markers.count(path)>0;}
 bool WriteVerifiedCommonText(string path,string,string&why){if(!persistence){why="offline persistence failure";return false;}markers.insert(path);return true;}
-bool ReadDesktopTraderCommand(DesktopTraderCommand &out,string&){out=incoming;return true;}
-bool IsDesktopCommandIdValid(string id){return !id.empty();}bool IsDesktopActionAllowed(string action){return action=="limit"||action=="market";}
+bool ReadDesktopTraderCommand(DesktopTraderCommand &out,string&){out=incoming;return !out.commandId.empty();}
+bool IsDesktopCommandIdValid(string id){return !id.empty();}bool IsDesktopActionAllowed(string action){return action=="limit"||action=="market"||action=="trendline"||action=="ema_bounce";}
 bool WriteDesktopTraderResult(const DesktopTraderResult &r){lastResult=r;return true;}
 string ShortStableFingerprint(string s){return s;}
 
@@ -6050,6 +6055,9 @@ void ExecuteDesktopEmaBounce(DesktopTraderResult&){throw std::runtime_error("wro
     booleans=['IncludeCommissionInRisk','AutoFitRiskSlippageBuffer','UsePriceDistanceInputs','AutoTP_NetRR_Enabled','OrdersEnabled','UseDesktopTraderControls']
     config='\n'.join('double '+k+'='+preset.get(k,'0')+';' for k in numeric)+'\n'
     config+='\n'.join('bool '+k+'='+preset[k]+';' for k in booleans)+'\nstring DistanceSymbol='+json.dumps(preset['DistanceSymbol'])+';\nstring PresetAccountType='+json.dumps(preset['PresetAccountType'])+';\n'
+    if strategy_cases:
+        header = header[:header.index("void ExecuteDesktopTrendline(DesktopTraderResult&)")]
+        header += _TRADER_STRATEGY_HOST_DOUBLES
     definitions=[];prototypes=['bool ComputeAutoTP_NetRR(double,bool,double,double,double,double&,int&,double&,string&,bool market=false);']
     for function in functions:
         function=adapt(function);at=function.index('{');signature=function[:at].strip();prototypes.append(signature+';')
@@ -6100,6 +6108,8 @@ int main(){try{
         wrapper = wrapper.replace("bool market){", "bool market,bool initialLimit){").replace("why,market);", "why,market,initialLimit);")
     if limit_cases:
         main = _nzd_limit_host_cases(limit_cases, numeric, booleans, baseline)
+    if strategy_cases:
+        main = _strategy_controls_cases(strategy_cases, numeric, booleans)
     cpp.write_text(header+config+'\n'.join(prototypes)+'\n'+'\n'.join(definitions)+wrapper+main)
     exe.write_bytes(b'');obj.write_bytes(b'') # manifest precreation audit covers native outputs
     vc=Path(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.43.34808')
@@ -6112,9 +6122,170 @@ int main(){try{
     assert built.returncode==0,built.stdout+built.stderr
     ran=subprocess.run([str(exe)],cwd=tmp_path,env=env,capture_output=True,text=True,timeout=30)
     assert ran.returncode==0,ran.stdout+ran.stderr
-    if not market_cases and not limit_cases:
+    if not market_cases and not limit_cases and not strategy_cases:
         assert 'entry=159.360 sl=159.300 tp=159.510' in ran.stdout
     print(ran.stdout.strip())
+
+
+# Only MT5 platform and durable storage are doubled. The handlers and placement
+# routines are extracted from the same production EA compiled for delivery.
+_TRADER_STRATEGY_HOST_DOUBLES = r"""
+const int _Period=15, MODE_EMA=1, PRICE_CLOSE=2, OBJ_TREND=3, OBJ_HLINE=4, OBJPROP_TYPE=5, OBJPROP_SELECTED=6,
+          TL_BUY_LIMIT=0, ORDER_TYPE_BUY_LIMIT=2, ORDER_TYPE_SELL_LIMIT=3, POSITION_TICKET=9,
+          INIT_SUCCEEDED=0, INIT_PARAMETERS_INCORRECT=1, INIT_FAILED=2, EMA_BOUNCE_FAST=0;
+const int64_t TRENDLINE_ARM_GENERATION_MAX=100000;
+int Direction=0, TrendEMAPeriod=20, FastEMAPeriod=9, SlowEMAPeriod=20, BounceReferenceEMA=1;
+int hTrend=-1, hFast=-1, hSlow=-1, lifecycleWrites=0;
+bool UseDualEMA=true, RequireNamedTrendline=false, EnforceOneTradeAtATime=true;
+string g_trendName, TrendlineObjectName;
+std::vector<int> initializedPeriods;
+struct ChartObject { string name; int type; double price; bool selected; };
+std::vector<ChartObject> objects;
+const ChartObject* findObject(const string& name) {
+  for (const auto& object : objects) if (object.name==name) return &object;
+  return nullptr;
+}
+int ObjectsTotal(int,int,int type) {
+  int count=0;
+  for (const auto& object : objects) if (type<0 || object.type==type) ++count;
+  return count;
+}
+string ObjectName(int,int index,int,int type) {
+  for (const auto& object : objects) if ((type<0 || object.type==type) && index--==0) return object.name;
+  return "";
+}
+int ObjectFind(int,const string& name){return findObject(name)?0:-1;}
+int ObjectGetInteger(int,const string& name,int property){
+  const auto* object=findObject(name);
+  if(!object)throw std::runtime_error("unknown chart object");
+  if(property==OBJPROP_TYPE)return object->type;
+  if(property==OBJPROP_SELECTED)return object->selected;
+  throw std::runtime_error("unknown object property");
+}
+double ObjectGetValueByTime(int,const string& name,int64_t time,int) {
+  if(time!=100)throw std::runtime_error("wrong chart bar");
+  const auto* object=findObject(name);return object?object->price:0.0;
+}
+int64_t iTime(const string& symbol,int timeframe,int shift) {
+  if(symbol!=_Symbol || timeframe!=_Period || shift!=0)throw std::runtime_error("wrong trendline chart context");
+  return 100;
+}
+double iClose(const string& symbol,int timeframe,int shift) {
+  if(symbol!=_Symbol || timeframe!=_Period || shift!=1)throw std::runtime_error("wrong EMA chart context");
+  return 159.560;
+}
+int iMA(const string& symbol,int timeframe,int period,int shift,int mode,int applied) {
+  if(symbol!=_Symbol || timeframe!=_Period || shift!=0 || mode!=MODE_EMA || applied!=PRICE_CLOSE)
+    throw std::runtime_error("wrong EMA initializer context");
+  initializedPeriods.push_back(period);
+  return period;
+}
+bool GetBufferValue(int handle,int buffer,int shift,double& price) {
+  if(buffer!=0 || (shift!=0 && shift!=1))throw std::runtime_error("wrong EMA buffer");
+  if(handle==20)price=159.350;
+  else if(handle==13)price=159.365;
+  else if(handle==9)price=159.370;
+  else return false;
+  return true;
+}
+struct TrendlineLifecycleRecord {
+  bool exists=false,working=false,replacing=false;
+  uint64_t ticket=0;
+  int64_t generation=0,blockedGeneration=0,expiration=0;
+  int orderType=0;
+  string orderComment;
+};
+bool LoadTrendlineLifecycleRecord(TrendlineLifecycleRecord& record,string&) {
+  record={};
+  return true;
+}
+bool PersistTrendlineLifecycleRecord(const TrendlineLifecycleRecord&,const TrendlineLifecycleRecord&,string&) {
+  ++lifecycleWrites;
+  return true;
+}
+int64_t TrendlineHighestHandled(const TrendlineLifecycleRecord& record){return record.generation;}
+string TrendlineOrderComment(int64_t){return "offline trendline";}
+string TraderControlActiveTrendlineFile(){return "offline active trendline";}
+void MaintainTrendlineLifecycle(string,bool){throw std::runtime_error("unexpected reconciliation");}
+bool FindAnyPendingLimitForEA(uint64_t&){return false;}
+bool PositionSelect(string){return busyPosition;}
+bool OrderSelect(uint64_t){return true;}
+const int ORDER_TIME_EXPIRATION=1;
+int64_t PositionGetInteger(int){return 0;}
+int64_t OrderGetInteger(int){return 0;}
+"""
+
+
+def _strategy_controls_cases(cases, numeric, booleans):
+    expected = {
+        "market": ("market", "159.562", ".12"),
+        "limit": ("limit", "159.360", ".12"),
+        "trendline": ("trendline", "159.360", ".12"),
+        "ema20": ("ema_bounce", "159.350", ".12"),
+        "ema13": ("ema_bounce", "159.365", ".11"),
+    }
+    fragments = []
+    for case, preset in cases.items():
+        action, entry, volume = expected[case]
+        settings = "\n".join(f"{key}={preset.get(key, '0')};" for key in numeric+booleans)
+        name = json.dumps(preset.get("TrendlineObjectName", ""))
+        strict = preset.get("RequireNamedTrendline", "false")
+        period = preset.get("TrendEMAPeriod", "20")
+        fragments.append(f"""
+        {settings}
+        DistanceSymbol={json.dumps(preset['DistanceSymbol'])}; PresetAccountType={json.dumps(preset['PresetAccountType'])};
+        TrendlineObjectName={name}; RequireNamedTrendline={strict}; Direction={preset.get('Direction','0')};
+        UseDualEMA={preset.get('UseDualEMA','true')}; TrendEMAPeriod={period};
+        StandardMarketSide={preset.get('StandardMarketSide','0')};
+        requests.clear(); g_ticket=0; g_portablePresetActionActivated=false; lifecycleWrites=0; initializedPeriods.clear();
+        incoming={{"",""}};
+        require(InitializeEmaBounce()==INIT_SUCCEEDED,"EMA initialization");
+        require(initializedPeriods=={('std::vector<int>{9,20}' if preset.get('UseDualEMA','true')=='true' else f'std::vector<int>{{{period}}}')},
+                "wrong EMA period initialized");
+        HandleDesktopTraderCommand();
+        require(requests.empty()&&lifecycleWrites==0&&!g_portablePresetActionActivated,"loading armed or placed");
+        observe("{case}","{action}",{entry},{volume});
+        """)
+        if case == "trendline":
+            fragments.append("""
+            objects[0].name="alex Trend  One"; // Case-only rename.
+            block("missing","Named trendline is missing or was renamed");
+            objects[0].name=TrendlineObjectName; objects[0].type=OBJ_HLINE;
+            block("wrong-type","Named object is not an MT5 trendline");
+            objects[0].type=OBJ_TREND;
+            RequireNamedTrendline=false;
+            requests.clear(); g_ticket=0;
+            observe("legacy selected","trendline",159.370,.12);
+            """)
+    return r"""
+void require(bool ok,const string& reason){if(!ok)throw std::runtime_error(reason);}
+void observe(const string& scenario,const string& action,double entry,double volume) {
+  incoming={scenario,action};HandleDesktopTraderCommand();
+  require(lastResult.outcome=="accepted" && requests.size()==1,scenario+": "+lastResult.reason);
+  const auto &request=requests.front();
+  require(request.symbol=="USDJPY.a" && std::abs(request.entry-entry)<1e-8 &&
+          std::abs(request.volume-volume)<1e-8 && std::abs(request.sl-(entry-.060))<1e-8 &&
+          std::abs(request.tp-(entry+.150))<1e-8,scenario+": incorrect prepared request");
+  if(action=="trendline") require(g_trendName==(RequireNamedTrendline?TrendlineObjectName:"Other Line"),"wrong chart object");
+  std::cout<<scenario<<" "<<(action=="trendline"?g_trendName:action)<<" "<<std::fixed<<std::setprecision(3)
+           <<request.entry<<" SL "<<request.sl<<" TP "<<request.tp<<" lots "<<request.volume<<std::endl;
+  HandleDesktopTraderCommand();
+  require(requests.size()==1,scenario+": duplicate request");
+}
+void block(const string& scenario,const string& reason) {
+  requests.clear();lifecycleWrites=0;g_ticket=0;
+  incoming={scenario,"trendline"};HandleDesktopTraderCommand();
+  require(requests.empty()&&lifecycleWrites==0&&lastResult.outcome=="blocked"&&
+          lastResult.reason.find(reason)!=string::npos,scenario+": "+lastResult.reason);
+  std::cout<<scenario<<": "<<lastResult.reason<<std::endl;
+}
+int main(){try{
+  linearValuation=true;tickValue=1.5;bid=159.551;ask=159.562;
+  objects={{"Alex Trend  One",OBJ_TREND,159.360,false},{"Other Line",OBJ_TREND,159.370,true}};
+""" + "".join(fragments) + r"""
+  return 0;
+}catch(const std::exception& error){std::cerr<<error.what();return 1;}}
+"""
 
 
 def _nzd_limit_host_cases(presets, numeric, booleans, baseline):
@@ -6297,6 +6468,163 @@ def _market_controls_cases(cases, numeric, booleans):
         if(lastResult.outcome!="blocked" || requests.size()!=1)throw std::runtime_error("invalid stop sent");
         """)
     return 'int main(){try{linearValuation=true;'+''.join(body)+'return 0;}catch(const std::exception&e){std::cerr<<e.what();return 1;}}'
+
+
+def test_pepperstone_strategy_presets_in_edge(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    service = master_service
+    folder = tmp_path / "Presets"
+    folder.mkdir()
+    monkeypatch.setattr(service, "_PEPPERSTONE_PRESETS_FOLDER", folder)
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50")
+    exported = []
+    real_export = service._build_pepperstone_trader_set
+
+    def capture(payload):
+        content, filename = real_export(payload)
+        exported.append((dict(payload), content.encode("utf-8"), filename))
+        return content, filename
+
+    monkeypatch.setattr(service, "_build_pepperstone_trader_set", capture)
+    cases = {}
+
+    def exercise(evaluate, click, wait_for, downloads):
+        def select(group, value):
+            evaluate(f"document.querySelector('#{group} [data-v={json.dumps(value)}]').click()")
+
+        def change(element, value, event="input"):
+            evaluate(f"""(() => {{
+                const field = document.getElementById({json.dumps(element)});
+                field.value = {json.dumps(value)};
+                field.dispatchEvent(new Event({json.dumps(event)}, {{bubbles:true}}));
+            }})()""")
+
+        def strategy(value):
+            change("calc-pepperstone-strategy", value, "change")
+
+        def visible(element):
+            return evaluate(f"getComputedStyle(document.getElementById({json.dumps(element)})).display !== 'none'")
+
+        def calculate():
+            click("calc-quote")
+            wait_for("!document.getElementById('calc-pepperstone-set').disabled")
+
+        def save(case):
+            before = set(folder.iterdir())
+            click("calc-pepperstone-set")
+            wait_for("document.getElementById('calc-success').textContent.includes('Saved Pepperstone_Trader_')")
+            (path,) = set(folder.iterdir()) - before
+            payload, content, filename = exported[-1]
+            expected_stem = Path(filename).stem
+            assert path.name == filename or re.fullmatch(re.escape(expected_stem) + r"_\d+\.set", path.name)
+            assert path.read_bytes() == content
+            cases[case] = _parse_set_file(path.read_text(encoding="utf-8"))
+            assert cases[case]["OrdersEnabled"] == cases[case]["UseDesktopTraderControls"] == "true"
+            assert cases[case]["TrendlineArmGeneration"] == "0"
+            assert cases[case]["SL_PriceDistance"] == "0.06"
+            assert cases[case]["TP_PriceDistance"] == "0.15"
+            return payload
+
+        assert not visible("pepperstone-strategy-wrap")
+        select("asset-toggle", "fx")
+        select("broker-toggle", "pepperstone")
+        select("account-toggle", "demo")
+        select("risk-toggle", "fixed_aud")
+        select("pepperstone-account-type-toggle", "standard")
+        for field, value in [("calc-symbol", "USD_JPY"), ("calc-sl-ticks", "60"), ("calc-risk", "10"),
+                             ("calc-tp-ticks", "150")]:
+            change(field, value)
+        change("calc-target-mode", "ticks", "change")
+        wait_for("document.getElementById('calc-canonical-symbol').textContent.includes('USD_JPY')")
+        assert visible("pepperstone-strategy-wrap") and visible("calc-order-type-wrap")
+        assert evaluate("document.getElementById('calc-pepperstone-strategy').value") == "none"
+        assert not visible("pepperstone-trendline-wrap") and not visible("pepperstone-ema-wrap")
+        calculate()
+        assert not list(folder.iterdir())
+        market_payload = save("market")
+        assert cases["market"]["Strategy"] == "3"
+        assert cases["market"]["StandardMarketExecutionToken"].startswith("mkt_")
+        legacy_payload = dict(market_payload)
+        legacy_payload.pop("pepperstone_strategy")
+        assert _parse_set_file(real_export(legacy_payload)[0])["Strategy"] == "3"
+
+        select("order-toggle", "limit")
+        change("calc-limit", "159.360")
+        calculate()
+        save("limit")
+        assert cases["limit"]["Strategy"] == "2" and cases["limit"]["StandardLimitEntryPrice"] == "159.36"
+
+        strategy("trendline")
+        assert visible("pepperstone-trendline-wrap") and not visible("pepperstone-ema-wrap")
+        assert not visible("limit-wrap") and not visible("calc-order-type-wrap")
+        change("calc-pepperstone-trendline-name", "Alex Trend  One")
+        calculate()
+        before = set(folder.iterdir())
+        evaluate("""window.originalFetch=window.fetch;
+            window.fetch=async(...args)=>{
+                const response=await window.originalFetch(...args);
+                if(args[0]==='/api/calculator/pepperstone-set/local')
+                    await new Promise(resolve=>window.releasePreset=resolve);
+                return response;
+            }""")
+        click("calc-pepperstone-set")
+        wait_for("typeof window.releasePreset==='function'")
+        assert set(folder.iterdir()) == before
+        strategy("ema_bounce")
+        evaluate("""(async()=>{window.fetch=window.originalFetch;window.releasePreset();
+                    await new Promise(resolve=>setTimeout(resolve,250));})()""")
+        assert evaluate("document.getElementById('calc-pepperstone-set').disabled")
+        assert set(folder.iterdir()) == before
+
+        strategy("trendline")
+        calculate()
+        change("calc-pepperstone-trendline-name", "Other Line")
+        assert evaluate("document.getElementById('calc-pepperstone-set').disabled")
+        change("calc-pepperstone-trendline-name", "Alex Trend  One")
+        calculate()
+        trend_payload = save("trendline")
+        assert cases["trendline"]["Strategy"] == "0"
+        assert cases["trendline"]["RequireNamedTrendline"] == "true"
+        assert cases["trendline"]["TrendlineObjectName"] == "Alex Trend  One"
+        assert cases["trendline"]["Direction"] == "0"
+        for value, status in [("alex Trend  One", 409), ("Alex\nStrategy=3", 400), ("", 400)]:
+            with pytest.raises(service.HTTPException) as error:
+                real_export(dict(trend_payload, pepperstone_trendline_name=value))
+            assert error.value.status_code == status
+
+        strategy("ema_bounce")
+        assert visible("pepperstone-ema-wrap") and not visible("pepperstone-trendline-wrap")
+        assert evaluate("document.getElementById('calc-side-heading').textContent") == "Estimate side"
+        calculate()
+        save("ema20")
+        select("pepperstone-account-type-toggle", "razor")
+        calculate()
+        change("calc-pepperstone-ema-period", "13")
+        assert evaluate("document.getElementById('calc-pepperstone-set').disabled")
+        calculate()
+        ema_payload = save("ema13")
+        for case, period in [("ema20", "20"), ("ema13", "13")]:
+            assert cases[case]["Strategy"] == "1"
+            assert cases[case]["UseDualEMA"] == "false" and cases[case]["TrendEMAPeriod"] == period
+            assert cases[case]["RequireNamedTrendline"] == "false"
+        assert Decimal(cases["ema13"]["CommissionPerLotPerSide"]) == Decimal("3.50")
+        for value, status in [("20", 409), ("3.5", 400), ("0", 400), ("2147483648", 400)]:
+            with pytest.raises(service.HTTPException) as error:
+                real_export(dict(ema_payload, pepperstone_ema_period=value))
+            assert error.value.status_code == status
+        # A repeat save of the unchanged bound quote reuses its existing file.
+        before = set(folder.iterdir())
+        click("calc-pepperstone-set")
+        wait_for("document.getElementById('calc-success').textContent.includes('Saved Pepperstone_Trader_')")
+        assert set(folder.iterdir()) == before and len(list(folder.iterdir())) == 5
+        assert not list(downloads.iterdir())
+        assert len(service._pepperstone_local_tracker_rows()) == 2  # None Market and Limit only.
+        strategy("none")
+        assert visible("calc-order-type-wrap") and visible("limit-wrap")
+        assert evaluate("document.getElementById('calc-side-heading').textContent") == "Side"
+
+    _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference,
+                                         limit_fill=False, local_preset_save=exercise)
+    _run_trader_controls_host(tmp_path, cases["limit"], strategy_cases=cases)
 
 
 def test_pepperstone_local_preset_save_in_edge(monkeypatch, tmp_path, pepperstone_weekend_reference):

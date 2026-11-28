@@ -284,7 +284,7 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert 'while(!portableAutoFit && riskWorst > riskMax' in sizing
     assert 'CalcBufferedRiskForVolume' in sizing and 'candidateRisk <= riskMax' in sizing
     assert 'MathLog10(step)' not in sizing
-    assert '#property version   "2.57"' in trader and 'EA_VERSION = "2.57"' in trader
+    assert '#property version   "2.58"' in trader and 'EA_VERSION = "2.58"' in trader
 
     auto=trader.split('bool ComputeAutoTP_NetRR(',1)[1].split('bool IsLimitPriceValid(',1)[0]
     standard=auto.split('if(standardFx)',1)[1].split('double commissionRT =',1)[0]

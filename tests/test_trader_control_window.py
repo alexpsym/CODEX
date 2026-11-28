@@ -194,7 +194,7 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
         launch = _function(trader, "bool LaunchDesktopTraderControls")
         owner = _function(trader, "string TraderControlOwnerId")
         executable = _function(trader, "string TraderControlLaunchExecutable")
-        assert '#property version   "2.57"' in trader and 'EA_VERSION = "2.57"' in trader
+        assert '#property version   "2.58"' in trader and 'EA_VERSION = "2.58"' in trader
         assert 'const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;' in trader
         assert '" --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId)' in launch
         assert "TRADER_CONTROL_SW_SHOWMINNOACTIVE" in launch
@@ -478,7 +478,7 @@ def test_controls_close_only_when_verified_owning_terminal_exits(
     process_identity = _function(trader, "bool TraderControlTerminalProcessIdentity")
     launch = _function(trader, "bool LaunchDesktopTraderControls")
     status = _function(trader, "bool WriteDesktopTraderStatus")
-    assert '#property version   "2.57"' in trader and 'EA_VERSION = "2.57"' in trader
+    assert '#property version   "2.58"' in trader and 'EA_VERSION = "2.58"' in trader
     assert "GetCurrentProcessId()" in process_identity
     assert "GetCurrentProcess()" in process_identity
     assert "GetProcessTimes(processHandle" in process_identity
@@ -835,7 +835,11 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert "StandardLimitSide == STD_BUY_LIMIT" in limit
     assert "StandardLimitEntryPrice" in limit
 
-    assert resolve.index("selectedCount == 1") < resolve.index("TrendlineObjectName") < resolve.index("validCount == 1")
+    assert 'UsePriceDistanceInputs && RequireNamedTrendline' in resolve
+    assert 'candidate != TrendlineObjectName' in resolve
+    assert resolve.index("Named trendline is missing or was renamed") < resolve.index("selectedCount == 1")
+    assert resolve.index("selectedCount == 1") < resolve.index("IsValidDesktopTrendline(TrendlineObjectName)") < resolve.index("validCount == 1")
+    assert "InitializeEmaBounce()" in init
     assert "TrendlineHighestHandled(record) + 1" in trendline
     assert "PersistTrendlineLifecycleRecord(record, armed, why)" in trendline
     assert trendline.index("PersistTrendlineLifecycleRecord(record, armed, why)") < trendline.index(
@@ -858,7 +862,7 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.49"' in trader and 'EA_VERSION = "2.49"' in trader
+    assert '#property version   "2.58"' in trader and 'EA_VERSION = "2.58"' in trader
 
 
 def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_token() -> None:
