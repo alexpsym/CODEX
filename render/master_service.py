@@ -29888,7 +29888,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <tbody>
               <tr><th><label for="calc-sl-ticks">Stop-loss ticks</label></th><td><input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></td></tr>
               <tr><th><label for="calc-target-mode">Target mode</label></th><td><select id="calc-target-mode"><option value="rr" selected>Net R</option><option value="ticks">Manual TradingView target ticks</option></select></td></tr>
-              <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
+              <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/><div id="calc-commission-chart-r" role="status" hidden></div></td></tr>
               <tr id="tp-ticks-wrap" style="display:none"><th><label for="calc-tp-ticks">Target ticks</label></th><td><input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></td></tr>
               <tr id="chart-tick-size-wrap" style="display:none"><th>TradingView chart tick size</th><td><input id="calc-chart-tick-auto" type="text" readonly aria-label="Automatically resolved TradingView chart tick size" value="Resolving…"/><div id="calc-chart-tick-source" class="muted">Automatic symbol profile</div><label class="muted"><input id="calc-chart-tick-size-override-enabled" type="checkbox"/> Advanced override for another chart feed</label><input id="calc-chart-tick-size" type="number" min="0" step="any" placeholder="Optional positive chart increment" disabled style="display:none"/><div class="muted">Stop and target inputs remain TradingView ticks. Pepperstone GBPUSD uses the measured 0.00001 chart step automatically.</div></td></tr>
               <tr id="bybit-expiry-wrap" style="display:none"><th>Local entry expiry</th><td>
@@ -32233,12 +32233,38 @@ def calculator_pepperstone_set_local(request: Request, payload: Dict[str, object
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
+def _commission_chart_r(entry, stop, target, commission_distance):
+    stop_distance = abs(entry - stop)
+    if stop_distance <= 0 or commission_distance <= 0:
+        return None
+    return {
+        "chart_r": format(abs(target - entry) / stop_distance, ".2f"),
+        "commission_r": format(commission_distance / stop_distance, ".2f"),
+    }
+
+
+def _bybit_net_r_distance(entry, stop_distance, side, desired_net_reward, spread, open_fee, close_fee, rr):
+    distance = stop_distance * rr
+    for _ in range(4):
+        target = entry + distance if side == "buy" else entry - distance
+        fees = spread + entry * open_fee + abs(target) * close_fee
+        distance = desired_net_reward + fees
+    return distance
+
+
+@app.post("/api/calculator/commission-preview")
+async def calculator_commission_preview(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    # Never use the webhook proxy or mutate pending webhooks from a preview.
+    payload = dict(payload, webhook="no")
+    return await _calculator_quote_impl(request, payload, _commission_preview=True)
+
+
 @app.post("/api/calculator/quote")
 async def calculator_quote(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
     return await _calculator_quote_impl(request, payload)
 
 
-async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, object]] = None, *, _include_trendline_snapshot: bool = False, _max_quote_age_ms: int = 60_000) -> JSONResponse:
+async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, object]] = None, *, _include_trendline_snapshot: bool = False, _max_quote_age_ms: int = 60_000, _commission_preview: bool = False) -> JSONResponse:
     if isinstance(request, dict) and (not isinstance(payload, dict) or not payload):
         payload = request
         request = Request(
@@ -32336,6 +32362,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             if tp_ticks <= 0:
                 raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
 
+        if _commission_preview and (
+            target_mode != "rr" or payload.get("target_basis") == "price_r"
+            or (asset == "fx" and (broker != "pepperstone" or _pepperstone_account_type(payload) != "razor"))
+        ):
+            return JSONResponse({"commission_chart_r": None})
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
         if asset == "fx" and broker == "pepperstone" and webhook_enabled:
             raise HTTPException(status_code=400, detail="Pepperstone .set export does not use webhook mode. Select Webhook=No and download the MT5 .set file.")
@@ -32573,12 +32604,9 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             price_r = _include_trendline_snapshot and payload.get("target_basis") == "price_r"
             if target_mode == "rr" and rr_requested is not None and not price_r:
                 desired_net_reward = loss_per_unit * rr_requested
-                target_distance = stop_distance * rr_requested
-                for _ in range(4):
-                    tp_probe = (entry + target_distance) if side == "buy" else (entry - target_distance)
-                    close_fee_cost = abs(tp_probe) * close_fee
-                    fee_buffer = spread_quote + (entry * open_fee) + close_fee_cost
-                    target_distance = desired_net_reward + fee_buffer
+                target_distance = _bybit_net_r_distance(
+                    entry, stop_distance, side, desired_net_reward, spread_quote, open_fee, close_fee, rr_requested,
+                )
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
                 fee_buffer = spread_quote + (entry * open_fee) + (abs(tp) * close_fee)
                 net_reward_per_unit = target_distance - fee_buffer
@@ -32652,11 +32680,21 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 )
             except BybitPreSubmitValidationError as exc:
                 raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message, "debug": exc.debug}) from exc
+            commission_hint = None
+            if requested_rr_net is not None and (open_fee > 0 or close_fee > 0):
+                price_risk = abs(entry - sl) + spread_quote
+                distance_without_fees = (price_risk * rr_requested) + spread_quote
+                commission_hint = _commission_chart_r(
+                    snapped_entry, snapped_sl, snapped_tp, target_distance - distance_without_fees,
+                )
+            if _commission_preview:
+                return JSONResponse({"commission_chart_r": commission_hint})
             response_payload: Dict[str, object] = {
                 "asset": "crypto",
                 "broker": "bybit",
                 "venue": "Bybit",
                 "resolved_venue": "Bybit",
+                "commission_chart_r": commission_hint,
                 "symbol": resolved_symbol,
                 "tick_size": _fmt_dec(tick_size),
                 "last_price": _fmt_dec(last),
@@ -33193,8 +33231,19 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                             },
                         },
                     )
+            commission_hint = None
+            if target_mode == "rr" and commission_per_unit_aud > 0 and units > 0:
+                # At the same size and conversions, commission increases 1R at SL
+                # and must be recovered once more in the gross target at TP.
+                commission_distance = (rr_requested + 1) * commission_per_unit_aud / gain_factor
+                commission_hint = _commission_chart_r(
+                    Decimal(_fmt_dec_by_precision(entry, tick_size)), sl, tp, commission_distance,
+                )
+            if _commission_preview:
+                return JSONResponse({"commission_chart_r": commission_hint})
             spread_home = spread_quote * loss_factor * units
             response_payload = {
+                    "commission_chart_r": commission_hint,
                     "asset": "fx",
                     "broker": broker,
                     "pricing_source": prices.get("pepperstone_source") or {"label": "OANDA reference" if is_pepperstone else "OANDA", "quote_timestamp": row.get("time")},

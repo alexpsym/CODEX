@@ -157,7 +157,11 @@ def test_pepperstone_limit_fill_on_calculator_dashboard(monkeypatch, tmp_path, p
     _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=True)
 
 
-def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill, market_downloads=None, local_preset_save=None):
+def test_pepperstone_commission_preview_native_tab(monkeypatch, tmp_path, pepperstone_weekend_reference):
+    _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, limit_fill=False, commission_preview=True)
+
+
+def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_reference, *, limit_fill, market_downloads=None, local_preset_save=None, commission_preview=False):
     """Actual isolated pages/HTTP/production handlers; no production service or broker."""
     import http.server
     import threading
@@ -202,6 +206,8 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                 elif path=='/api/calculator/instrument':
                     query['estimate_razor_from_standard']=query.get('estimate_razor_from_standard')=='true'
                     value=json.loads(asyncio.run(service.calculator_instrument(**query)).body)
+                elif path=='/api/calculator/commission-preview':
+                    value=json.loads(asyncio.run(service.calculator_commission_preview(service.Request({"type":"http","scheme":"http","path":path,"headers":[],"server":self.server.server_address}), payload)).body)
                 elif path=='/api/calculator/quote':
                     import faulthandler
                     started=time.monotonic();print('FIXTURE_QUOTE_START',json.dumps(payload))
@@ -250,8 +256,8 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                 self.send_header('Content-Type',mime+'; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.send_header('Connection','close');self.close_connection=True;self.end_headers();self.wfile.write(raw);self.wfile.flush()
             except Exception as exc:
                 print('FIXTURE_HTTP_ERROR',path,time.monotonic()-received,repr(exc))
-                if isinstance(exc,ConnectionError) and path=='/api/calculator/instrument':
-                    cancelled_reads.append(repr(exc))  # Superseded lookup; never a quote/save/export error.
+                if isinstance(exc,ConnectionError) and path in {'/api/calculator/instrument','/api/calculator/commission-preview'}:
+                    cancelled_reads.append(repr(exc))  # Cancelled read; any quote/save/export error still fails.
                 else:failures.append(repr(exc))
                 if not isinstance(exc,ConnectionError):
                     raw=json.dumps(dict(detail=str(exc))).encode();self.send_response(500);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -339,6 +345,27 @@ def _exercise_pepperstone_calculator_page(tmp_path, pepperstone_weekend_referenc
                     document.querySelector('#setup-toggle [data-v="Pullback"]').click();
                 })()""")
             wait_for("document.getElementById('calc-canonical-symbol').textContent.includes('USD_JPY')")
+            if commission_preview:
+                evaluate("""(() => {
+                    document.querySelector('#pepperstone-account-type-toggle [data-v="razor"]').click();
+                    document.getElementById('calc-rr').focus();
+                })()""")
+                for event_type in ("rawKeyDown", "keyUp"):
+                    call("Input.dispatchKeyEvent", dict(type=event_type, key="Tab", code="Tab", windowsVirtualKeyCode=9))
+                wait_for("!document.getElementById('calc-commission-chart-r').hidden")
+                hint = evaluate("document.getElementById('calc-commission-chart-r').textContent")
+                assert service._pepperstone_local_tracker_rows() == []
+                assert not service._PEPPERSTONE_QUOTE_SNAPSHOTS
+                assert evaluate("document.getElementById('calc-pepperstone-set').disabled")
+                assert ('POST','/api/calculator/quote') not in events
+                click('calc-quote')
+                wait_for("document.getElementById('calc-pepperstone-set').disabled===false")
+                assert evaluate("document.getElementById('calc-commission-chart-r').textContent") == hint
+                assert evaluate("!document.getElementById('calc-results-disclosure').open")
+                assert len(service._pepperstone_local_tracker_rows()) == 1
+                assert not failures and not downloads
+                print("Native Edge Tab and Calculate:", hint.encode("ascii", "backslashreplace").decode())
+                return
             click('calc-quote')
             wait_for("document.getElementById('calc-pepperstone-set').disabled===false")
             rows=service._pepperstone_local_tracker_rows();assert len(rows)==1 and not rows[0]['execution_verified'];identity=rows[0]['id']
@@ -2416,7 +2443,7 @@ def test_oanda_nzdusd_35_ticks_fixed_aud_10_demo_flat_account_quotes_successfull
     assert body["symbol"] == "NZD_USD"
     assert float(body["estimated_initial_margin_home"]) < 1513.09
 
-def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch, pepperstone_account_fixture) -> None:
     saved_context = {}
     invalidations = {"count": 0}
     monkeypatch.setattr(master_service, "_upsert_bybit_demo_calc_context", lambda payload, **_kwargs: saved_context.update(payload))
@@ -2427,13 +2454,34 @@ def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pyt
 
     async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
-            return {"result": {"list": [{"priceFilter": {"tickSize": "0.0001"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
-        return {"result": {"list": [{"bid1Price": "1.0000", "ask1Price": "1.0002", "lastPrice": "1.0001"}]}}
+            return {"retCode": 0, "result": {"list": [{"symbol": _params["symbol"], "priceFilter": {"tickSize": "0.0001"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
+        return {"retCode": 0, "result": {"list": [{"symbol": _params["symbol"], "bid1Price": "1.0000", "ask1Price": "1.0002", "lastPrice": "1.0001"}]}}
 
     monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
     monkeypatch.setattr(master_service, "_bybit_signed_get", lambda **_kwargs: asyncio.sleep(0, result={"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}))
     monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda *_args, **_kwargs: asyncio.sleep(0, result={"available_usdt": "1000", "total_equity": "1000"}))
 
+    monkeypatch.setenv("CALCULATOR_BYBIT_TAKER_FEE_FALLBACK", "0.0006")
+    request = {"asset": "crypto", "account": "demo", "symbol": "LAB", "side": "sell",
+               "order_type": "market", "risk_mode": "percent", "risk_value": 1,
+               "stop_loss_ticks": 10, "risk_reward": "3.5", "webhook": "yes"}
+    http_request = master_service.Request({"type": "http", "scheme": "http", "path": "/api/calculator/commission-preview", "headers": [], "server": ("localhost", 80)})
+    preview = json.loads(asyncio.run(master_service.calculator_commission_preview(http_request, request)).body)
+    assert saved_context == {} and invalidations["count"] == 0
+    quote = json.loads(asyncio.run(master_service.calculator_quote(dict(request, webhook="no"))).body)
+    hint = preview["commission_chart_r"]
+    assert quote["commission_chart_r"] == hint
+    entry, stop, target = (Decimal(quote[k]) for k in ("entry_price", "stop_price", "target_price"))
+    stop_distance = abs(entry - stop)
+    assert hint["chart_r"] == format(abs(entry - target) / stop_distance, ".2f")
+    fee, spread, rr = map(Decimal, ("0.0006", "0.0002", "3.5"))
+    # At the same size the no-fee target still covers spread at SL and TP.
+    before_fees = (stop_distance + spread) * rr + spread
+    gross = ((stop_distance + spread + fee * (entry + stop)) * rr + spread + 2 * entry * fee) / (1 + fee)
+    assert hint["commission_r"] == format((gross - before_fees) / stop_distance, ".2f")
+    assert invalidations["count"] == 1
+    saved_context.clear()
+    invalidations["count"] = 0
     response = asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "demo", "symbol": "LAB", "side": "sell", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20, "pattern": "channel"}))
     assert isinstance(response, master_service.JSONResponse)
     body = json.loads(response.body.decode("utf-8"))
@@ -5007,6 +5055,36 @@ def pepperstone_account_fixture(monkeypatch, tmp_path):
     monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(tmp_path / "no-broker-metadata.json"))
     monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "4.20")
     return service._upsert_calculator_trade_context
+
+
+def test_pepperstone_commission_chart_r_preview(monkeypatch, tmp_path, pepperstone_account_fixture):
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "6.00")
+    saved = []
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda data, **kwargs: saved.append(data))
+    request = _pepperstone_quote_payload(symbol="GBPUSD", side="buy", account="demo",
+        pepperstone_account_type="razor", risk_mode="fixed_aud", risk_value="10.20",
+        chart_tick_size="0.00001", stop_loss_ticks="60", target_mode="rr", risk_reward="3.50")
+
+    http_request = master_service.Request({"type": "http", "scheme": "http", "path": "/api/calculator/commission-preview", "headers": [], "server": ("localhost", 80)})
+    def preview(**changes):
+        result = asyncio.run(master_service.calculator_commission_preview(http_request, dict(request, **changes)))
+        return json.loads(result.body)
+
+    expected = {"chart_r": "4.10", "commission_r": "0.60"}
+    assert preview(webhook="yes", pending_webhook_id="must-not-mutate") == {"commission_chart_r": expected}
+    assert preview(pepperstone_account_type="standard") == {"commission_chart_r": None}
+    assert preview(target_mode="ticks", take_profit_ticks="90") == {"commission_chart_r": None}
+    assert preview(target_basis="price_r") == {"commission_chart_r": None}
+    assert not saved and master_service._PEPPERSTONE_QUOTE_SNAPSHOTS == {}
+    quote = json.loads(asyncio.run(master_service.calculator_quote(request)).body)
+    assert quote["commission_chart_r"] == expected
+    assert Decimal(quote["quantity"]) == Decimal("10000")
+    assert Decimal(quote["estimated_total_loss_aud"]) == Decimal("10.20")
+    assert Decimal(quote["estimated_reward_aud"]) + Decimal(quote["estimated_commission_aud"]) == Decimal("36.90")
+    assert len(saved) == 1
+    monkeypatch.setenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "0")
+    assert preview() == {"commission_chart_r": None}
 
 
 def test_pepperstone_account_quote_costs(monkeypatch, tmp_path, pepperstone_account_fixture):

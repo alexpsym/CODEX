@@ -326,6 +326,89 @@
     submitBtn.textContent = SUBMIT_LABEL;
   }
 
+  let commissionPreviewSeq = 0;
+  let commissionPreviewTimer;
+  let commissionPreviewController;
+  let commissionPreviewActive = false;
+
+  function renderCommissionChartR(hint) {
+    const line = $('calc-commission-chart-r');
+    if (!line) return;
+    line.hidden = !hint;
+    line.textContent = hint
+      ? 'Estimated chart target ' + hint.chart_r + 'R \u00b7 Includes +' + hint.commission_r + 'R for commission'
+      : '';
+  }
+
+  function resetCommissionPreview() {
+    commissionPreviewSeq += 1;
+    clearTimeout(commissionPreviewTimer);
+    commissionPreviewController?.abort();
+    renderCommissionChartR(null);
+  }
+
+  function calculationInputs() {
+    const inputs = {
+      asset: state.asset,
+      account: state.account,
+      side: state.side,
+      order_type: state.order_type,
+      risk_mode: state.risk_mode,
+      symbol: currentSymbolInput(),
+      broker: state.asset === 'crypto' ? 'bybit' : state.broker,
+      entry_price: $('calc-limit').value,
+      stop_loss_ticks: $('calc-sl-ticks').value,
+      target_mode: $('calc-target-mode')?.value || 'rr',
+      risk_value: $('calc-risk').value,
+    };
+    if (inputs.target_mode === 'ticks') inputs.take_profit_ticks = $('calc-tp-ticks')?.value || '';
+    else inputs.risk_reward = $('calc-rr').value;
+    if (isPepperstoneFx()) {
+      inputs.pepperstone_account_type = state.pepperstone_account_type;
+      inputs.estimate_razor_from_standard = razorEstimateEnabled();
+      if ($('calc-chart-tick-size-override-enabled')?.checked) {
+        const override = ($('calc-chart-tick-size')?.value || '').trim();
+        if (override) inputs.chart_tick_size = override;
+      }
+    }
+    return inputs;
+  }
+
+  function commissionPreviewInputs() {
+    const payload = calculationInputs();
+    if (payload.target_mode !== 'rr' || !payload.symbol ||
+        !(Number(payload.risk_reward) > 0 && Number(payload.stop_loss_ticks) > 0 && Number(payload.risk_value) > 0) ||
+        (payload.order_type === 'limit' && !(Number(payload.entry_price) > 0))) return null;
+    if (payload.broker !== 'bybit' && !(isPepperstoneFx() && state.pepperstone_account_type === 'razor')) return null;
+    return payload;
+  }
+
+  function scheduleCommissionPreview(delay) {
+    resetCommissionPreview();
+    if (!$('calc-commission-chart-r') || !commissionPreviewInputs()) return;
+    const seq = commissionPreviewSeq;
+    commissionPreviewTimer = setTimeout(async () => {
+      if (seq !== commissionPreviewSeq || state.quote || state.quoteStatus === 'calculating') return;
+      const payload = commissionPreviewInputs();
+      if (!payload) return;
+      const controller = new AbortController();
+      commissionPreviewController = controller;
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const result = await post('/api/calculator/commission-preview', payload, { signal: controller.signal });
+        if (seq === commissionPreviewSeq && !state.quote &&
+            JSON.stringify(payload) === JSON.stringify(commissionPreviewInputs())) {
+          renderCommissionChartR(result.commission_chart_r);
+        }
+      } catch (_err) {
+        // Missing inputs, unavailable pricing and cancellation leave the hint empty.
+      } finally {
+        clearTimeout(timeout);
+        if (commissionPreviewController === controller) commissionPreviewController = null;
+      }
+    }, delay);
+  }
+
   function invalidateQuote({ clearResults = true, status = 'stale', reason = '' } = {}) {
     syncExpiryControls();
     if (state.quoteStatus === 'calculating' && status !== 'calculating' && status !== 'error') {
@@ -341,6 +424,8 @@
     clearPepperstoneSetDownload();
     state.quote = null;
     state.quoteStatus = status;
+    if (status === 'calculating' || status === 'error' || !commissionPreviewActive) resetCommissionPreview();
+    else scheduleCommissionPreview(350);
     const visible = status === 'idle' ? false : state.hasCalculatedOnce;
     setSubmitState({ visible, enabled: false, reason, stateName: status });
     if (status === 'calculating') setQuoteStatus('Calculating position…');
@@ -573,6 +658,8 @@
   }
 
   function renderQuote(q) {
+    resetCommissionPreview();
+    renderCommissionChartR(q.commission_chart_r);
     const currency = q.display_currency || q.account_currency || 'AUD';
     const fee = Number(q.estimated_fees_or_spread);
     const loss = Number(q.estimated_total_loss);
@@ -1723,6 +1810,10 @@
     invalidateQuote({ clearResults: false });
     refreshStopContext();
   });
+  $('calc-rr')?.addEventListener('blur', () => {
+    commissionPreviewActive = true;
+    if (!state.quote && state.quoteStatus !== 'calculating') scheduleCommissionPreview(0);
+  });
   $('calc-target-mode')?.addEventListener('change', () => {
     syncTargetUi();
     invalidateQuote({ clearResults: false });
@@ -1792,13 +1883,9 @@
       const submittedSymbol = currentSymbolInput();
       const payload = {
         ...state,
+        ...calculationInputs(),
         submitted_symbol: submittedSymbol,
         symbol: state.resolvedSymbol || submittedSymbol,
-        broker: state.asset === 'crypto' ? 'bybit' : state.broker,
-        entry_price: $('calc-limit').value,
-        stop_loss_ticks: $('calc-sl-ticks').value,
-        target_mode: $('calc-target-mode')?.value || 'rr',
-        risk_value: $('calc-risk').value,
         webhook: state.webhook_mode,
         test: state.test_mode,
         setup: state.setup,
@@ -1810,14 +1897,9 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
-      payload.estimate_razor_from_standard=razorEstimateEnabled();
-      if (!isPepperstoneFx()) {delete payload.pepperstone_account_type;delete payload.estimate_razor_from_standard;}
+      if (!isPepperstoneFx()) delete payload.pepperstone_account_type;
       delete payload.chartTickOverrides;
       delete payload.activeChartTickSymbol;
-      if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
-      else payload.risk_reward = $('calc-rr').value;
-      const chartTickOverride = $('calc-chart-tick-size')?.value;
-      if (isPepperstoneFx() && $('calc-chart-tick-size-override-enabled')?.checked && String(chartTickOverride || '').trim()) payload.chart_tick_size = String(chartTickOverride).trim();
       delete payload.quotePrewarmStatus;
       delete payload.quotePrewarmPromise;
       renderRequestSummary(payload);
